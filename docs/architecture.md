@@ -12,6 +12,7 @@ src/adapters/codex.ts   — task-to-Codex protocol mapping
 src/adapters/rpc.ts     — isolated stdio protocol connection per run
 src/adapters/demo.ts    — explicitly simulated experience
 src/config.ts          — owner and project allowlist validation
+src/setup-feishu.ts    — official new-app authorization and private local configuration
 src/cli.ts             — terminal demo/local mode, diagnostics and service lifecycle
 ```
 
@@ -69,6 +70,8 @@ When several requests are pending, approvals take display precedence over questi
 10. Keep the authentication and billing distinction explicit. Check ChatGPT authentication before inference; no fallback provider path exists.
 
 ## Protocol and trust boundaries
+
+Onboarding is an explicit operator command, separate from runtime message processing. `setup:feishu` requests a new application through the official SDK; the platform authorization page is the user's confirmation surface. It requests only bot DM receive/send scopes and the message event, though the operator must verify the platform's effective grants. The returned app identity goes into an exclusively created `0600` `.env`, never into logs or a model prompt. Only a valid app-scoped owner returned by that authorization is auto-bound. Missing identity or an unsupported Lark tenant fails closed. Setup holds the local instance lock and never replaces existing credentials. Authorization success is not proof of app publication, a working event subscription, or live-message acceptance.
 
 Codex App Server is launched as a child process over stdio. The adapter performs `initialize`, `account/read`, `thread/start` or `thread/resume`, then `turn/start`. It consumes item/turn notifications and forwards supported approval and user-input requests. Each run closes its runtime connection on completion or cancellation. On macOS/Linux the child has its own process group, which is terminated before another run is dispatched. This cannot undo external side effects or stop a process that deliberately escapes the group.
 
