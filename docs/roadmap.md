@@ -16,7 +16,9 @@
 ## Next — Make it useful every day
 
 - [ ] Guided setup and diagnostics, with locally completed authentication
-- [ ] Interactive Feishu cards and reply-to-task routing
+- [x] Interactive Feishu task forms, task cards, one-shot decisions and result pagination
+- [ ] Live acceptance of every card form/permission path across desktop and mobile
+- [ ] Reply-to-task natural-language routing
 - [ ] Git worktree lifecycle, artifact inventory and evidence-based completion checks
 - [ ] Subscription quota visibility and opt-in wait/resume policy
 - [ ] Checkpoint-aware crash recovery and operator-facing delivery failure status

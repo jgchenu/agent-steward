@@ -1,5 +1,5 @@
 import { Store } from './store.js';
-import type { Channel, Config, Executor, HumanRequest, Incoming, Status, Task } from './types.js';
+import type { CardAction, Channel, Config, Executor, HumanRequest, Incoming, Status, Task, View } from './types.js';
 
 const HELP = `Agent Steward · 个人数字员工（预览版）
 /projects — 可用项目
@@ -27,21 +27,22 @@ export class Engine {
     this.tick();
   }
   // Durable receipt + command mutation + notification are committed before acknowledging Feishu.
-  receive(message: Incoming): void {
+  receive(message: Incoming, actionId?: string): void {
     if (this.stopped || message.senderId !== this.config.ownerId || message.chatType !== 'p2p'
       || message.senderType !== 'user') return;
     const effects: Array<() => void> = [];
     this.store.transaction(() => {
       if (!this.store.consume(message.id)) return;
-      const reply = (text: string) => this.store.enqueue(message.chatId, text);
+      if (actionId && !this.store.useAction(actionId)) return;
+      const reply = (text: string, view?: View) => this.store.enqueue(message.chatId, text, view);
       const text = message.text.trim();
       if (!text || text.length > 16_000) { reply('任务文本应为 1–16000 字符。'); return; }
       const match = /^(\/\S+)(?:\s+([\s\S]*))?$/.exec(text);
       const command = match?.[1] ?? '/new';
       const args = match?.[2]?.trim() ?? '';
-      if (command === '/help') { reply(HELP); return; }
+      if (command === '/help' || (!match && ['首页', '工作台', '帮助'].includes(text))) { reply(HELP, { kind: 'home' }); return; }
       if (command === '/projects') {
-        reply(Object.entries(this.config.projects).map(([name, p]) => `${name} · ${p.sandbox}`).join('\n')); return;
+        reply(Object.entries(this.config.projects).map(([name, p]) => `${name} · ${p.sandbox}`).join('\n'), { kind: 'home' }); return;
       }
       if (command === '/new') {
         const names = Object.keys(this.config.projects);
@@ -54,10 +55,10 @@ export class Engine {
         }
         if (!Object.hasOwn(this.config.projects, project)) { reply('未配置该项目，请用 /projects 查询。'); return; }
         const task = this.store.create(message.chatId, project, prompt);
-        reply(`已接单 ${task.id} · ${project}\n任务已排队。查询：/status ${task.id}`); return;
+        reply(`已接单 ${task.id} · ${project}\n任务已排队。查询：/status ${task.id}`, { kind: 'task', taskId: task.id }); return;
       }
       if (command === '/list' || (command === '/status' && !args)) {
-        reply(this.store.list(message.chatId).map(t => `${t.id} · ${t.project} · ${t.status}`).join('\n') || '暂无任务。'); return;
+        reply(this.store.list(message.chatId).map(t => `${t.id} · ${t.project} · ${t.status}`).join('\n') || '暂无任务。', { kind: 'list' }); return;
       }
       const parts = /^(\S+)(?:\s+([\s\S]*))?$/.exec(args);
       const id = parts?.[1] ?? '', body = parts?.[2]?.trim() ?? '';
@@ -80,13 +81,13 @@ export class Engine {
         this.store.event(task.id, 'human_response', `${id}: ${answer}`);
         this.updateWaiting(task.id);
         effects.push(() => { this.pending.delete(id); runtime.resolve(answer); });
-        reply(`请求 ${id} 已回答。`); return;
+        reply(`请求 ${id} 已回答。`, { kind: 'task', taskId: task.id }); return;
       }
       const task = this.store.get(id);
-      if (!task || task.chatId !== message.chatId) { reply(`任务不存在。\n${HELP}`); return; }
+      if (!task || task.chatId !== message.chatId) { reply('任务不存在，请重新选择。', { kind: 'home' }); return; }
       if (command === '/status') {
         const requests = this.store.requests(id).map(r => `待处理请求：${r.id} · ${r.kind}`).join('\n');
-        reply(`${id} · ${task.project} · ${task.status}\n${task.result ?? this.store.latestProgress(id)}\n${requests}`); return;
+        reply(`${id} · ${task.project} · ${task.status}\n${task.result ?? this.store.latestProgress(id)}\n${requests}`, { kind: 'task', taskId: id }); return;
       }
       if (command === '/cancel') {
         if (!['queued', 'running', 'waiting_input', 'waiting_approval'].includes(task.status)) {
@@ -94,22 +95,72 @@ export class Engine {
         }
         this.store.set(id, 'cancelled'); this.store.expire(id);
         effects.push(() => { if (this.active?.task.id === id) this.active.abort.abort(); });
-        reply(`任务 ${id} 已取消；已有文件修改保留。`); return;
+        reply(`任务 ${id} 已取消；已有文件修改保留。`, { kind: 'task', taskId: id }); return;
       }
       if (command === '/continue') {
         if (this.active?.task.id === id || !['review', 'completed', 'failed', 'cancelled', 'interrupted'].includes(task.status)) {
           reply('请等当前执行结束后再继续，或先 /cancel。'); return;
         }
         if (!body) { reply(`用法：/continue ${id} <后续要求>`); return; }
-        this.store.resume(id, body); reply(`任务 ${id} 已重新排队。`); return;
+        this.store.resume(id, body); reply(`任务 ${id} 已重新排队。`, { kind: 'task', taskId: id }); return;
       }
       if (command === '/done' && task.status === 'review') {
-        this.store.set(id, 'completed'); reply(`任务 ${id} 已由你确认验收。`); return;
+        this.store.set(id, 'completed'); reply(`任务 ${id} 已由你确认验收。`, { kind: 'task', taskId: id }); return;
       }
-      reply(HELP);
+      reply(HELP, { kind: 'home' });
     });
     for (const effect of effects) effect();
     this.tick(); void this.flush();
+  }
+  // Only opaque, server-issued actions are accepted. Callback values are never executable commands.
+  handleAction(action: CardAction): { toast: { type: 'success' | 'error'; content: string } } {
+    const fail = (content: string) => ({ toast: { type: 'error' as const, content } });
+    if (this.stopped || action.senderId !== this.config.ownerId) return fail('此操作仅限机器人的主人。');
+    const saved = this.store.getAction(action.actionId);
+    if (!saved || saved.chatId !== action.chatId || saved.expires < Date.now() || saved.used) {
+      return fail('操作已处理或已过期。请发送“工作台”重新打开。');
+    }
+    const i = saved.intent, task = i.taskId ? this.store.get(i.taskId) : undefined;
+    if (i.taskId && (!task || task.chatId !== action.chatId)) return fail('任务不属于当前会话。');
+    const mutating = ['new', 'continue', 'done', 'cancel', 'approve', 'deny', 'answer'].includes(i.op);
+    if (mutating && task && i.revision !== task.updatedAt) return fail('任务状态已变化，请刷新后再操作。');
+    const body = typeof action.fields.body === 'string' ? action.fields.body.trim() : '';
+    if (['new', 'continue', 'answer'].includes(i.op) && (!body || body.length > 1000)) return fail('请填写 1–1000 字的内容。');
+    if (i.op === 'new' && (typeof action.fields.project !== 'string' || !Object.hasOwn(this.config.projects, action.fields.project))) {
+      return fail('请选择已配置的项目。');
+    }
+    if (i.op === 'done' && task?.status !== 'review') return fail('该任务当前不需要验收。');
+    if (['continue', 'followup'].includes(i.op) && (this.active?.task.id === task?.id ||
+      !['review', 'completed', 'failed', 'cancelled', 'interrupted'].includes(task?.status ?? ''))) return fail('请等当前执行结束后继续。');
+    if (i.op === 'cancel' && !['queued', 'running', 'waiting_input', 'waiting_approval'].includes(task?.status ?? '')) return fail('任务已经停止。');
+    if (['approve', 'deny', 'answer'].includes(i.op)) {
+      const req = this.store.getRequest(i.requestId ?? ''), runtime = this.pending.get(i.requestId ?? '');
+      if (!req || req.taskId !== task?.id || req.status !== 'pending' || !runtime ||
+        (req.kind === 'input') !== (i.op === 'answer')) return fail('该请求已失效，未执行任何授权。');
+      try { runtime.validate?.(i.op === 'answer' ? body : i.op === 'approve' ? 'accept' : 'decline'); }
+      catch (e) { return fail(e instanceof Error ? e.message : '请检查输入。'); }
+    }
+    const views: Partial<Record<typeof i.op, View>> = {
+      home: { kind: 'home' }, list: { kind: 'list', page: i.page },
+      status: { kind: 'task', taskId: i.taskId! }, result: { kind: 'result', taskId: i.taskId!, page: i.page },
+      followup: { kind: 'followup', taskId: i.taskId! },
+    };
+    const view = views[i.op];
+    if (view) {
+      this.store.transaction(() => {
+        if (this.store.consume('card:' + action.id)) this.store.enqueue(action.chatId, '已更新', view);
+      });
+      void this.flush();
+    } else {
+      const command = i.op === 'new' ? `/new ${action.fields.project} ${body}`
+        : ['approve', 'deny', 'answer'].includes(i.op) ? `/${i.op} ${i.requestId} ${body}`
+        : `/${i.op} ${i.taskId} ${body}`;
+      this.receive({ id: 'card:' + action.id, senderId: action.senderId, chatId: action.chatId,
+        chatType: 'p2p', senderType: 'user', text: command }, action.actionId);
+      // Replace a submitted form with a fresh entry point; the consumed form can never dispatch twice.
+      if (i.op === 'new') this.store.enqueue(action.chatId, '任务已提交', { kind: 'home' });
+    }
+    return { toast: { type: 'success', content: view ? '已更新' : '已处理' } };
   }
   private updateWaiting(id: string): void {
     const remaining = this.store.requests(id);
@@ -123,7 +174,7 @@ export class Engine {
     if (!task) return;
     const abort = new AbortController();
     this.store.set(task.id, 'running');
-    this.store.enqueue(task.chatId, `开始执行 ${task.id} · ${task.project}`);
+    this.store.enqueue(task.chatId, `开始执行 ${task.id} · ${task.project}`, { kind: 'task', taskId: task.id });
     // Defer execution so synchronous adapters cannot race active-run registration.
     const done = Promise.resolve().then(() => this.run(task, abort));
     this.active = { task, abort, done };
@@ -141,7 +192,7 @@ export class Engine {
           const id = this.store.request(task.id, req.kind, req.description);
           this.pending.set(id, req); this.updateWaiting(task.id);
           this.store.enqueue(task.chatId, `任务 ${task.id} 需要你处理 · 请求 ${id}\n${req.description}\n`
-            + (req.kind === 'approval' ? `/approve ${id} 或 /deny ${id}` : `/answer ${id} <回答>`));
+            + (req.kind === 'approval' ? `/approve ${id} 或 /deny ${id}` : `/answer ${id} <回答>`), { kind: 'task', taskId: task.id });
           return id;
         },
         resolved: id => {
@@ -153,14 +204,14 @@ export class Engine {
       if (abort.signal.aborted) throw abort.signal.reason;
       this.store.set(task.id, 'review', result);
       this.store.enqueue(task.chatId, `任务 ${task.id} 已产出结果，等待你验收（执行器报告，尚非独立验证）。\n${result}\n`
-        + `验收：/done ${task.id}\n继续：/continue ${task.id} <要求>`);
+        + `验收：/done ${task.id}\n继续：/continue ${task.id} <要求>`, { kind: 'task', taskId: task.id });
     } catch (error) {
       const state = this.store.get(task.id)?.status;
       if (state !== 'cancelled') {
         const reason = error instanceof Error ? error.message : '执行失败';
         this.store.set(task.id, this.stopped ? 'interrupted' : 'failed', reason);
         this.store.enqueue(task.chatId, `任务 ${task.id} ${this.stopped ? '已中断' : '失败'}：${reason}\n`
-          + `不会自动重试已发生的操作。检查后用 /continue ${task.id} <要求> 继续。`);
+          + `不会自动重试已发生的操作。检查后用 /continue ${task.id} <要求> 继续。`, { kind: 'task', taskId: task.id });
       }
     } finally {
       clearTimeout(timeout);
@@ -179,7 +230,7 @@ export class Engine {
   private async drain(): Promise<void> {
       let item;
       while ((item = this.store.outgoing())) {
-        try { await this.channel.send(item.chatId, item.text, item.id); this.store.delivered(item.id); }
+        try { await this.channel.send(item.chatId, item.text, item.id, item.view ? JSON.parse(item.view) as View : undefined); this.store.delivered(item.id); }
         catch { this.store.retry(item.id, item.attempts); }
       }
   }

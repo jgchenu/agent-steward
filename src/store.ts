@@ -1,8 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import type { Status, Task } from './types.js';
+import type { Intent, Status, Task, View } from './types.js';
 
-export interface Outgoing { id: string; chatId: string; text: string; attempts: number }
+export interface Outgoing { id: string; chatId: string; text: string; attempts: number; view: string | null }
 export class Store {
   readonly db: DatabaseSync;
   constructor(path: string) {
@@ -20,7 +20,14 @@ export class Store {
       CREATE TABLE IF NOT EXISTS outbox (
         id TEXT PRIMARY KEY, chatId TEXT NOT NULL, text TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
         due INTEGER NOT NULL DEFAULT 0, sent INTEGER NOT NULL DEFAULT 0);
-      PRAGMA user_version=1;`);
+      CREATE TABLE IF NOT EXISTS card_actions (
+        id TEXT PRIMARY KEY, chatId TEXT NOT NULL, intent TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0,
+        expires INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS card_messages (
+        chatId TEXT NOT NULL, viewKey TEXT NOT NULL, messageId TEXT NOT NULL, PRIMARY KEY(chatId,viewKey));`);
+    const columns = this.db.prepare('PRAGMA table_info(outbox)').all() as Array<{ name: string }>;
+    if (!columns.some(c => c.name === 'view')) this.db.exec('ALTER TABLE outbox ADD COLUMN view TEXT');
+    this.db.exec('PRAGMA user_version=2');
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -45,8 +52,11 @@ export class Store {
       : this.db.prepare('SELECT * FROM tasks ORDER BY createdAt').all()) as unknown as Task[];
   }
   set(id: string, status: Status, result?: string): void {
+    // Monotonic revisions prevent a stale button matching a different turn in the same millisecond.
+    const previous = this.get(id);
+    const updatedAt = new Date(Math.max(Date.now(), previous ? Date.parse(previous.updatedAt) + 1 : 0)).toISOString();
     this.db.prepare('UPDATE tasks SET status=?, result=COALESCE(?,result), updatedAt=? WHERE id=?')
-      .run(status, result ?? null, new Date().toISOString(), id);
+      .run(status, result ?? null, updatedAt, id);
     this.event(id, status, result ?? '');
   }
   resume(id: string, prompt: string): void {
@@ -90,18 +100,45 @@ export class Store {
         if (['running', 'waiting_approval', 'waiting_input'].includes(task.status)) {
           this.set(task.id, 'interrupted', '进程已重启；旧确认已失效。请检查已有改动，再明确继续。');
           this.expire(task.id);
-          this.enqueue(task.chatId, `任务 ${task.id} 已中断。使用 /continue ${task.id} <后续要求> 继续。`);
+          this.enqueue(task.chatId, `任务 ${task.id} 已中断。使用 /continue ${task.id} <后续要求> 继续。`, { kind: 'task', taskId: task.id });
         }
       }
     });
   }
-  enqueue(chatId: string, text: string): void {
+  enqueue(chatId: string, text: string, view?: View): void {
+    if (view) {
+      this.db.prepare('INSERT INTO outbox(id,chatId,text,view) VALUES (?,?,?,?)')
+        .run(randomUUID(), chatId, text, JSON.stringify(view));
+      return;
+    }
     // Chunk before persisting so each retried delivery has a stable deduplication ID.
     const chars = Array.from(text);
     for (let i = 0; i < chars.length; i += 2500) {
       this.db.prepare('INSERT INTO outbox(id,chatId,text) VALUES (?,?,?)')
         .run(randomUUID(), chatId, chars.slice(i, i + 2500).join(''));
     }
+  }
+  action(chatId: string, intent: Intent): string {
+    this.db.prepare('DELETE FROM card_actions WHERE expires<?').run(Date.now());
+    const id = 'a' + randomUUID().replaceAll('-', '');
+    this.db.prepare('INSERT INTO card_actions(id,chatId,intent,expires) VALUES (?,?,?,?)')
+      .run(id, chatId, JSON.stringify(intent), Date.now() + 7 * 86_400_000);
+    return id;
+  }
+  getAction(id: string): { chatId: string; intent: Intent; used: number; expires: number } | undefined {
+    const row = this.db.prepare('SELECT * FROM card_actions WHERE id=?').get(id) as
+      { chatId: string; intent: string; used: number; expires: number } | undefined;
+    return row && { ...row, intent: JSON.parse(row.intent) as Intent };
+  }
+  useAction(id: string): boolean {
+    return this.db.prepare('UPDATE card_actions SET used=1 WHERE id=? AND used=0').run(id).changes === 1;
+  }
+  cardMessage(chatId: string, key: string): string | undefined {
+    return (this.db.prepare('SELECT messageId FROM card_messages WHERE chatId=? AND viewKey=?').get(chatId, key) as { messageId: string } | undefined)?.messageId;
+  }
+  saveCardMessage(chatId: string, key: string, messageId: string): void {
+    this.db.prepare('INSERT INTO card_messages VALUES (?,?,?) ON CONFLICT(chatId,viewKey) DO UPDATE SET messageId=excluded.messageId')
+      .run(chatId, key, messageId);
   }
   outgoing(): Outgoing | undefined {
     return this.db.prepare('SELECT * FROM outbox WHERE sent=0 AND due<=? ORDER BY rowid LIMIT 1')

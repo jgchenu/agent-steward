@@ -70,6 +70,7 @@ export async function setupFeishu(options: {
         preset: false,
         scopes: { tenant: ['im:message:send_as_bot', 'im:message.p2p_msg:readonly'] },
         events: { items: { tenant: ['im.message.receive_v1'] } },
+        callbacks: { items: ['card.action.trigger'] },
       },
       signal: options.signal,
       onQRCodeReady: options.onQRCodeReady,
