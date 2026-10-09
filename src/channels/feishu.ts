@@ -8,7 +8,7 @@ export function parseCardAction(data: any): CardAction | undefined {
   const actionId = value?.actionId ?? data?.action?.name;
   const chatId = data?.context?.open_chat_id, senderId = data?.operator?.open_id;
   // Only IM cards are supported, never arbitrary host contexts or client-supplied commands.
-  if (data?.action?.tag !== 'button' || (data.host && data.host !== 'im_message') ||
+  if (!['button', 'interactive_container'].includes(data?.action?.tag) || (data.host && data.host !== 'im_message') ||
     typeof actionId !== 'string' || !/^a[a-f0-9]{32}$/.test(actionId) ||
     typeof chatId !== 'string' || typeof senderId !== 'string' ||
     typeof data?.context?.open_message_id !== 'string' || typeof data.event_id !== 'string') return;
