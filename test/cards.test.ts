@@ -14,7 +14,7 @@ const config: Config = { ownerId: 'owner', projects: { demo: { path: '.', sandbo
   stateDir: '.', codexCommand: 'codex', maxRunMinutes: 1 };
 let sequence = 0;
 function action(store: Store, intent: Intent, fields: Record<string, unknown> = {}): CardAction {
-  return { id: String(++sequence), senderId: 'owner', chatId: 'dm', actionId: store.action('dm', intent), fields };
+  return { id: String(++sequence), senderId: 'owner', chatId: 'dm', messageId: 'om_clicked', actionId: store.action('dm', intent), fields };
 }
 async function until(check: () => boolean) {
   for (let n = 0; n < 100; n++) { if (check()) return; await setTimeout(5); }
@@ -142,4 +142,29 @@ test('task notifications update the original card; failed patches do not silentl
     await channel.send('dm', 'result', 'delivery3', view); assert.equal(creates, 2);
     await channel.send('dm', 'refresh', 'delivery4', view); assert.equal(creates, 2);
   } finally { channel.close(); store.close(); }
+});
+
+test('navigation replaces the clicked card, never the old home card; background updates cannot replace the form', async () => {
+  const store = new Store(':memory:'); const channel = new FeishuChannel('fake', 'fake', store, config);
+  const patched: string[] = []; let creates = 0;
+  (channel as any).client = { im: { message: {
+    create: async () => { creates++; return { code: 0, data: { message_id: `om_new_${creates}` } }; },
+    patch: async (p: any) => { patched.push(p.path.message_id); return { code: 0 }; },
+  } } };
+  const engine = new Engine(store, config, { run: async () => 'unused' }, channel);
+  try {
+    const task = store.create('dm', 'demo', 'work'); store.set(task.id, 'running');
+    store.saveCardMessage('dm', 'home', 'om_old_home');
+    store.saveCardMessage('dm', `task:${task.id}`, 'om_clicked');
+    engine.handleAction(action(store, { op: 'home' })); await engine.flush();
+    assert.deepEqual(patched, ['om_clicked']);
+    assert.equal(store.cardMessage('dm', 'home'), 'om_clicked');
+    assert.equal(store.cardMessage('dm', `task:${task.id}`), undefined);
+    await channel.send('dm', 'progress', 'progress-id', { kind: 'task', taskId: task.id });
+    assert.equal(creates, 1); assert.deepEqual(patched, ['om_clicked']);
+    // A typed workbench request appears at the end of chat, but delivery retry reuses its identity.
+    await channel.send('dm', 'home', 'new-home-delivery', { kind: 'home', fresh: true });
+    await channel.send('dm', 'home', 'new-home-delivery', { kind: 'home', fresh: true });
+    assert.equal(creates, 2); assert.equal(patched.at(-1), 'om_new_2');
+  } finally { await engine.stop(); channel.close(); store.close(); }
 });

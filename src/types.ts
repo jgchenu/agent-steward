@@ -28,10 +28,11 @@ export interface RunHooks {
 export interface Executor {
   run(task: Task, project: Project, hooks: RunHooks, signal: AbortSignal): Promise<string>;
 }
-export type View = { kind: 'home' } | { kind: 'list'; page?: number }
-  | { kind: 'task' | 'followup' | 'result'; taskId: string; page?: number };
+export type View = ({ kind: 'home' } | { kind: 'list'; page?: number }
+  | { kind: 'task' | 'followup' | 'result'; taskId: string; page?: number })
+  & { targetMessageId?: string; fresh?: boolean };
 export interface CardAction {
-  id: string; senderId: string; chatId: string; actionId: string;
+  id: string; senderId: string; chatId: string; actionId: string; messageId: string;
   fields: Record<string, unknown>;
 }
 export interface Intent {

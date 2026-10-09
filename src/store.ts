@@ -140,6 +140,14 @@ export class Store {
     this.db.prepare('INSERT INTO card_messages VALUES (?,?,?) ON CONFLICT(chatId,viewKey) DO UPDATE SET messageId=excluded.messageId')
       .run(chatId, key, messageId);
   }
+  bindCardMessage(chatId: string, key: string, messageId: string): void {
+    this.transaction(() => {
+      // A task card navigated to a form must no longer be overwritten by background task updates.
+      this.db.prepare("DELETE FROM card_messages WHERE chatId=? AND messageId=? AND viewKey NOT LIKE 'alert:%' AND viewKey NOT LIKE 'delivery:%'")
+        .run(chatId, messageId);
+      this.saveCardMessage(chatId, key, messageId);
+    });
+  }
   outgoing(): Outgoing | undefined {
     return this.db.prepare('SELECT * FROM outbox WHERE sent=0 AND due<=? ORDER BY rowid LIMIT 1')
       .get(Date.now()) as unknown as Outgoing | undefined;

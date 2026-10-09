@@ -13,7 +13,7 @@ export function parseCardAction(data: any): CardAction | undefined {
     typeof chatId !== 'string' || typeof senderId !== 'string' ||
     typeof data?.context?.open_message_id !== 'string' || typeof data.event_id !== 'string') return;
   const fields = data.action.form_value;
-  return { id: data.event_id, senderId, chatId, actionId,
+  return { id: data.event_id, senderId, chatId, actionId, messageId: data.context.open_message_id,
     fields: fields && typeof fields === 'object' && !Array.isArray(fields) ? fields : {} };
 }
 
@@ -54,21 +54,25 @@ export class FeishuChannel implements Channel {
   }
   async send(chatId: string, text: string, deliveryId: string, view?: View): Promise<void> {
     const content = JSON.stringify(buildCard(this.store, this.config, chatId, view, text));
-    const key = view && viewKey(view), existing = key && this.store.cardMessage(chatId, key);
+    const key = view && viewKey(view);
+    const existing = view?.targetMessageId ?? (view?.fresh
+      ? this.store.cardMessage(chatId, `delivery:${deliveryId}`) : key && this.store.cardMessage(chatId, key));
     const task = view?.kind === 'task' ? this.store.get(view.taskId) : undefined;
     // Patches do not create an unread notification. Important transitions need one fresh card.
     const alertKey = task && ['review', 'waiting_approval', 'waiting_input', 'failed', 'interrupted'].includes(task.status)
       ? `alert:${task.id}:${task.updatedAt}` : undefined;
     const needsAlert = alertKey && !this.store.cardMessage(chatId, alertKey);
-    if (existing && !needsAlert) {
+    if (existing && (view?.targetMessageId || view?.fresh || !needsAlert)) {
       const result = await this.client.im.message.patch({ path: { message_id: existing }, data: { content } });
       if (result.code !== 0) throw new Error(`Feishu card update error ${result.code}`);
+      if (key) this.store.bindCardMessage(chatId, key, existing);
       return;
     }
     const result = await this.client.im.message.create({ params: { receive_id_type: 'chat_id' },
       data: { receive_id: chatId, msg_type: 'interactive', content, uuid: deliveryId } });
     if (result.code !== 0) throw new Error(`Feishu delivery error ${result.code}`);
-    if (key && result.data?.message_id) this.store.saveCardMessage(chatId, key, result.data.message_id);
+    if (key && result.data?.message_id) this.store.bindCardMessage(chatId, key, result.data.message_id);
+    if (view?.fresh && result.data?.message_id) this.store.saveCardMessage(chatId, `delivery:${deliveryId}`, result.data.message_id);
     if (alertKey && result.data?.message_id) this.store.saveCardMessage(chatId, alertKey, result.data.message_id);
   }
   close(): void { this.ws.close(); }
