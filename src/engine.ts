@@ -34,7 +34,8 @@ export class Engine {
     this.store.transaction(() => {
       if (!this.store.consume(message.id)) return;
       if (actionId && !this.store.useAction(actionId)) return;
-      const reply = (text: string, view?: View) => this.store.enqueue(message.chatId, text, view);
+      const reply = (text: string, view?: View) => this.store.enqueue(message.chatId, text,
+        view && ['home', 'list'].includes(view.kind) ? { ...view, fresh: true } : view);
       const text = message.text.trim();
       if (!text || text.length > 16_000) { reply('任务文本应为 1–16000 字符。'); return; }
       const match = /^(\/\S+)(?:\s+([\s\S]*))?$/.exec(text);
@@ -87,7 +88,7 @@ export class Engine {
       if (!task || task.chatId !== message.chatId) { reply('任务不存在，请重新选择。', { kind: 'home' }); return; }
       if (command === '/status') {
         const requests = this.store.requests(id).map(r => `待处理请求：${r.id} · ${r.kind}`).join('\n');
-        reply(`${id} · ${task.project} · ${task.status}\n${task.result ?? this.store.latestProgress(id)}\n${requests}`, { kind: 'task', taskId: id }); return;
+        reply(`${id} · ${task.project} · ${task.status}\n${task.result ?? this.store.latestProgress(id)}\n${requests}`, { kind: 'task', taskId: id, fresh: true }); return;
       }
       if (command === '/cancel') {
         if (!['queued', 'running', 'waiting_input', 'waiting_approval'].includes(task.status)) {
@@ -148,7 +149,7 @@ export class Engine {
     const view = views[i.op];
     if (view) {
       this.store.transaction(() => {
-        if (this.store.consume('card:' + action.id)) this.store.enqueue(action.chatId, '已更新', view);
+        if (this.store.consume('card:' + action.id)) this.store.enqueue(action.chatId, '已更新', { ...view, targetMessageId: action.messageId });
       });
       void this.flush();
     } else {
@@ -157,8 +158,8 @@ export class Engine {
         : `/${i.op} ${i.taskId} ${body}`;
       this.receive({ id: 'card:' + action.id, senderId: action.senderId, chatId: action.chatId,
         chatType: 'p2p', senderType: 'user', text: command }, action.actionId);
-      // Replace a submitted form with a fresh entry point; the consumed form can never dispatch twice.
-      if (i.op === 'new') this.store.enqueue(action.chatId, '任务已提交', { kind: 'home' });
+      // Refresh only the form that was submitted, not an older entry point in chat history.
+      if (i.op === 'new') this.store.enqueue(action.chatId, '任务已提交', { kind: 'home', targetMessageId: action.messageId });
     }
     return { toast: { type: 'success', content: view ? '已更新' : '已处理' } };
   }
