@@ -110,7 +110,9 @@ Keep the process and machine awake. Closing the service interrupts active work; 
 | `/answer <request> <answer>` | Answer a question; multiple questions require JSON keyed by question ID |
 | `/done <task>` | Record the owner's acceptance of a result in `review` |
 
-Use explicit task/request IDs. A generic “yes” must never approve the wrong action. This first release uses text commands instead of interactive cards. It has one active run per instance, not parallel workers.
+Feishu uses interactive cards: send `工作台` or `/help` to open a project selector and task form. Task cards offer progress refresh, stop, result pagination, acceptance and follow-up forms; permission requests have explicit one-shot buttons. Commands remain available in Feishu and the terminal. A generic “yes” never grants permission. Each instance runs one task at a time.
+
+Enable `card.action.trigger` under the application’s **callback configuration**, using the existing long connection. An existing installation must verify this separately. Ordinary progress refreshes update a card in place; requests for input, results and failures produce a fresh notification so they are not silently hidden in an old message. Forms accept up to 1,000 characters; longer tasks can still be sent as text.
 
 ## What survives a restart
 

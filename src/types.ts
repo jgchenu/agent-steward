@@ -28,4 +28,16 @@ export interface RunHooks {
 export interface Executor {
   run(task: Task, project: Project, hooks: RunHooks, signal: AbortSignal): Promise<string>;
 }
-export interface Channel { send(chatId: string, text: string, deliveryId: string): Promise<void> }
+export type View = { kind: 'home' } | { kind: 'list'; page?: number }
+  | { kind: 'task' | 'followup' | 'result'; taskId: string; page?: number };
+export interface CardAction {
+  id: string; senderId: string; chatId: string; actionId: string;
+  fields: Record<string, unknown>;
+}
+export interface Intent {
+  op: 'home' | 'list' | 'status' | 'result' | 'followup' | 'new' | 'continue' | 'done' | 'cancel' | 'approve' | 'deny' | 'answer';
+  taskId?: string; requestId?: string; revision?: string; page?: number;
+}
+export interface Channel {
+  send(chatId: string, text: string, deliveryId: string, view?: View): Promise<void>;
+}

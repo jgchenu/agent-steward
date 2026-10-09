@@ -40,7 +40,7 @@ async function main(): Promise<void> {
   if (mode === 'feishu') {
     const appId = process.env.FEISHU_APP_ID, secret = process.env.FEISHU_APP_SECRET;
     if (!appId || !secret) { store.close(); release(); throw new Error('请在本地 .env 配置飞书应用身份。'); }
-    feishu = new FeishuChannel(appId, secret); channel = feishu;
+    feishu = new FeishuChannel(appId, secret, store, config); channel = feishu;
   }
   const engine = new Engine(store, config, mode === 'demo' ? new DemoExecutor() : new CodexExecutor(config.codexCommand), channel);
   let closing = false;
@@ -52,7 +52,7 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => void shutdown()); process.on('SIGTERM', () => void shutdown());
   engine.start();
   if (feishu) {
-    await feishu.connect(message => engine.receive(message));
+    await feishu.connect(message => engine.receive(message), action => engine.handleAction(action));
     console.log('Agent Steward started. Owner-only Feishu DMs. Use /help.');
   } else {
     console.log(mode === 'demo' ? 'DEMO · 模拟执行器，不调用模型。输入任务或 /help。'

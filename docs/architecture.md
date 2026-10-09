@@ -5,7 +5,8 @@
 One owner, one local instance, one active execution. The service is a task coordinator around official agent runtimes. It does not implement a model gateway. Transport, orchestration, persistence and execution have separate interfaces.
 
 ```text
-src/channels/feishu.ts  — official SDK WebSocket events and outbound messages
+src/channels/feishu.ts  — official SDK WebSocket events, callbacks and card delivery
+src/channels/cards.ts   — Card 2.0 presentation and opaque action issuance
 src/engine.ts           — authorization, commands, queue, approval routing, delivery
 src/store.ts            — SQLite task/event/inbox/request/outbox records
 src/adapters/codex.ts   — task-to-Codex protocol mapping
@@ -85,14 +86,14 @@ The outbox persists before delivery and uses bounded exponential backoff. The tr
 
 Run timeout includes human waiting time. Failed or cancelled executions retain any changes they already made. A thread that cannot be resumed fails visibly; starting a replacement thread is not automatic. Codex rate-limit errors currently surface as failures requiring a later explicit continuation; quota-aware scheduling is planned.
 
-An instance lock is local to one filesystem and PID namespace. Do not share state storage across containers or hosts. Local SQLite/events and Codex session storage require separate private backups. Automatic retention and migrations beyond schema v1 are not implemented.
+An instance lock is local to one filesystem and PID namespace. Do not share state storage across containers or hosts. Local SQLite/events and Codex session storage require separate private backups. Schema v2 adds an optional outbox view, durable card message identities and expiring action capabilities without dropping v1 data. Expired action capabilities are pruned when rendering new controls. Other automatic retention is not implemented.
 
 ## Implementation choices
 
 - TypeScript + Node 24: one language with official Feishu SDK integration and native SQLite.
 - SQLite: durable local operation without requiring a database service.
 - WebSocket Feishu transport: outbound connection, no public webhook server in the initial version.
-- Text commands: concrete task/request correlation before adding richer cards and natural-language routing.
+- Feishu Card 2.0: forms, state-specific controls, paged lists/results and task-card updates. Terminal commands remain a fallback.
 - MIT license: simple reuse for people deploying their own agents.
 
 ## References
@@ -101,3 +102,13 @@ An instance lock is local to one filesystem and PID namespace. Do not share stat
 - [Codex authentication](https://learn.chatgpt.com/docs/auth)
 - [Official Feishu Node SDK](https://github.com/larksuite/node-sdk)
 - [A2A concepts](https://a2a-protocol.org/latest/topics/key-concepts/) — future interoperability, not implemented
+
+## Card interaction and delivery
+
+`View` is a semantic outbox reference, not serialized display text parsed back into business state. Feishu renders current database state at delivery time. Each control holds an opaque random capability persisted with its intended operation and originating DM; no callback-provided command is executed. Only the configured owner and matching chat may use it. Mutation capabilities are single-use and committed with the task mutation in the inbound transaction. Task revision checks reject stale buttons; approval/input actions also require the exact pending in-memory request. Form validation occurs before consuming its capability. Capabilities expire after seven days; “工作台” opens fresh controls. Task revisions advance monotonically even within one millisecond.
+
+The callback acknowledges after local synchronous validation/receipt, without waiting for a model or message API. Result acceptance remains an explicit owner action. Approval descriptions are never truncated beside an accept button: descriptions exceeding the display budget get a decline-only card. Untrusted task/result text is rendered as plain text so model-generated mention/markup cannot become card controls. Long results are paginated rather than discarded.
+
+Task message identities persist across restarts. Routine refreshes patch the latest task card. Because patches alone do not create unread notifications, a waiting-for-human, review, failed or interrupted revision gets one fresh card, then subsequent refreshes patch it. As with text delivery, remote success followed by a crash before local acknowledgement relies on Feishu’s finite UUID deduplication window. Patch failures remain retryable, without silently creating duplicate cards. Recalled/uneditable cards may require operator repair of their local message mapping; this preview does not yet automatically classify permanent patch errors.
+
+The recent-task list covers the latest 20 tasks with three per page. Form inputs are limited to 1,000 characters; text commands retain the 16,000-character inbound limit. Only the first pending human request is displayed; resolving it refreshes the task card to expose any remaining request. Local terminal output uses the existing text fallback. Card callback subscription is a deployment prerequisite, not proved by a successful WebSocket start or card send.
