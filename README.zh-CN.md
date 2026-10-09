@@ -25,6 +25,18 @@ npm run demo
 
 先自行安装官方 Codex CLI，用 `codex login` 完成 ChatGPT 登录。Steward 通过官方 App Server 驱动执行，不读取或复制认证文件；启动推理前检查登录类型，默认不回退到按量付费 API。
 
+首次接入飞书，可在尚未创建 `.env` 时直接运行：
+
+```sh
+npm run setup:feishu
+```
+
+打开官方授权链接，在飞书中确认创建专用机器人。程序预设仅申请私聊收发消息能力；确认页中的权限以飞书实际展示为准。授权成功后，应用身份直接写入本机 `.env`（权限 `0600`），并使用本次授权返回的用户 `open_id` 绑定主人。密钥不会打印到终端，也不会修改已有应用。
+
+已有 `.env` 时安装流程会拒绝覆盖。若平台没有返回主人身份，或识别为尚未支持的 Lark 租户，服务保持不可启动。默认生成只读 `sandbox` 项目，仍需按[接入指南](docs/feishu-setup.md)检查长连接事件与应用发布状态。扫码成功不等于消息链路已验收。
+
+若使用已有应用或只体验本地终端，可手动配置；已完成扫码配置时不要再次覆盖文件：
+
 ```sh
 cp .env.example .env
 cp steward.config.example.json steward.config.json

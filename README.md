@@ -39,6 +39,24 @@ Install the official Codex CLI separately and sign in using `codex login` with C
 
 Subscription limits and provider terms still apply. App Server protocol compatibility was smoke-tested with Codex CLI 0.160.0; changes upstream may require adapter updates. Model execution uses the local Codex configuration and its available model. Do not treat a subscription as unlimited capacity.
 
+### Create a dedicated Feishu bot
+
+On a fresh installation, before copying `.env.example`, run:
+
+```sh
+npm run setup:feishu
+```
+
+Open the official authorization URL and confirm the new app in your Feishu organization. Setup requests a minimal bot with private-message receive/send permissions. Verify the permissions shown by Feishu; platform rollout differences can affect the preset. No existing app is selected or modified.
+
+After authorization, credentials go directly into a local `.env` file with mode `0600`. The authorizing user's app-scoped `open_id`, when returned, is bound as the owner. No credentials are printed. A missing owner or unsupported Lark tenant leaves the service disabled. Existing `.env` files are never overwritten.
+
+Setup also creates a read-only `sandbox` project in `playground/` if no config exists. It does not start model execution, send messages, or establish that your bot is published and reachable. Verify long-connection event settings and application availability in the console, then follow the [Feishu acceptance guide](docs/feishu-setup.md).
+
+### Manual configuration / terminal-only use
+
+Use the following copy commands only if you have not completed automatic setup:
+
 ```sh
 cp .env.example .env
 cp steward.config.example.json steward.config.json

@@ -5,6 +5,7 @@ dist/
 !.env.example
 steward.config.json
 .steward/
+playground/
 *.sqlite*
 *.log
 .DS_Store
