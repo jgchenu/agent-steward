@@ -20,7 +20,24 @@ export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.
     if (!['read-only', 'workspace-write'].includes(sandbox)) throw new Error(`Invalid sandbox: ${name}`);
     const path = realpathSync(resolve(base, p.path));
     if (!statSync(path).isDirectory()) throw new Error(`Project is not a directory: ${name}`);
-    projects[name] = { path, sandbox };
+    let worktree: Project['worktree'];
+    if (p.worktree !== undefined) {
+      const w = p.worktree;
+      if (!w || typeof w.baseRef !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_./-]*$/.test(w.baseRef)
+        || w.baseRef.includes('..') || !Array.isArray(w.checks)) throw new Error(`Invalid worktree config: ${name}`);
+      if (w.checks.length > 10 || w.checks.some(c => !c || typeof c.name !== 'string' || !c.name.trim()
+        || typeof c.command !== 'string' || !c.command || /[\r\n\0]/.test(c.command)
+        || !Array.isArray(c.args) || c.args.some(a => typeof a !== 'string' || a.includes('\0'))
+        || (c.timeoutSeconds !== undefined && (!Number.isFinite(c.timeoutSeconds) || c.timeoutSeconds < 1 || c.timeoutSeconds > 1800)))) {
+        throw new Error(`Invalid validation checks: ${name}`);
+      }
+      if (w.github && (!/^[\w.-]+\/[\w.-]+$/.test(w.github.repository)
+        || !/^[a-zA-Z0-9][a-zA-Z0-9_./-]*$/.test(w.github.baseBranch) || w.github.baseBranch.includes('..')
+        || w.baseRef !== `origin/${w.github.baseBranch}`)) throw new Error(`Invalid GitHub target: ${name}`);
+      worktree = { baseRef: w.baseRef, checks: w.checks, ...(w.github ? { github: w.github } : {}) };
+    }
+    if (sandbox === 'workspace-write' && !worktree) throw new Error(`workspace-write requires an isolated worktree: ${name}`);
+    projects[name] = { path, sandbox, ...(worktree ? { worktree } : {}) };
   }
   if (!Object.keys(projects).length) throw new Error('Configure at least one project.');
   const maxRunMinutes = raw.maxRunMinutes ?? 60;

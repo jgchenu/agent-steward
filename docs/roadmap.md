@@ -19,7 +19,9 @@
 - [x] Interactive Feishu task forms, task cards, one-shot decisions and result pagination
 - [ ] Live acceptance of every card form/permission path across desktop and mobile
 - [ ] Reply-to-task natural-language routing
-- [ ] Git worktree lifecycle, artifact inventory and evidence-based completion checks
+- [x] Isolated Git task worktrees, artifact inventory and independent configured checks
+- [x] Owner-confirmed draft PR delivery with source/head/base verification and PR reuse
+- [ ] Worktree cleanup, retention and integration after target-branch movement
 - [ ] Subscription quota visibility and opt-in wait/resume policy
 - [ ] Checkpoint-aware crash recovery and operator-facing delivery failure status
 - [ ] systemd / launchd service setup and explicit data retention / backup tools

@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { loadConfig } from './config.js';
 import { Store } from './store.js';
+import { WorkspaceExecutor } from './workspace.js';
 import { Engine } from './engine.js';
 import { acquireLock } from './lock.js';
 import { CodexExecutor } from './adapters/codex.js';
@@ -42,7 +43,7 @@ async function main(): Promise<void> {
     if (!appId || !secret) { store.close(); release(); throw new Error('请在本地 .env 配置飞书应用身份。'); }
     feishu = new FeishuChannel(appId, secret, store, config); channel = feishu;
   }
-  const engine = new Engine(store, config, mode === 'demo' ? new DemoExecutor() : new CodexExecutor(config.codexCommand), channel);
+  const engine = new Engine(store, config, mode === 'demo' ? new DemoExecutor() : new WorkspaceExecutor(config, store, new CodexExecutor(config.codexCommand)), channel);
   let closing = false;
   const shutdown = async () => {
     if (closing) return; closing = true;

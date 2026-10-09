@@ -6,7 +6,8 @@ Agent Steward is an early personal-use preview for a trusted local machine. It i
 
 - Owner-only human direct-message admission and project aliases configured locally
 - One-shot live approval/input request correlation, expiry on restart, unknown requests rejected
-- Read-only default project sandbox; explicit opt-in to workspace writes
+- Read-only default task mode; explicit per-task writes require an isolated Git worktree
+- Program-recorded checks and content fingerprints before owner-confirmed draft PR publication
 - Subscription-auth preflight without reading or copying Codex's credential file
 - Local private state directory, gitignored private configuration, no raw protocol logging
 
@@ -15,6 +16,8 @@ Agent Steward is an early personal-use preview for a trusted local machine. It i
 Codex runs as your OS user and uses its local configuration, tools, extensions and credentials. The adapter's sandbox selection is not a guarantee that all external tools have equivalent restrictions. A user-approved permission request can expand the runtime's access. The `read-only` setting is not a prohibition on all network or external side effects.
 
 Git and publishing rules are sent as agent instructions. They cannot prevent every shell or external-tool action. Enforce important limits using OS isolation, restricted accounts, repository protections and least-privilege service access. Do not use the first deployment with production administration credentials.
+
+Worktrees isolate project files, not OS permissions. Operator-configured validation commands run as the local user outside Codex sandboxing, with a minimal environment. Logs stay in private state; worktrees and logs have no automatic retention. The publisher rejects common secret filenames, but this is not a complete secret scanner; review the actual diff before confirming publication.
 
 Project contents and incoming model/tool output are untrusted. The owner gate does not prevent prompt injection in a repository or document. Review concrete permission requests and check the actual result.
 
