@@ -89,11 +89,13 @@ test('invalid answer forms remain reusable so the owner can correct input', asyn
   } finally { await engine.stop(); store.close(); }
 });
 
-test('callback parser rejects unrelated hosts, non-buttons and raw command payloads', () => {
+test('callback parser accepts task-row navigation and rejects unrelated hosts and raw commands', () => {
   const data = { event_id: 'evt', host: 'im_message', operator: { open_id: 'owner' },
     context: { open_chat_id: 'dm', open_message_id: 'om_test' },
     action: { tag: 'button', name: 'a' + '1'.repeat(32), form_value: { body: 'hello' } } };
   assert.equal(parseCardAction(data)?.fields.body, 'hello');
+  assert.equal(parseCardAction({ ...data, action: { tag: 'interactive_container', value: { actionId: data.action.name } } })?.actionId, data.action.name);
+  assert.equal(parseCardAction({ ...data, action: { ...data.action, tag: 'input' } }), undefined);
   assert.equal(parseCardAction({ ...data, host: 'im_top_notice' }), undefined);
   assert.equal(parseCardAction({ ...data, context: {} }), undefined);
   assert.equal(parseCardAction({ ...data, action: { tag: 'button', value: { command: '/approve any' } } }), undefined);
