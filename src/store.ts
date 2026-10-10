@@ -31,6 +31,7 @@ export class Store {
     if (!taskColumns.some(c => c.name === 'mode')) this.db.exec("ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'read-only'");
     if (!taskColumns.some(c => c.name === 'nextAction')) this.db.exec("ALTER TABLE tasks ADD COLUMN nextAction TEXT NOT NULL DEFAULT 'execute'");
     if (!taskColumns.some(c => c.name === 'baselineRef')) this.db.exec('ALTER TABLE tasks ADD COLUMN baselineRef TEXT');
+    if (!taskColumns.some(c => c.name === 'baselineOptions')) this.db.exec('ALTER TABLE tasks ADD COLUMN baselineOptions TEXT');
     if (!taskColumns.some(c => c.name === 'mergeUrl')) this.db.exec('ALTER TABLE tasks ADD COLUMN mergeUrl TEXT');
     this.db.exec(`CREATE TABLE IF NOT EXISTS workspaces (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS deliveries (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -39,7 +40,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS conversation_bindings (chatId TEXT NOT NULL, messageKey TEXT NOT NULL, taskId TEXT NOT NULL, PRIMARY KEY(chatId,messageKey));
       CREATE TABLE IF NOT EXISTS evidence (id TEXT PRIMARY KEY, taskId TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS project_selections (taskId TEXT PRIMARY KEY, project TEXT NOT NULL, grantKey TEXT NOT NULL, revision TEXT NOT NULL);
-      PRAGMA user_version=7;`);
+      PRAGMA user_version=8;`);
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -67,7 +68,8 @@ export class Store {
   }
   private hydrate(task: Task): Task {
     const conversation = this.db.prepare('SELECT data FROM task_conversations WHERE taskId=?').get(task.id) as { data: string } | undefined;
-    return { ...task, ...(conversation ? { conversation: JSON.parse(conversation.data) } : {}) };
+    return { ...task, baselineOptions: typeof task.baselineOptions === 'string' ? JSON.parse(task.baselineOptions) : null,
+      ...(conversation ? { conversation: JSON.parse(conversation.data) } : {}) };
   }
   saveConversation(id: string, conversation: Conversation): void {
     this.db.prepare('INSERT INTO task_conversations VALUES (?,?) ON CONFLICT(taskId) DO UPDATE SET data=excluded.data').run(id, JSON.stringify(conversation));
@@ -138,14 +140,14 @@ export class Store {
   resume(id: string, prompt: string): void {
     this.clearProjectSelection(id);
     this.db.prepare('DELETE FROM context_snapshots WHERE taskId=?').run(id);
-    this.db.prepare("UPDATE tasks SET prompt=?, result=NULL, nextAction='execute' WHERE id=?").run(prompt, id);
+    this.db.prepare("UPDATE tasks SET prompt=?, result=NULL, nextAction='execute', baselineOptions=NULL WHERE id=?").run(prompt, id);
     const report = this.delivery(id);
     if (report) this.saveDelivery(id, { ...report, ready: false });
     this.set(id, 'queued');
     this.event(id, 'followup', prompt);
   }
-  queueBaseline(id: string, ref: string): void {
-    this.db.prepare("UPDATE tasks SET nextAction='baseline', baselineRef=? WHERE id=?").run(ref, id);
+  queueBaseline(id: string, ref: string, options?: Task['baselineOptions']): void {
+    this.db.prepare("UPDATE tasks SET nextAction='baseline', baselineRef=?, baselineOptions=? WHERE id=?").run(ref, options ? JSON.stringify(options) : null, id);
     this.set(id, 'queued');
   }
   queuePublication(id: string): void {

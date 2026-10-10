@@ -17,6 +17,8 @@ export interface Attachment {
 }
 export type PermissionMode = 'ask' | 'auto' | 'sandbox-auto' | 'full-access';
 export interface Task {
+  baselineOptions?: BaselineOptions | null;
+  deliveryContext?: string;
   projectCandidates?: string[];
   modelSelection?: import('./models.js').ModelSelection;
   permissionMode?: PermissionMode;
@@ -51,6 +53,7 @@ export interface DeliveryReport {
   ready: boolean; validationKey?: string; authorizedKey?: string; prUrl?: string; publishedSha?: string; targetBefore?: string; error?: string;
 }
 export interface Config {
+  configFile?: string;
   modelSelection?: import('./models.js').ModelSelection;
   consoleUrl?: string;
   codexProjects?: import('./codex-projects.js').CodexProject[];
@@ -66,6 +69,7 @@ export interface HumanRequest {
   resolve: (answer: string) => void;
 }
 export interface RunHooks {
+  proposeBaseline?: (request: BaselineProposal) => void;
   proposeProject?: (projectId: string) => void;
   proposePublication?: (target: PublicationTarget) => void;
   prepared?: (report: DeliveryReport) => void;
@@ -79,6 +83,8 @@ export interface Executor {
 }
 // Empty fields mean the owner did not specify an override; use the configured target.
 export interface PublicationTarget { repository: string; baseBranch: string }
+export interface BaselineOptions { migrateChanges: boolean; delivery: (PublicationTarget & {checks: Check[]}) | null }
+export interface BaselineProposal extends BaselineOptions { ref: string }
 export type View = ({ kind: 'evidence'; taskId: string; evidenceIds: string[] } | { kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string; fromTaskId?: string; revision?: string } | { kind: 'list'; page?: number }
   | { kind: 'reply' | 'task' | 'followup' | 'result' | 'delivery' | 'publication' | 'baseline' | 'source'; taskId: string; page?: number })
   & { targetMessageId?: string; fresh?: boolean; conversation?: Conversation; draft?: string; publicationTarget?: PublicationTarget };

@@ -190,11 +190,19 @@ export class WorkspaceExecutor implements Executor {
     try {
       signal.throwIfAborted();
       hooks.prepared?.(report);
-      const result = await this.inner.run({ ...task, evidenceDirectory, codeVersion: { ref: workspace.baseRef, baseSha: workspace.baseSha, headSha: initial.headSha } }, { ...project, path: workspace.path, sandbox: mode }, hooks, signal);
+      const deliveryContext = JSON.stringify({currentBase:workspace.baseRef,configuredBase:project.worktree.baseRef,
+        github:project.worktree.github ?? null,checks:project.worktree.checks,
+        missing:[...(!project.worktree.github ? ['GitHub repository/baseBranch'] : []),...(!project.worktree.checks.length ? ['Steward independent checks'] : [])],
+        configurationManagedBy:'Steward; propose baseline.delivery to preview a scoped configuration update'});
+      let changingBaseline=false;
+      const innerHooks=hooks.proposeBaseline ? {...hooks,proposeBaseline:(request:Parameters<NonNullable<RunHooks['proposeBaseline']>>[0])=>{
+        hooks.proposeBaseline!(request);changingBaseline=true;
+      }} : hooks;
+      const result = await this.inner.run({ ...task, evidenceDirectory, deliveryContext, codeVersion: { ref: workspace.baseRef, baseSha: workspace.baseSha, headSha: initial.headSha } }, { ...project, path: workspace.path, sandbox: mode }, innerHooks, signal);
       signal.throwIfAborted();
       report = { ...report, ...await inventory(workspace, signal), capturedAt: new Date().toISOString() };
       this.store.saveDelivery(task.id, report);
-      if (mode === 'workspace-write') {
+      if (mode === 'workspace-write' && !changingBaseline) {
         const dir = join(this.config.stateDir, 'artifacts', task.id, String(Date.now())); mkdirSync(dir, { recursive: true, mode: 0o700 });
         for (const check of project.worktree.checks) {
           signal.throwIfAborted(); hooks.progress(`正在验证：${check.name}`);
