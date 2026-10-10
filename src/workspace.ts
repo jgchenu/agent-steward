@@ -4,7 +4,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathS
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { Store } from './store.js';
 import { runCommand } from './process.js';
-import type { Config, DeliveryReport, Executor, Project, RunHooks, Task, Workspace } from './types.js';
+import type { Config, DeliveryReport, Executor, Project, PublicationTarget, RunHooks, Task, Workspace } from './types.js';
 
 export async function git(cwd: string, args: string[], signal: AbortSignal): Promise<string> {
   const result = await runCommand('git', ['--literal-pathspecs', ...args], cwd, signal);
@@ -85,9 +85,13 @@ export function publicationText(task: Task, report: DeliveryReport): { title: st
   ].join('\n') };
 }
 export const validationKey = (project: Project) => createHash('sha256').update(JSON.stringify(project.worktree?.checks ?? [])).digest('hex');
-export function publicationBlocker(task: Task, project: Project | undefined, report: DeliveryReport | undefined): string | undefined {
+export function publicationBlocker(task: Task, project: Project | undefined, report: DeliveryReport | undefined, requested?: PublicationTarget): string | undefined {
   if (task.mode !== 'workspace-write' || project?.sandbox !== 'workspace-write') return '本次为只读分析，没有可发布的修改权限。';
   if (!project.worktree?.github) return '项目尚未配置 GitHub 仓库和 PR 目标分支，需要先在本机配置交付目标。';
+  const target = project.worktree.github;
+  if (requested && (requested.repository !== target.repository || requested.baseBranch !== target.baseBranch)) {
+    return `请求交付到 ${requested.repository} → ${requested.baseBranch}，但项目当前配置为 ${target.repository} → ${target.baseBranch}。未替换目标或发起发布，请先在本机配置正确的交付目标，并按对应基准准备和验证改动。`;
+  }
   if (!report) return '尚无代码改动与验证记录，请先完成执行。';
   if (report.workspace.baseRef !== `origin/${project.worktree.github.baseBranch}`) return '任务基准与 PR 目标不同，需先在正确基准的新副本准备改动；原副本保留。';
   if (!report.files.length) return '没有文件改动，无需创建 PR。';

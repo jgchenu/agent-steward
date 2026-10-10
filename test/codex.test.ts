@@ -267,3 +267,60 @@ test('invalid structured routing cannot turn arbitrary model prose, unknown proj
  rpc.onTurn=()=>{rpc.emit('item/completed',{item:{type:'agentMessage',text:JSON.stringify({message:'普通回答',projectId:''})}});rpc.finish()};
  assert.equal(await s.run({...task,project:'__conversation__',projectCandidates:['code']}),'普通回答');assert.deepEqual(proposals,[]);
 });
+
+test('write turns hand semantic PR proposals to Steward on start and resume without exposing routing JSON', async () => {
+  for (const threadId of [null, 'thread']) {
+    const rpc = new FakeRpc(), s = setup(rpc), proposals: unknown[] = [], progress: string[] = [];
+    s.hooks.proposePublication = target => proposals.push(target);
+    s.hooks.progress = text => progress.push(text);
+    const proposal = {repository:'',baseBranch:'main'};
+    rpc.onTurn = () => {
+      rpc.emit('item/completed', {item:{type:'agentMessage',phase:'commentary',text:'正在核对改动'}});
+      rpc.emit('item/completed', {item:{type:'agentMessage',phase:'final_answer',text:JSON.stringify({message:'将为你准备 PR 预览。',publication:proposal})}});
+      rpc.finish();
+    };
+    const result = await s.executor.run({...task,threadId,mode:'workspace-write',prompt:'可以的，提交代码创建PR到main'},
+      {path:'.',sandbox:'workspace-write'},s.hooks,AbortSignal.timeout(5000));
+    assert.equal(result,'将为你准备 PR 预览。'); assert.deepEqual(proposals,[proposal]);
+    assert.deepEqual(progress,['正在核对改动']);
+    assert.ok(rpc.params['turn/start'].outputSchema.properties.publication);
+    assert.match(rpc.params['turn/start'].input[0].text,/可以的，提交代码创建PR到main/);
+    assert.match(rpc.params[threadId?'thread/resume':'thread/start'].developerInstructions,/semantic understanding/);
+    assert.equal(rpc.writes.length,0);
+  }
+});
+
+test('ordinary structured replies, malformed proposals and unsuccessful turns cannot request publication', async () => {
+  const cases = [
+    {value:{message:'这里只解释原因。',publication:null},success:true},
+    {value:'请创建 PR',success:false},
+    {value:{message:'ok'},success:false},
+    {value:{message:'ok',publication:{repository:'',baseBranch:'main',approve:true}},success:false},
+    {value:{message:'ok',publication:{repository:'',baseBranch:42}},success:false},
+    {value:{message:'ok',publication:{repository:'',baseBranch:'main'},approve:true},success:false},
+    {value:{message:'ok',publication:{repository:'',baseBranch:'main'}},success:false,status:'failed'},
+  ];
+  for (const c of cases) {
+    const rpc=new FakeRpc(),s=setup(rpc),proposals:unknown[]=[];
+    s.hooks.proposePublication=p=>proposals.push(p);
+    rpc.onTurn=()=>{rpc.emit('item/completed',{item:{type:'agentMessage',text:JSON.stringify(c.value)}});rpc.finish(c.status)};
+    const run=s.executor.run({...task,mode:'workspace-write'}, {path:'.',sandbox:'workspace-write'},s.hooks,AbortSignal.timeout(5000));
+    if(c.success) assert.equal(await run,'这里只解释原因。'); else await assert.rejects(run);
+    assert.deepEqual(proposals,[]);
+  }
+});
+
+test('publication proposals are unavailable for read-only and projectless runs and cancelled completions', async () => {
+  for (const input of [{...task,mode:'read-only' as const}, {...task,mode:'workspace-write' as const,project:'__conversation__'}]) {
+    const rpc=new FakeRpc(),s=setup(rpc);s.hooks.proposePublication=()=>assert.fail('unexpected proposal');
+    rpc.onTurn=()=>rpc.finish();await s.executor.run(input,{path:'.',sandbox:'read-only'},s.hooks,AbortSignal.timeout(5000));
+    assert.equal(rpc.params['turn/start'].outputSchema,undefined);
+  }
+  const rpc=new FakeRpc(),s=setup(rpc),abort=new AbortController();
+  s.hooks.proposePublication=()=>assert.fail('cancelled proposal');
+  rpc.onTurn=()=>{
+    rpc.emit('item/completed',{item:{type:'agentMessage',text:JSON.stringify({message:'ok',publication:{repository:'',baseBranch:'main'}})}});
+    rpc.finish();abort.abort(new Error('cancelled'));
+  };
+  await assert.rejects(s.executor.run({...task,mode:'workspace-write'},{path:'.',sandbox:'workspace-write'},s.hooks,abort.signal),/cancelled/);
+});

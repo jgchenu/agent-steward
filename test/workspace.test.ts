@@ -5,13 +5,14 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { setTimeout as delay } from 'node:timers/promises';
 import { Store } from '../src/store.js';
 import { WorkspaceExecutor, canPublish, git, inventory, prepareWorkspace, publish, publicationKey } from '../src/workspace.js';
 import { commandEnv, runCommand } from '../src/process.js';
 import { loadConfig } from '../src/config.js';
 import { Engine } from '../src/engine.js';
 import { buildCard } from '../src/channels/cards.js';
-import type { Config, RunHooks } from '../src/types.js';
+import type { Config, PublicationTarget, RunHooks, View } from '../src/types.js';
 const signal = () => AbortSignal.timeout(30_000);
 const hooks: RunHooks = { thread() {}, progress() {}, request() { throw Error('unexpected request'); }, resolved() {} };
 function fixture() {
@@ -33,6 +34,71 @@ function fixture() {
   return { root, source, config, project: config.projects.test, store, task, executor, g,
     close() { store.close(); rmSync(root, { recursive: true, force: true }); } };
 }
+
+test('natural owner PR request reaches a checked, durable preview through a simulated semantic proposal', async () => {
+  const f=fixture(),views:View[]=[],cards:string[]=[];let runs=0;
+  f.config.groupChats=true;
+  const conversation={anchorId:'root',sourceId:'root',threadId:'topic',scope:'thread' as const};
+  f.store.saveConversation(f.task.id,conversation);f.store.set(f.task.id,'review','Changes ready');
+  const executor=new WorkspaceExecutor(f.config,f.store,{run:async(t,p,h)=>{
+    runs++;assert.equal(t.prompt,'可以的，提交代码创建PR到main');
+    writeFileSync(join(p.path,'README.md'),'changed\n');
+    h.proposePublication!({repository:'',baseBranch:'main'});return '将为你准备 PR 预览。';
+  }});
+  const engine=new Engine(f.store,f.config,executor,{
+    context:async()=>({summary:'',capturedAt:'',truncated:false,messages:[]}),acknowledge:async()=>{},
+    send:async(_chat,_text,_id,view)=>{if(view){views.push(view);if(view.kind==='publication')cards.push(JSON.stringify(buildCard(f.store,f.config,'dm',view)));}},
+  });
+  try {
+    const message={id:'request',chatId:'dm',chatType:'group' as const,senderId:'owner',senderType:'user',text:'可以的，提交代码创建PR到main',botMentioned:true,conversation};
+    engine.receive({...message,id:'foreign',senderId:'other'});assert.equal(runs,0);
+    engine.receive(message);engine.receive(message);
+    for(let n=0;n<1000&&f.store.get(f.task.id)?.status!=='review';n++)await delay(5);
+    assert.equal(f.store.get(f.task.id)?.status,'review');await engine.flush();
+    assert.equal(runs,1);assert.equal(views.filter(v=>v.kind==='publication').length,1);
+    const view=views.find(v=>v.kind==='publication')!;
+    assert.deepEqual(view.publicationTarget,{repository:'test/repo',baseBranch:'main'});
+    assert.match(cards[0],/确认创建草稿 PR/);assert.match(cards[0],/content check: passed/);
+    const report=f.store.delivery(f.task.id)!;
+    assert.equal(report.authorizedKey,undefined);assert.equal(report.prUrl,undefined);
+    assert.equal(f.store.get(f.task.id)!.nextAction,'execute');
+    assert.equal(f.g('rev-parse','main'),f.g('rev-parse','origin/main'));
+    f.project.worktree!.github!.baseBranch='staging';
+    const delayed=JSON.stringify(buildCard(f.store,f.config,'dm',view));
+    assert.match(delayed,/请求交付到.*main/);assert.match(delayed,/当前配置为.*staging/);
+    assert.ok(!delayed.includes('确认创建草稿 PR'));
+  } finally {await engine.stop();f.close();}
+});
+
+test('semantic publication previews explain target mismatches and failed validation without offering publication',async()=>{
+  for(const scenario of ['branch','repository','checks','configuration','failure'] as const){
+    const f=fixture();let preview='';
+    const target:PublicationTarget={repository:'',baseBranch:'main'};
+    if(scenario==='branch')target.baseBranch='staging';
+    if(scenario==='repository')target.repository='another/repo';
+    if(scenario==='checks')f.project.worktree!.checks[0].args=['-e','process.exit(1)'];
+    const executor=new WorkspaceExecutor(f.config,f.store,{run:async(_t,p,h)=>{
+      writeFileSync(join(p.path,'README.md'),'changed\n');h.proposePublication!(target);
+      if(scenario==='configuration')f.project.worktree!.github!.baseBranch='staging';
+      if(scenario==='failure')throw Error('execution failed after proposal');
+      return '准备交付';
+    }});
+    const engine=new Engine(f.store,f.config,executor,{send:async(_c,_t,_d,v)=>{
+      if(v?.kind==='publication')preview=JSON.stringify(buildCard(f.store,f.config,'dm',v));
+    }});
+    try{
+      engine.start();for(let n=0;n<1000&&!['review','failed'].includes(f.store.get(f.task.id)!.status);n++)await delay(5);
+      await engine.flush();assert.equal(f.store.delivery(f.task.id)!.authorizedKey,undefined);
+      if(scenario==='configuration'||scenario==='failure'){
+        assert.equal(f.store.get(f.task.id)!.status,'failed');assert.equal(preview,'');
+      }else{
+        assert.equal(f.store.get(f.task.id)!.status,'review');assert.match(preview,/暂不能交付 PR/);
+        assert.match(preview,scenario==='checks'?/独立检查尚未全部通过/:/请求交付到/);
+        assert.ok(!preview.includes('确认创建草稿 PR'));
+      }
+    }finally{await engine.stop();f.close();}
+  }
+});
 test('real worktree isolates dirty source, preserves session workspace, and records independent checks', async () => {
   const f = fixture();
   try {
