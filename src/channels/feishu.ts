@@ -5,6 +5,7 @@ import { messageText, readContext } from './context.js';
 import { Store } from '../store.js';
 import { buildCard, viewKey } from './cards.js';
 import { readableFileReferences } from './file-references.js';
+import { loadMedia, releaseMedia } from './media.js';
 
 export function parseCardAction(data: any): CardAction | undefined {
   const value = data?.action?.value;
@@ -22,7 +23,7 @@ export function parseCardAction(data: any): CardAction | undefined {
 
 export function parseFeishuEvent(data: any, botId?: string): Incoming | undefined {
   const message = data?.message, sender = data?.sender;
-  if (!['text', 'post'].includes(message?.message_type) || !['p2p', 'group'].includes(message?.chat_type)
+  if (!['text', 'post', 'image', 'file', 'media', 'video', 'audio'].includes(message?.message_type) || !['p2p', 'group'].includes(message?.chat_type)
     || sender?.sender_type !== 'user' || (message.chat_type === 'group' && !botId)) return;
   const text = messageText(message.message_type, message.content);
   if (typeof text !== 'string' || typeof message.message_id !== 'string'
@@ -90,7 +91,11 @@ export class FeishuChannel implements Channel {
     signal.throwIfAborted();
   }
   async context(task: Task, signal: AbortSignal) {
-    return readContext(this.client.im.message, task, signal, [this.appId, this.botId ?? '']);
+    const snapshot = await readContext(this.client.im.message, task, signal, [this.appId, this.botId ?? '']);
+    return loadMedia(snapshot, this.client.im.messageResource, this.config.stateDir, signal);
+  }
+  async releaseContext(snapshot: import('../types.js').ContextSnapshot): Promise<void> {
+    await releaseMedia(snapshot, this.config.stateDir);
   }
   async send(chatId: string, text: string, deliveryId: string, view?: View): Promise<void> {
     const scopedTask = view && 'taskId' in view ? this.store.get(view.taskId) : undefined;

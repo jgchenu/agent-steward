@@ -177,7 +177,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : label, `${projectLabel(task.project)} · ${modeLabel}`, color, [stateBox(task.prompt, task.status),
     text((task.result ?? store.latestProgress(task.id)) || (task.status === 'queued' ? '正在排队，轮到后自动开始。' : '任务已开始，结果会更新在这里。'), 4),
     ...(contextSummary ? [caption(contextSummary)] : []),
-    ...(conversation ? [caption('在此话题继续回复可接着处理同一任务；只有主人可派活或确认。')] : []),
+    ...(conversation ? [caption('@我或引用回复我的消息，可接着处理同一任务；普通话题聊天不会触发。')] : []),
     ...(report ? [caption(`实际改动 ${report.files.length} 个文件 · ${report.ready ? '配置验证已通过' : '验证未通过或未运行'}${report.prUrl ? ' · PR 已准备' : ''}`)]
       : task.status === 'review' ? [caption('这是执行结果；请检查内容后确认完成。')] : []), row(...actions),
     row(button('我的任务', { op: 'list' }), ...(report ? [button('查看交付', intent('delivery'))] : []), homeButton()),

@@ -36,16 +36,16 @@ test('a previously misrouted discussion can move to a granted product in the sam
   const original='请调整 ProductName 的柱状图，展示每个平台的数量';delete h.c.projects.code.aliases;
   h.engine.receive(message('one',original));await until(()=>h.store.list()[0]?.status==='review');const old=h.store.list()[0];
   h.engine.updateProjects({...h.c,projects:{...h.c.projects,code:{...h.c.projects.code,aliases:['ProductName']}}});
-  h.engine.receive({...message('two','继续处理 ProductName 的刚才需求'),botMentioned:false});
+  h.engine.receive({...message('two','继续处理 ProductName 的刚才需求'),botMentioned:true});
   await until(()=>h.runs.length===2&&h.store.list().every(t=>t.status==='review'));await h.engine.flush();
   const next=h.store.conversationTask('group',message('three','').conversation)!;
   assert.notEqual(next.id,old.id);assert.equal(next.project,'code');assert.equal(h.runs[1].threadId,null);assert.match(h.runs[1].prompt,/展示每个平台的数量/);
   assert.equal(h.store.get(old.id)!.project,'general');assert.equal(h.store.get(old.id)!.threadId,'session-1');
   h.store.bindConversation('group','late-reply',old.id);
   assert.equal(h.store.conversationTask('group',{anchorId:'root',sourceId:'three',parentId:'late-reply',scope:'thread'})!.id,next.id);
-  h.engine.receive({...message('three','继续补充测试'),botMentioned:false});await until(()=>h.runs.length===3&&h.store.get(next.id)?.status==='review');
+  h.engine.receive({...message('three','继续补充测试'),botMentioned:true});await until(()=>h.runs.length===3&&h.store.get(next.id)?.status==='review');
   assert.equal(h.runs[2].id,next.id);assert.equal(h.runs[2].threadId,'session-2');
-  const count=h.runs.length;h.engine.receive({...message('three','重复消息'),botMentioned:false});await h.engine.flush();assert.equal(h.runs.length,count);
+  const count=h.runs.length;h.engine.receive({...message('three','重复消息'),botMentioned:true});await h.engine.flush();assert.equal(h.runs.length,count);
  }finally{await h.close()}
 });
 test('switching repositories preserves old delivery and worktree, resets the execution session, and invalidates old controls',async()=>{
@@ -53,7 +53,7 @@ test('switching repositories preserves old delivery and worktree, resets the exe
   h.engine.receive(message('one','ProductName 分析'));await until(()=>h.store.list()[0]?.status==='review');const old=h.store.list()[0];
   const workspace={taskId:old.id,source:'/code',path:'/isolated/code',branch:'steward/'+old.id,baseRef:'feature/current',baseSha:'abc'};
   h.store.saveWorkspace(workspace);const actionId=h.store.action('group',{op:'continue',taskId:old.id,revision:old.updatedAt,conversation:old.conversation});
-  h.engine.receive({...message('two','OtherProduct 看看文档'),botMentioned:false});await until(()=>h.runs.length===2&&h.store.list().every(t=>t.status==='review'));
+  h.engine.receive({...message('two','OtherProduct 看看文档'),botMentioned:true});await until(()=>h.runs.length===2&&h.store.list().every(t=>t.status==='review'));
   const next=h.store.conversationTask('group',message('x','').conversation)!;
   assert.equal(next.project,'other');assert.equal(next.mode,'read-only');assert.equal(h.runs[1].threadId,null);assert.deepEqual(h.store.workspace(old.id),workspace);assert.equal(h.store.workspace(next.id),undefined);
   assert.equal(h.engine.handleAction({id:'old',senderId:'owner',chatId:'group',messageId:'card',actionId,fields:{body:'继续修改'}}).toast.type,'error');
@@ -64,13 +64,13 @@ test('ambiguous aliases require one owner choice; stale and revoked choices cann
  const h=harness();try{
   h.engine.receive(message('one','讨论一下'));await until(()=>h.store.list()[0]?.status==='review');
   h.c.projects.other.aliases=['ProductName'];
-  h.engine.receive({...message('two','ProductName 改进图表'),botMentioned:false});await h.engine.flush();const view=h.sent.at(-1)!.view!;assert.equal(view.kind,'choose-project');assert.equal(h.runs.length,1);
+  h.engine.receive({...message('two','ProductName 改进图表'),botMentioned:true});await h.engine.flush();const view=h.sent.at(-1)!.view!;assert.equal(view.kind,'choose-project');assert.equal(h.runs.length,1);
   const card=buildCard(h.store,h.c,'group',view) as any;const ids=card.body.elements.filter((e:any)=>e.tag==='button').map((e:any)=>e.behaviors[0].value.actionId);
   const action={id:'choice',senderId:'owner',chatId:'group',messageId:'card',actionId:ids[0],fields:{project:'forged'}};
   assert.equal(h.engine.handleAction({...action,senderId:'other'}).toast.type,'error');
   assert.equal(h.engine.handleAction(action).toast.type,'success');await until(()=>h.runs.length===2&&h.store.list().every(t=>t.status==='review'));
   assert.equal(h.runs[1].project,'code');assert.equal(h.engine.handleAction({...action,id:'second',actionId:ids[1]}).toast.type,'error');
-  h.engine.receive({...message('three','ProductName 继续'),botMentioned:false});await h.engine.flush();const last=buildCard(h.store,h.c,'group',h.sent.at(-1)!.view!) as any;
+  h.engine.receive({...message('three','ProductName 继续'),botMentioned:true});await h.engine.flush();const last=buildCard(h.store,h.c,'group',h.sent.at(-1)!.view!) as any;
   const revoked=last.body.elements.find((e:any)=>e.tag==='button').behaviors[0].value.actionId;delete h.c.projects.code;
   assert.equal(h.engine.handleAction({...action,id:'revoked',actionId:revoked}).toast.type,'error');
  }finally{await h.close()}
@@ -80,7 +80,7 @@ test('running approvals and non-owner messages cannot initiate a project handoff
  const engine=new Engine(store,c,{run:async(_t,_p,h,signal)=>new Promise((_resolve,reject)=>{runs++;h.request({kind:'approval',description:'Approve tool',resolve:()=>{}});signal.addEventListener('abort',()=>reject(Error('stop')),{once:true})})},{context:async()=>({capturedAt:'',truncated:false,messages:[],summary:''}),send:async()=>{}});
  try{
   engine.receive(message('one','ProductName 修改'));await until(()=>store.list()[0]?.status==='waiting_approval');
-  engine.receive({...message('two','OtherProduct 修改'),botMentioned:false});engine.receive({...message('three','OtherProduct 修改'),senderId:'other'});await engine.flush();
+  engine.receive({...message('two','OtherProduct 修改'),botMentioned:true});engine.receive({...message('three','OtherProduct 修改'),senderId:'other'});await engine.flush();
   assert.equal(runs,1);assert.equal(store.list().length,1);assert.equal(store.requests(store.list()[0].id).length,1);
  }finally{await engine.stop();store.close()}
 });
