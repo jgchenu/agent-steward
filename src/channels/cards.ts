@@ -100,6 +100,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   const task = store.get(view.taskId);
   if (!task || task.chatId !== chatId) return card('任务不可用', '请重新打开任务列表', 'grey', [box('找不到当前会话中的任务。'), homeButton()]);
   const [label, color] = status[task.status];
+  const merged = task.nextAction === 'merge' ? store.mergeReceipt(task.id) : undefined;
   const contextSummary = store.context(task.id)?.summary;
   const report = store.delivery(task.id), project = config.projects[task.project];
   const modeLabel = task.mode === 'workspace-write' ? '允许修改 · 独立目录' : '只读分析';
@@ -160,6 +161,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   const busy = ['queued', 'running', 'waiting_input', 'waiting_approval'].includes(task.status);
   const metadata = (): Element => ({ tag: 'collapsible_panel', expanded: false, header: { title: plain('代码与验证记录') }, elements: [
     text(codeSourceDetails(report, project, !!conversation)),
+    ...(merged ? [text(`已合并 PR：${merged.url}\n来源提交：${merged.head}\n合并提交：${merged.commit}\n目标分支：${merged.target}\n远端 PR：${merged.files} 个文件，+${merged.additions}/-${merged.deletions}\nPR 标题：${merged.title}`)] : []),
     ...(report ? [text(`Steward 独立检查：${configuredCheckSummary(report, project)}`)] : []),
     ...(report?.evidenceIds?.length ? [caption(`本次已保存 ${report.evidenceIds.length} 张截图，发送状态以话题消息为准。`)] : []),
     ...(report?.evidenceWarning ? [caption(report.evidenceWarning)] : []),
@@ -197,11 +199,17 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
       caption('仅适用于本次操作。'), metadata(),
     ]);
   }
+  if (task.nextAction === 'merge' && task.status === 'review' && merged) return card('PR 已合并', projectLabel(task.project), 'green', [
+    text(`${merged.title}\n合并到 ${merged.target} · ${merged.files} 个文件`),
+    ...(merged.summary ? [text(`PR 说明摘要：${merged.summary}`)] : []),
+    caption('部署状态未核验。'),
+    row(button('查看详情', intent('result')), {tag:'button',text:plain('查看 PR'),type:'primary_filled',width:'fill',behaviors:[{type:'open_url',default_url:merged.url}]}),
+  ]);
   const actions: Element[] = [button('查看详情', intent('result'))];
   if (busy) actions.push(button('停止', intent('cancel'), false, '停止后会保留已有改动，不会自动回滚。'));
   else { const link = prButton(); if (link) actions.push(link); }
-  return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : task.status === 'review' ? '处理结果' : label, projectLabel(task.project), color, [
-    text((task.result ?? store.latestProgress(task.id)) || (task.status === 'queued' ? '已排队，轮到后开始。' : '正在处理，结果会在这里回复。'), 6),
+  return card(task.nextAction === 'merge' && busy ? '正在处理合并' : task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : task.status === 'review' ? '处理结果' : label, projectLabel(task.project), color, [
+    text((task.nextAction === 'merge' && busy ? '正在核对或执行本次 PR 合并，结果确认后会更新这里。' : task.result ?? store.latestProgress(task.id)) || (task.status === 'queued' ? '已排队，轮到后开始。' : '正在处理，结果会在这里回复。'), 6),
     ...(report ? [caption(`${codeSourceSummary(report)} · ${report.files.length} 个改动文件`)] : []),
     row(...actions),
   ]);

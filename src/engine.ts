@@ -1,6 +1,7 @@
+import { viewKey } from './channels/cards.js';
 import { CONVERSATION, conversationProject } from './conversation.js';
 import { permissionMode, permissionRank } from './permissions.js';
-import { codeSourceReceipt, codeSourceDetails, configuredCheckSummary } from './code-source.js';
+import { codeSourceReceipt, codeSourceDetails, codeSourceChanged, deliveryFooter } from './code-source.js';
 import { baselinePreview, restartAtBaseline, validBaseRef } from './baseline.js';
 import { namedProjects, projectChoices, requiresProject, ungrantedNames } from './routing.js';
 import { Store } from './store.js';
@@ -318,6 +319,13 @@ export class Engine {
     }
     return { toast: { type: 'success', content: view ? '已更新' : '已处理' } };
   }
+  private refreshTaskCard(task: Task): void {
+    const view: View = {kind:'task', taskId:task.id, conversation:task.conversation};
+    const targetMessageId = this.store.cardMessage(task.chatId, viewKey(view));
+    // Patch only the existing task card; the ordinary reply supplies notification.
+    // Never replace a card the owner has navigated into another view.
+    if (targetMessageId) this.store.enqueue(task.chatId, '', {...view,targetMessageId});
+  }
   private updateWaiting(id: string): void {
     const remaining = this.store.requests(id);
     const status: Status = remaining.some(r => r.kind === 'approval') ? 'waiting_approval'
@@ -345,9 +353,11 @@ export class Engine {
       if (task.modelSelection) this.store.event(task.id, 'model_selection', JSON.stringify(task.modelSelection));
       const project = task.project === CONVERSATION ? conversationProject(this.config) : this.config.projects[task.project];
       if (!project) throw new Error('项目配置已移除。');
+      const previousReport = this.store.delivery(task.id);
       const hooks: RunHooks = {
         prepared: report => {
           abort.signal.throwIfAborted();
+          if (!codeSourceChanged(previousReport, report)) return;
           this.store.enqueue(task.chatId, codeSourceReceipt(project.label ?? task.project, report), { kind: 'reply', taskId: task.id });
           void this.flush();
         },
@@ -370,7 +380,10 @@ export class Engine {
       };
       if (task.nextAction === 'merge') {
         const result=await this.mergeRunner(this.store,this.config,task,project,hooks,abort.signal);
-        abort.signal.throwIfAborted();this.store.set(task.id,'review',result);
+        abort.signal.throwIfAborted();this.store.transaction(() => {
+          this.store.set(task.id,'review',result);
+          this.refreshTaskCard(task);
+        });
         this.store.enqueue(task.chatId,result,{kind:'reply',taskId:task.id});return;
       }
       if (task.nextAction === 'baseline') {
@@ -414,7 +427,7 @@ export class Engine {
       if (abort.signal.aborted) throw abort.signal.reason;
       this.store.set(task.id, 'review', result);
       const report = this.store.delivery(task.id);
-      const evidence = report ? `\n实际改动：${report.files.length} 个文件\nSteward 独立检查：${configuredCheckSummary(report, project)}\n${report.prUrl ?? ''}` : '';
+      const evidence = report ? `\n\n${deliveryFooter(report, project)}` : '';
       if (task.conversation) this.store.enqueue(task.chatId, result + (report && task.mode === 'workspace-write' ? evidence : ''), { kind: 'reply', taskId: task.id });
       else this.store.enqueue(task.chatId, `任务 ${task.id} 已产出结果，等待你验收（执行器报告，尚非独立验证）。\n${result}${evidence}\n`
         + `验收：/done ${task.id}\n继续：/continue ${task.id} <要求>`, { kind: 'task', taskId: task.id });
@@ -425,6 +438,7 @@ export class Engine {
       if (state !== 'cancelled') {
         const reason = error instanceof Error ? error.message : '执行失败';
         this.store.set(task.id, this.stopped ? 'interrupted' : 'failed', reason);
+        if (task.nextAction === 'merge') this.refreshTaskCard(task);
         if (task.conversation) this.store.enqueue(task.chatId, `这次没能完成：${reason}\n你可以引用回复这条消息，或 @我补充要求，我会接着处理。`, { kind: 'reply', taskId: task.id });
         else this.store.enqueue(task.chatId, `任务 ${task.id} ${this.stopped ? '已中断' : '失败'}：${reason}\n`
           + `不会自动重试已发生的操作。检查后用 /continue ${task.id} <要求> 继续。`, { kind: 'task', taskId: task.id });
