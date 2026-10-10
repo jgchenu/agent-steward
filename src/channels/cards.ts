@@ -58,14 +58,16 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   if (view.kind === 'home') {
     const projects = Object.entries(config.projects);
     return card('交给我来做', 'Agent Steward · 你的数字员工', 'blue', [
-      box('选一个项目，告诉我希望完成什么。需要你决定时，我会在这里找你。'),
+      box('选择工作项目和本次工作方式，再告诉我希望完成什么。需要你决定时，我会在这里找你。'),
       form('开始执行', { op: 'new' }, [
+        text('工作项目'),
         { tag: 'select_static', name: 'project', required: true, width: 'fill', placeholder: plain('选择项目'),
           ...(projects.length === 1 ? { initial_option: projects[0][0] } : {}),
-          options: projects.map(([name, p]) => ({ text: plain(`${name} · ${p.sandbox === 'read-only' ? '只读' : '可修改文件'}`), value: name })) },
+          options: projects.map(([name]) => ({ text: plain(name), value: name })) },
+        text('本次工作方式'),
         { tag: 'select_static', name: 'mode', required: true, width: 'fill', initial_option: 'read-only',
           options: [{ text: plain('只读分析 · 不修改文件'), value: 'read-only' },
-            ...(projects.some(([, p]) => p.sandbox === 'workspace-write' && p.worktree) ? [{ text: plain('允许修改 · 独立目录，完成后验证'), value: 'workspace-write' }] : [])] },
+            ...(projects.some(([, p]) => p.sandbox === 'workspace-write' && p.worktree) ? [{ text: plain('允许修改 · 完成后自动验证'), value: 'workspace-write' }] : [])] },
         input('任务要求', '例如：检查这个项目，并给我三条改进建议'),
       ]), row(button('我的任务', { op: 'list' }), button('刷新入口', { op: 'home' })),
     ]);
