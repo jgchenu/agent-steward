@@ -18,6 +18,7 @@ test('permission saves are explicit, revision-bound, preserve grants and migrate
   const save=(mode:PermissionMode,confirmed=false)=>registry.apply({revision:s.revision,grants:s.projects.map(p=>({id:p.id,mode:p.mode})),permissionMode:mode,confirmFullAccess:confirmed});
   const before=readFileSync(file,'utf8');assert.throws(()=>save('full-access'),/确认/);assert.equal(readFileSync(file,'utf8'),before);
   assert.throws(()=>save('invalid' as PermissionMode),/无效/);assert.equal(readFileSync(file,'utf8'),before);
+  s=save('sandbox-auto');assert.equal(loadConfig(file).permissionMode,'sandbox-auto');
   s=save('full-access',true);assert.equal(loadConfig(file).permissionMode,'full-access');assert.equal(loadConfig(file).projects.general.sandbox,'read-only');
   const stale=s;s=save('ask');assert.equal(loadConfig(file).permissionMode,'ask');assert.equal(JSON.parse(readFileSync(file,'utf8')).approvalsReviewer,'auto_review');
   assert.throws(()=>registry.apply({revision:stale.revision,grants:stale.projects.map(p=>({id:p.id,mode:p.mode})),permissionMode:'full-access',confirmFullAccess:true}),/配置已变化/);

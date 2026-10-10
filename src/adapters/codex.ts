@@ -1,3 +1,4 @@
+import { readModels, validateSelection } from '../models.js';
 import { CONVERSATION } from '../conversation.js';
 import { runtimePermissions } from '../permissions.js';
 import { elicitation } from './elicitation.js';
@@ -74,6 +75,10 @@ export class CodexExecutor implements Executor {
         };
         if (message.method === 'item/commandExecution/requestApproval'
           || message.method === 'item/fileChange/requestApproval') {
+          if (permissions.approvalPolicy === 'never') {
+            respond({decision:'decline'});
+            hooks.progress('当前模式不允许扩大执行权限，该操作已拒绝。'); return;
+          }
           const details = message.method.includes('commandExecution')
             ? { command: p.command, cwd: p.cwd, reason: p.reason, network: p.networkApprovalContext }
             : { reason: p.reason, grantRoot: p.grantRoot, changes: fileChanges.get(p.itemId) };
@@ -134,8 +139,9 @@ export class CodexExecutor implements Executor {
     try {
       await rpc.initialize();
       await rpc.subscription();
+      if (task.modelSelection) validateSelection(task.modelSelection, await readModels(rpc));
       signal.throwIfAborted();
-      const common = { cwd: project.path, modelProvider: 'openai', ...permissions, developerInstructions: INSTRUCTIONS + (task.project === CONVERSATION ? '\nThis is a conversation without a code project. The cwd is internal scratch space, not a user project. Answer using the message and attached context. Do not search local repositories, infer a project from cwd, change files or request broader tool permissions. If code is required, ask which authorized Codex project to use. Do not ask the owner to configure a general analysis directory.' : '') };
+      const common = { cwd: project.path, modelProvider: 'openai', ...(task.modelSelection ? {model:task.modelSelection.model} : {}), ...permissions, developerInstructions: INSTRUCTIONS + (task.project === CONVERSATION ? '\nThis is a conversation without a code project. The cwd is internal scratch space, not a user project. Answer using the message and attached context. Do not search local repositories, infer a project from cwd, change files or request broader tool permissions. If code is required, ask which authorized Codex project to use. Do not ask the owner to configure a general analysis directory.' : '') };
       const response = await rpc.request(task.threadId ? 'thread/resume' : 'thread/start',
         task.threadId ? { ...common, threadId: task.threadId } : { ...common, projectId: project.codexProjectId ?? null });
       threadId = response?.thread?.id;
@@ -146,8 +152,9 @@ export class CodexExecutor implements Executor {
         ...(a.kind === 'image' && a.status === 'attached' && a.path ? [{ type: 'localImage', path: a.path }] : []),
         ...(a.visuals ?? []).flatMap(v => [{ type: 'text', text: `消息 ${a.messageId}：${v.label}`, text_elements: [] }, { type: 'localImage', path: v.path }]),
       ]);
-      await rpc.request('turn/start', { threadId, input: [{ type: 'text', text: taskInput(task), text_elements: [] }, ...images],
-        approvalPolicy: permissions.approvalPolicy, approvalsReviewer: permissions.approvalsReviewer });
+      await rpc.request('turn/start', { threadId, ...(task.modelSelection ?? {}), input: [{ type: 'text', text: taskInput(task), text_elements: [] }, ...images],
+        approvalPolicy: permissions.approvalPolicy, approvalsReviewer: permissions.approvalsReviewer,
+        sandboxPolicy: permissions.sandbox === 'danger-full-access' ? {type:'dangerFullAccess'} : permissions.sandbox === 'read-only' ? {type:'readOnly',networkAccess:false} : {type:'workspaceWrite', writableRoots:[project.path], networkAccess:task.permissionMode === 'sandbox-auto', excludeTmpdirEnvVar:task.permissionMode === 'sandbox-auto', excludeSlashTmp:task.permissionMode === 'sandbox-auto'} });
       return await completion;
     } finally {
       finished = true;

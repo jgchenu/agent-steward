@@ -39,7 +39,7 @@ The demo uses a clearly labeled simulator, stores state in a temporary directory
 
 Install the official Codex CLI separately and sign in using `codex login` with ChatGPT. Steward does not read or copy its authentication file. It drives the official App Server over stdio and checks `account/read` for ChatGPT authentication before inference. It forces the OpenAI provider and ChatGPT login mode, removes API-key variables from the child environment, and has **no API fallback**.
 
-Subscription limits and provider terms still apply. App Server protocol compatibility was smoke-tested with Codex CLI 0.160.0; changes upstream may require adapter updates. Model execution uses the local Codex configuration and its available model. Do not treat a subscription as unlimited capacity.
+Subscription limits and provider terms still apply. App Server protocol compatibility was smoke-tested with Codex CLI 0.160.0; changes upstream may require adapter updates. Choose a model and its supported reasoning effort in the local console. Without an explicit selection, execution retains the local Codex/session settings. Do not treat a subscription as unlimited capacity.
 
 ### Create a dedicated Feishu bot
 
@@ -93,6 +93,8 @@ npm run build
 npm start
 ```
 
+Once the service is running, bookmark http://127.0.0.1:17831/ on that computer to manage model, reasoning effort, permissions and projects. You can also tell your bot “打开控制台” to obtain the link. The console starts with the bot; it cannot be opened from another device.
+
 Keep the process and machine awake. Closing the service interrupts active work; it is not a hosted cloud agent. Start manually for initial evaluation; OS service installers are planned.
 
 ## Commands
@@ -103,7 +105,7 @@ Keep the process and machine awake. Closing the service interrupts active work; 
 | `/new <project> <task>` | Create a read-only task |
 | `/edit <project> <task>` | Modify an allowlisted project in an isolated Git worktree |
 | `/publish <task>` | Open the Feishu PR preview; publication needs the card confirmation |
-| Plain text | Use the named authorized project, default workspace or sole project; ask only when ambiguous |
+| Plain text | Use a named authorized Codex project for code; ordinary conversation needs no project; ask when the code target is missing |
 | `/list`, `/status <task>` | View status, latest recorded progress, result and outstanding request IDs |
 | `/cancel <task>` | Stop execution; existing changes are retained |
 | `/continue <task> <instructions>` | Queue another turn using the saved Codex thread |
@@ -119,7 +121,7 @@ Enable `card.action.trigger` under the application’s **callback configuration*
 
 ## Group conversations
 
-With group mode enabled, owner @mentions directly start tasks using an explicitly named authorized project or the default workspace. Ambiguous requests get a one-click project choice without retyping. An OnIt reaction acknowledges execution before inference; results and human questions reply in the thread. Replies within a bound topic continue the same task and Codex session. Cards retain their originating topic, and results are posted as thread replies. Steward reads bounded text/rich-text/card context from that group or topic before inference; missing permissions stop execution explicitly. Other members cannot control tasks. Group results and human requests are visible to group participants.
+With group mode enabled, owner @mentions directly start tasks using an explicitly named authorized project, or no project for ordinary conversation. Ambiguous requests get a one-click project choice without retyping. An OnIt reaction acknowledges execution before inference; results and human questions reply in the thread. Replies within a bound topic continue the same task and Codex session. Cards retain their originating topic, and results are posted as thread replies. Steward reads bounded text/rich-text/card context from that group or topic before inference; missing permissions stop execution explicitly. Other members cannot control tasks. Group results and human requests are visible to group participants.
 
 ## What survives a restart
 

@@ -13,7 +13,7 @@ class FakeRpc implements RpcPort {
   onTurn: () => void = () => {};
   async initialize() { this.calls.push('initialize'); }
   async subscription() { this.calls.push('subscription'); }
-  async request(method: string, params: unknown) {
+  async request(method: string, params: unknown): Promise<any> {
     this.calls.push(method); this.params[method] = params;
     if (method === 'thread/start' || method === 'thread/resume') return { thread: { id: 'thread' } };
     if (method === 'turn/start') queueMicrotask(this.onTurn);
@@ -190,14 +190,18 @@ test('unsupported automatic reviewer fails without full-access or manual-policy 
 });
 
 test('console modes map explicitly on new and resumed threads; full access cannot widen read-only tasks', async () => {
-  for (const permissionMode of ['ask','auto','full-access'] as const) for (const sandbox of ['read-only','workspace-write'] as const) for (const threadId of [null,'thread']) {
+  for (const permissionMode of ['ask','auto','sandbox-auto','full-access'] as const) for (const sandbox of ['read-only','workspace-write'] as const) for (const threadId of [null,'thread']) {
     const rpc = new FakeRpc(), s = setup(rpc);rpc.onTurn=()=>rpc.finish();
     await s.executor.run({...task,permissionMode,threadId}, {path:'.',sandbox},s.hooks,AbortSignal.timeout(5000));
     const common=rpc.params[threadId?'thread/resume':'thread/start'];
     assert.equal(common.sandbox,permissionMode==='full-access'&&sandbox==='workspace-write'?'danger-full-access':sandbox);
-    assert.equal(common.approvalPolicy,permissionMode==='full-access'?'never':'on-request');
+    assert.equal(common.approvalPolicy,['full-access','sandbox-auto'].includes(permissionMode)?'never':'on-request');
     assert.equal(common.approvalsReviewer,permissionMode==='auto'?'auto_review':'user');
     assert.equal(rpc.params['turn/start'].approvalPolicy,common.approvalPolicy);
+    const policy=rpc.params['turn/start'].sandboxPolicy;
+    assert.equal(policy.type,common.sandbox==='danger-full-access'?'dangerFullAccess':sandbox==='read-only'?'readOnly':'workspaceWrite');
+    if(policy.type==='workspaceWrite'){assert.deepEqual(policy.writableRoots,['.']);assert.equal(policy.networkAccess,permissionMode==='sandbox-auto');assert.equal(policy.excludeSlashTmp,permissionMode==='sandbox-auto');}
+    if(policy.type==='readOnly')assert.equal(policy.networkAccess,false);
     assert.equal(rpc.params['turn/start'].approvalsReviewer,common.approvalsReviewer);
   }
 });
@@ -208,4 +212,21 @@ test('conversation execution cannot inherit full access and new code threads kee
  assert.equal(rpc.params['thread/start'].sandbox,'read-only');assert.equal(rpc.params['thread/start'].approvalPolicy,'never');assert.equal(rpc.params['thread/start'].projectId,null);
  assert.match(rpc.params['thread/start'].developerInstructions,/conversation without a code project/);
  const code=new FakeRpc(),cs=setup(code);code.onTurn=()=>code.finish();await cs.executor.run(task,{path:'.',sandbox:'read-only',codexProjectId:'codex-project'},cs.hooks,AbortSignal.timeout(5000));assert.equal(code.params['thread/start'].projectId,'codex-project');
+});
+
+test('explicit model and effort are applied to new and resumed turns; unavailable combinations stop before inference',async()=>{
+ for(const threadId of [null,'thread']){
+  const rpc=new FakeRpc(),request=rpc.request.bind(rpc);
+  rpc.request=async(method,params)=>method==='model/list'?{data:[{model:'model-a',displayName:'A',defaultReasoningEffort:'low',supportedReasoningEfforts:[{reasoningEffort:'low'},{reasoningEffort:'high'}]}]}:request(method,params);
+  rpc.onTurn=()=>rpc.finish();await setup(rpc).run({...task,threadId,modelSelection:{model:'model-a',effort:'high'}});
+  assert.equal(rpc.params[threadId?'thread/resume':'thread/start'].model,'model-a');assert.equal(rpc.params['turn/start'].model,'model-a');assert.equal(rpc.params['turn/start'].effort,'high');
+ }
+ const rpc=new FakeRpc();rpc.request=async()=>({data:[]});
+ await assert.rejects(setup(rpc).run({...task,modelSelection:{model:'gone',effort:'high'}}),/不可用/);assert.ok(!rpc.calls.includes('turn/start'));
+});
+
+
+test('never-approval modes reject unexpected escalation without creating a human request',async()=>{
+ const rpc=new FakeRpc(),requests:HumanRequest[]=[];rpc.onTurn=()=>{rpc.emit('item/commandExecution/requestApproval',{command:'outside operation'},77);rpc.finish()};
+ await setup(rpc,requests).run({...task,permissionMode:'sandbox-auto'});assert.equal(requests.length,0);assert.deepEqual(rpc.writes.find(m=>m.id===77).result,{decision:'decline'});
 });

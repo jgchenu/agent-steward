@@ -31,8 +31,9 @@ export class Engine {
   constructor(readonly store: Store, readonly config: Config, private executor: Executor,
     private channel: Channel) {}
 
-  updateProjects(next: Pick<Config, 'projects' | 'defaultProject' | 'codexProjects'> & Partial<Pick<Config, 'permissionMode' | 'approvalsReviewer'>>): void {
+  updateProjects(next: Pick<Config, 'projects' | 'defaultProject' | 'codexProjects'> & Partial<Pick<Config, 'permissionMode' | 'approvalsReviewer' | 'modelSelection'>>): void {
     const previous = this.config.projects;
+    if ('modelSelection' in next) this.config.modelSelection = next.modelSelection;
     if ('permissionMode' in next || 'approvalsReviewer' in next) {
       const mode = permissionMode(next);
       this.config.permissionMode = mode; this.config.approvalsReviewer = next.approvalsReviewer;
@@ -47,7 +48,7 @@ export class Engine {
     }
   }
   permissionState() {
-    return { permissionMode: permissionMode(this.config), activeMode: this.active?.task.permissionMode, active: !!this.active };
+    return { permissionMode: permissionMode(this.config), activeMode: this.active?.task.permissionMode, active: !!this.active, ...(this.config.modelSelection ? {modelSelection:this.config.modelSelection} : {}), ...(this.active?.task.modelSelection ? {activeModelSelection:this.active.task.modelSelection} : {}) };
   }
   start(): void {
     this.store.recover();
@@ -81,6 +82,9 @@ export class Engine {
       const match = /^(\/\S+)(?:\s+([\s\S]*))?$/.exec(text);
       let command = match?.[1] ?? '/new';
       let args = match?.[2]?.trim() ?? '';
+      if (['控制台','打开控制台','设置','/console'].includes(text)) {
+        reply(this.config.consoleUrl ? `在运行分身的电脑上打开：[分身控制台](${this.config.consoleUrl})。可以收藏此地址，设置权限、模型和项目。手机或其他电脑暂不支持访问这个本机地址。` : '控制台尚未启动，请在运行分身的电脑上启动新版服务。'); return;
+      }
       let navigation = ['首页', '工作台', '帮助'].includes(text);
       if (!match && bound && /^(创建|提交|交付|准备)(草稿\s*)?\s*PR$/i.test(text)) { command = '/publish'; args = bound.id; navigation = true; }
       if (!match && bound && /^(代码来源|查看代码来源|当前代码版本)$/.test(text)) {
@@ -310,7 +314,7 @@ export class Engine {
     if (this.stopped || this.active) return;
     const queued = this.store.list().find(t => t.status === 'queued');
     if (!queued) return;
-    const task = { ...queued, permissionMode: permissionMode(this.config) };
+    const task = { ...queued, permissionMode: permissionMode(this.config), modelSelection: this.config.modelSelection ? {...this.config.modelSelection} : undefined };
     const abort = new AbortController();
     this.store.set(task.id, 'running');
     if (!task.conversation || !this.channel.acknowledge) this.store.enqueue(task.chatId, `开始执行 ${task.id} · ${task.project === CONVERSATION ? '对话' : task.project}`, { kind: 'task', taskId: task.id });
@@ -324,6 +328,7 @@ export class Engine {
     try {
       abort.signal.throwIfAborted();
       this.store.event(task.id, 'permission_mode', task.permissionMode ?? 'ask');
+      if (task.modelSelection) this.store.event(task.id, 'model_selection', JSON.stringify(task.modelSelection));
       const project = task.project === CONVERSATION ? conversationProject(this.config) : this.config.projects[task.project];
       if (!project) throw new Error('项目配置已移除。');
       const hooks: RunHooks = {

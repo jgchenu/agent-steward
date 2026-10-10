@@ -1,3 +1,4 @@
+import { desktopApprovalPlan } from './desktop-hooks.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
@@ -11,13 +12,17 @@ export class CodexRpc {
   onExit: (error: Error) => void = () => {};
   private closed = false;
   private exited: Promise<void>;
+  private desktopHooks: Array<{key:string;command:string}>;
+  private cwd: string;
   constructor(command: string, cwd: string) {
+    this.cwd=cwd;
+    const desktop=desktopApprovalPlan(); this.desktopHooks=desktop.hooks;
     const env = { ...process.env };
     for (const key of Object.keys(env)) {
       if (/^(FEISHU_|STEWARD_)|^(OPENAI_API_KEY|CODEX_API_KEY|ANTHROPIC_API_KEY)$/.test(key)) delete env[key];
     }
     this.child = spawn(command, ['app-server', '--listen', 'stdio://', '-c', 'model_provider="openai"',
-      '-c', 'forced_login_method="chatgpt"'], { cwd, env, stdio: 'pipe', detached: process.platform !== 'win32' });
+      '-c', 'forced_login_method="chatgpt"', ...desktop.overrides.flatMap(value=>['-c',value])], { cwd, env, stdio: 'pipe', detached: process.platform !== 'win32' });
     this.exited = new Promise(resolve => this.child.once('close', () => resolve()));
     // Drain stderr without retaining potentially sensitive local diagnostic output.
     this.child.stderr.resume();
@@ -71,6 +76,13 @@ export class CodexRpc {
     await this.request('initialize', { clientInfo: { name: 'agent_steward', title: 'Agent Steward', version: '0.1.0' },
       capabilities: { experimentalApi: true } });
     this.write({ method: 'initialized' });
+    if (this.desktopHooks.length) {
+      const result=await this.request('hooks/list',{cwds:[this.cwd]});
+      const hooks=result?.data?.find((entry: any)=>entry.cwd===this.cwd)?.hooks;
+      if (!Array.isArray(hooks) || this.desktopHooks.some(expected=>!hooks.some((h: any)=>h.key===expected.key && h.command===expected.command && h.enabled===false && h.isManaged===false))) {
+        throw Error('Codex 未确认分身专用审批路由；请升级 Codex 后重试。不会自动关闭其他钩子或放宽权限。');
+      }
+    }
   }
   async subscription(): Promise<void> {
     const result = await this.request('account/read', { refreshToken: false });
