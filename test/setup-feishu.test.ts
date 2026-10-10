@@ -27,7 +27,7 @@ test('onboarding uses new-app flow with minimal permissions and binds the verifi
     const env = parseEnv(readFileSync(join(dir, '.env'), 'utf8'));
     assert.equal(env.STEWARD_OWNER_ID, 'ou_owner'); assert.equal(env.FEISHU_APP_SECRET, registration.client_secret);
     assert.equal(statSync(join(dir, '.env')).mode & 0o777, 0o600);
-    assert.equal(JSON.parse(readFileSync(join(dir, 'steward.config.json'), 'utf8')).projects.sandbox.sandbox, 'read-only');
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'steward.config.json'), 'utf8')).projects, {});
     assert.equal(existsSync(join(dir, '.steward/instance.lock')), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

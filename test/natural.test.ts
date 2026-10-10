@@ -18,13 +18,13 @@ test('natural task bypasses forms, acknowledges before inference, preserves full
  const store=new Store(':memory:'),order:string[]=[],sent:View[]=[],tasks:Task[]=[];const config=cfg();
  const engine=new Engine(store,config,{run:async t=>{order.push('run');tasks.push(t);return 'result'}},{acknowledge:async()=>{order.push('reaction')},context:async()=>{order.push('context');return snapshot},send:async(_c,_t,_id,v)=>{if(v)sent.push(v)}});
  try{const text='帮我分析讨论'.repeat(300),m=incoming(text);engine.receive({...m,senderId:'other'});assert.equal(order.length,0);engine.receive(m);engine.receive(m);await until(()=>store.list()[0]?.status==='review');await engine.flush();
- assert.deepEqual(order,['reaction','context','run']);assert.equal(tasks[0].project,'general');assert.equal(tasks[0].prompt,text);assert.equal(tasks[0].mode,'read-only');assert.equal(sent.length,1);assert.equal(sent[0].kind,'reply');
+ assert.deepEqual(order,['reaction','context','run']);assert.equal(tasks[0].project,'__conversation__');assert.equal(tasks[0].prompt,text);assert.equal(tasks[0].mode,'read-only');assert.equal(sent.length,1);assert.equal(sent[0].kind,'reply');
  }finally{await engine.stop();store.close()}
 });
 test('bare mention asks a short question; explicit names route only among grants; ambiguity keeps the full task',async()=>{
  const store=new Store(':memory:'),sent:Array<{view?:View,text:string}>=[];const config=cfg();const engine=new Engine(store,config,{run:async()=> 'done'},{send:async(_c,text,_i,view)=>{sent.push({view,text})},context:async()=>snapshot});
  try{engine.receive(incoming(''));await engine.flush();assert.equal(store.list().length,0);assert.match(sent[0].text,/直接告诉我/);assert.equal(sent[0].view?.kind,'notice');
- assert.deepEqual(projectChoices(config,'看看代码项目的问题'),['code']);assert.deepEqual(projectChoices(config,'decode this'),['general']);
+ assert.deepEqual(projectChoices(config,'看看代码项目的问题'),['code']);assert.deepEqual(projectChoices(config,'decode this'),['__conversation__']);
  const text=('比较通用分析和代码项目：'+'内容'.repeat(8000)).slice(0,16000);engine.receive(incoming(text));await engine.flush();const view=sent.at(-1)!.view!;assert.equal(view.kind,'choose-project');
  const card=buildCard(store,config,'group',view) as any;const button=card.body.elements.find((e:any)=>e.tag==='button');const actionId=button.behaviors[0].value.actionId;
  const click={id:'click',actionId,senderId:'owner',chatId:'group',messageId:'card',fields:{project:'forged',body:'forged'}};

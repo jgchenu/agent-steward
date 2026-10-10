@@ -13,9 +13,9 @@ const until=async(f:()=>boolean)=>{for(let i=0;i<200&&!f();i++)await new Promise
 test('permission saves are explicit, revision-bound, preserve grants and migrate legacy reviewer settings',()=>{
  const dir=mkdtempSync(join(tmpdir(),'steward-permissions-')),file=join(dir,'config.json'),owner=process.env.STEWARD_OWNER_ID;process.env.STEWARD_OWNER_ID='owner';
  try{
-  mkdirSync(join(dir,'general'));const raw={approvalsReviewer:'auto_review',projects:{general:{path:'./general',sandbox:'read-only'}},defaultProject:'general'};
-  writeFileSync(file,JSON.stringify(raw));const registry=new WorkspaceRegistry(file);let s=registry.state();assert.equal(s.permissionMode,'auto');assert.equal(loadConfig(file).permissionMode,'auto');
-  const save=(mode:PermissionMode,confirmed=false)=>registry.apply({revision:s.revision,grants:s.projects.map(p=>({id:p.id,mode:p.mode})),defaultProject:'general',permissionMode:mode,confirmFullAccess:confirmed});
+  mkdirSync(join(dir,'general'));const raw={approvalsReviewer:'auto_review',projects:{general:{path:'./general',sandbox:'read-only'}}};
+  writeFileSync(file,JSON.stringify(raw));const registry=new WorkspaceRegistry(file,()=>[{id:'codex-general',name:'通用分析',roots:[join(dir,'general')]}]);let s=registry.state();assert.equal(s.permissionMode,'auto');assert.equal(loadConfig(file).permissionMode,'auto');
+  const save=(mode:PermissionMode,confirmed=false)=>registry.apply({revision:s.revision,grants:s.projects.map(p=>({id:p.id,mode:p.mode})),permissionMode:mode,confirmFullAccess:confirmed});
   const before=readFileSync(file,'utf8');assert.throws(()=>save('full-access'),/确认/);assert.equal(readFileSync(file,'utf8'),before);
   assert.throws(()=>save('invalid' as PermissionMode),/无效/);assert.equal(readFileSync(file,'utf8'),before);
   s=save('full-access',true);assert.equal(loadConfig(file).permissionMode,'full-access');assert.equal(loadConfig(file).projects.general.sandbox,'read-only');

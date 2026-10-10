@@ -33,14 +33,13 @@ npm run setup:feishu
 
 打开官方授权链接，在飞书中确认创建专用机器人。程序预设仅申请私聊收发消息能力；确认页中的权限以飞书实际展示为准。授权成功后，应用身份直接写入本机 `.env`（权限 `0600`），并使用本次授权返回的用户 `open_id` 绑定主人。密钥不会打印到终端，也不会修改已有应用。
 
-已有 `.env` 时安装流程会拒绝覆盖。若平台没有返回主人身份，或识别为尚未支持的 Lark 租户，服务保持不可启动。默认生成只读 `sandbox` 项目，仍需按[接入指南](docs/feishu-setup.md)检查长连接事件与应用发布状态。扫码成功不等于消息链路已验收。
+已有 `.env` 时安装流程会拒绝覆盖。若平台没有返回主人身份，或识别为尚未支持的 Lark 租户，服务保持不可启动。初始项目授权为空，聊天无需选择项目；代码任务在控制台授权已有 Codex 项目后执行，仍需按[接入指南](docs/feishu-setup.md)检查长连接事件与应用发布状态。扫码成功不等于消息链路已验收。
 
 若使用已有应用或只体验本地终端，可手动配置；已完成扫码配置时不要再次覆盖文件：
 
 ```sh
 cp .env.example .env
 cp steward.config.example.json steward.config.json
-mkdir -p playground
 ```
 
 在本地编辑 `.env` 的 `STEWARD_OWNER_ID`。飞书模式使用该应用下你自己的 `open_id`；只体验本地终端时可填 `local-owner`。不要把密码、Cookie、Token 或应用 Secret 发到聊天里。
@@ -52,14 +51,14 @@ npm run doctor
 npm run local
 ```
 
-输入 `/new sandbox 查看当前目录并给出说明`。真实飞书接入见[操作指南](docs/feishu-setup.md)。
+直接输入聊天内容即可；代码任务先通过 `npm run workspaces` 授权 Codex 项目。真实飞书接入见[操作指南](docs/feishu-setup.md)。
 
 ## 你可以怎么用
 
 | 指令 | 作用 |
 | --- | --- |
 | `/projects` | 查看允许工作的项目 |
-| `/new <项目> <要求>` | 只读分析；普通文本按已授权项目名、默认空间或唯一项目路由 |
+| `/new <项目> <要求>` | 只读分析；普通文本按已授权 Codex 项目名识别，代码目标不明确时询问，普通聊天不绑定项目 |
 | `/edit <项目> <要求>` | 在独立 Git worktree 里执行修改任务 |
 | `/publish <任务ID>` | 打开飞书 PR 预览，点击确认后才发布 |
 | `/list`、`/status <任务ID>` | 查看状态、最近记录的进度、结果和待处理请求 |

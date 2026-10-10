@@ -201,3 +201,11 @@ test('console modes map explicitly on new and resumed threads; full access canno
     assert.equal(rpc.params['turn/start'].approvalsReviewer,common.approvalsReviewer);
   }
 });
+
+test('conversation execution cannot inherit full access and new code threads keep Codex project identity',async()=>{
+ const rpc=new FakeRpc(),s=setup(rpc);rpc.onTurn=()=>rpc.finish();
+ await s.executor.run({...task,project:'__conversation__',permissionMode:'full-access'}, {path:'.',sandbox:'read-only'},s.hooks,AbortSignal.timeout(5000));
+ assert.equal(rpc.params['thread/start'].sandbox,'read-only');assert.equal(rpc.params['thread/start'].approvalPolicy,'never');assert.equal(rpc.params['thread/start'].projectId,null);
+ assert.match(rpc.params['thread/start'].developerInstructions,/conversation without a code project/);
+ const code=new FakeRpc(),cs=setup(code);code.onTurn=()=>code.finish();await cs.executor.run(task,{path:'.',sandbox:'read-only',codexProjectId:'codex-project'},cs.hooks,AbortSignal.timeout(5000));assert.equal(code.params['thread/start'].projectId,'codex-project');
+});

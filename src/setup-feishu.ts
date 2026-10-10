@@ -56,9 +56,8 @@ export async function setupFeishu(options: {
   try {
     const config = join(root, 'steward.config.json');
     if (!existsSync(config)) {
-      mkdirSync(join(root, 'playground'), { recursive: true });
       writeFileSync(config, JSON.stringify({ stateDir: '.steward', codexCommand: 'codex', maxRunMinutes: 60,
-        projects: { sandbox: { path: './playground', sandbox: 'read-only' } } }, null, 2) + '\n',
+        projects: {} }, null, 2) + '\n',
       { flag: 'wx', mode: 0o600 });
     }
     options.signal.throwIfAborted();

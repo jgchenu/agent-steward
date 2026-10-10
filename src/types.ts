@@ -31,6 +31,7 @@ export interface Incoming {
 }
 export interface Check { name: string; command: string; args: string[]; timeoutSeconds?: number }
 export interface Project {
+  codexProjectId?: string;
   path: string; sandbox: 'read-only' | 'workspace-write'; label?: string; aliases?: string[]; description?: string; naturalMode?: 'read-only' | 'workspace-write';
   worktree?: { baseRef: string; checks: Check[]; github?: { repository: string; baseBranch: string } };
 }
@@ -48,6 +49,7 @@ export interface DeliveryReport {
   ready: boolean; validationKey?: string; authorizedKey?: string; prUrl?: string; publishedSha?: string; targetBefore?: string; error?: string;
 }
 export interface Config {
+  codexProjects?: import('./codex-projects.js').CodexProject[];
   permissionMode?: PermissionMode;
   approvalsReviewer?: 'user' | 'auto_review';
   ownerId: string; stateDir: string; codexCommand: string; maxRunMinutes: number;

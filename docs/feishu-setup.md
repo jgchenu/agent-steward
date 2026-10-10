@@ -49,7 +49,6 @@ STEWARD_CONFIG=steward.config.json
 
 ```sh
 cp steward.config.example.json steward.config.json
-mkdir -p playground
 npm run doctor
 npm run build
 npm start
@@ -61,7 +60,7 @@ npm start
 
 1. 主人私聊 `/help`，收到指令列表。
 2. `/projects` 只显示你配置的项目。
-3. `/new sandbox 只回复 STEWARD_OK，不使用工具`，收到任务 ID、开始通知和结果。
+3. `只回复 STEWARD_OK，不使用工具`，收到任务 ID、开始通知和结果。
 4. `/status <任务ID>` 应显示 `review`；发送 `/done <任务ID>` 后才显示 `completed`。
 5. 在一次性测试项目中触发需要人工决定的操作，确认通知包含具体动作，并验证 `/deny <请求ID>` 不批准操作。真实权限触发取决于 Codex 与平台能力，不要用生产发布测试。
 6. 测试 `/cancel`，确认运行结束且已有修改不会被宣称已回滚。
