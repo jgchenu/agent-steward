@@ -1,3 +1,4 @@
+import { collectEvidence, prepareEvidenceDirectory, isEvidencePath, EVIDENCE_DIRECTORY } from './evidence.js';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
@@ -54,7 +55,7 @@ export async function inventory(w: Workspace, signal: AbortSignal): Promise<Pick
   await verifyWorkspace(w, signal);
   const tracked = lines0(await git(w.path, ['diff', '--no-renames', '--name-only', '-z', w.baseSha, '--'], signal));
   const untracked = lines0(await git(w.path, ['ls-files', '--others', '--exclude-standard', '-z'], signal));
-  const files = [...new Set([...tracked, ...untracked])].sort();
+  const files = [...new Set([...tracked, ...untracked])].filter(f => !isEvidencePath(f)).sort();
   if (files.length > 500) throw new Error('改动超过 500 个文件，请拆分任务。');
   const hash = createHash('sha256').update(w.baseSha);
   let bytes = 0;
@@ -72,7 +73,7 @@ export async function inventory(w: Workspace, signal: AbortSignal): Promise<Pick
     } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') hash.update('deleted'); else throw e; }
   }
   const diffStat = await git(w.path, ['diff', '--stat', w.baseSha, '--'], signal);
-  return { files, diffStat: [diffStat, ...untracked.map(f => `新增文件：${f}`)].filter(Boolean).join('\n'),
+  return { files, diffStat: [diffStat, ...untracked.filter(f => !isEvidencePath(f)).map(f => `新增文件：${f}`)].filter(Boolean).join('\n'),
     fingerprint: hash.digest('hex'), headSha: await git(w.path, ['rev-parse', 'HEAD'], signal) };
 }
 export function publicationText(task: Task, report: DeliveryReport): { title: string; body: string } {
@@ -84,10 +85,18 @@ export function publicationText(task: Task, report: DeliveryReport): { title: st
   ].join('\n') };
 }
 export const validationKey = (project: Project) => createHash('sha256').update(JSON.stringify(project.worktree?.checks ?? [])).digest('hex');
+export function publicationBlocker(task: Task, project: Project | undefined, report: DeliveryReport | undefined): string | undefined {
+  if (task.mode !== 'workspace-write' || project?.sandbox !== 'workspace-write') return '本次为只读分析，没有可发布的修改权限。';
+  if (!project.worktree?.github) return '项目尚未配置 GitHub 仓库和 PR 目标分支，需要先在本机配置交付目标。';
+  if (!report) return '尚无代码改动与验证记录，请先完成执行。';
+  if (report.workspace.baseRef !== `origin/${project.worktree.github.baseBranch}`) return '任务基准与 PR 目标不同，需先在正确基准的新副本准备改动；原副本保留。';
+  if (!report.files.length) return '没有文件改动，无需创建 PR。';
+  if (!project.worktree.checks.length) return '项目未配置 Steward 独立检查，需要先配置并运行项目验证；模型自报通过不能替代检查记录。';
+  if (report.validationKey !== validationKey(project)) return '检查配置已变化，需要按当前配置重新验证。';
+  if (!report.ready || !report.checks.length || !report.checks.every(c => c.status === 'passed')) return 'Steward 独立检查尚未全部通过，请先查看验证结果。';
+}
 export function canPublish(task: Task, project: Project | undefined, report: DeliveryReport | undefined): boolean {
-  return task.mode === 'workspace-write' && project?.sandbox === 'workspace-write' && !!project.worktree?.github && !!report?.ready
-    && report.workspace.baseRef === `origin/${project.worktree!.github!.baseBranch}`
-    && report.validationKey === validationKey(project!) && report.files.length > 0 && report.checks.length > 0 && report.checks.every(c => c.status === 'passed');
+  return publicationBlocker(task,project,report) === undefined;
 }
 
 export function publicationKey(task: Task, project: Project, report: DeliveryReport): string {
@@ -129,8 +138,12 @@ export async function publish(store: Store, config: Config, task: Task, project:
   }
   const pendingFiles = [...new Set([...lines0(await repoGit(w.path, ['diff', '--name-only', '-z', 'HEAD', '--'], signal)),
     ...lines0(await repoGit(w.path, ['ls-files', '--others', '--exclude-standard', '-z'], signal))])];
+  if (pendingFiles.some(isEvidencePath)) {
+    for (let i = pendingFiles.length - 1; i >= 0; i--) if (isEvidencePath(pendingFiles[i])) pendingFiles.splice(i,1);
+  }
   if (pendingFiles.length) await repoGit(w.path, ['add', '--', ...pendingFiles], signal);
   const staged = await repoGit(w.path, ['diff', '--cached', '--name-only', '-z'], signal);
+  if (lines0(staged).some(isEvidencePath)) throw new Error('截图产物不能提交到代码仓库。');
   if (staged) await repoGit(w.path, ['commit', '-m', `Steward task ${task.id}: ${task.project}`], signal);
   if ((await inventory(w, signal)).fingerprint !== report.fingerprint) throw new Error('提交过程改变了验证过的文件，未推送；请重新验证。');
   const head = await repoGit(w.path, ['rev-parse', 'HEAD'], signal);
@@ -163,6 +176,8 @@ export class WorkspaceExecutor implements Executor {
     if (!project.worktree) return this.inner.run(task, { ...project, sandbox: 'read-only' }, hooks, signal);
     hooks.progress('正在准备独立工作目录。');
     const workspace = await prepareWorkspace(this.store, this.config.stateDir, task, project, signal);
+    if (await git(workspace.path, ['ls-files', '--', EVIDENCE_DIRECTORY], signal)) throw Error('仓库占用了保留的截图目录，未执行任务。');
+    const evidenceDirectory = mode === 'workspace-write' ? prepareEvidenceDirectory(workspace.path) : undefined;
     const previous = this.store.delivery(task.id);
     const initial = await inventory(workspace, signal);
     let report: DeliveryReport = { workspace, mode, ...initial, capturedAt: new Date().toISOString(), checks: [], ready: false, validationKey: validationKey(project),
@@ -171,7 +186,7 @@ export class WorkspaceExecutor implements Executor {
     try {
       signal.throwIfAborted();
       hooks.prepared?.(report);
-      const result = await this.inner.run({ ...task, codeVersion: { ref: workspace.baseRef, baseSha: workspace.baseSha, headSha: initial.headSha } }, { ...project, path: workspace.path, sandbox: mode }, hooks, signal);
+      const result = await this.inner.run({ ...task, evidenceDirectory, codeVersion: { ref: workspace.baseRef, baseSha: workspace.baseSha, headSha: initial.headSha } }, { ...project, path: workspace.path, sandbox: mode }, hooks, signal);
       signal.throwIfAborted();
       report = { ...report, ...await inventory(workspace, signal), capturedAt: new Date().toISOString() };
       this.store.saveDelivery(task.id, report);
@@ -191,6 +206,10 @@ export class WorkspaceExecutor implements Executor {
         report = { ...report, ...after, capturedAt: new Date().toISOString() };
         report.ready = !report.error && report.checks.length === project.worktree.checks.length
           && report.checks.length > 0 && report.checks.every(c => c.status === 'passed');
+      }
+      if (evidenceDirectory) {
+        const evidence = collectEvidence(this.store, this.config.stateDir, task.id, evidenceDirectory);
+        report.evidenceIds = evidence.ids; report.evidenceWarning = evidence.warning;
       }
       this.store.saveDelivery(task.id, report);
       return result;

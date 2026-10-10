@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import type { Conversation, ContextSnapshot, DeliveryReport, Intent, Status, Task, View, Workspace } from './types.js';
+import type { Conversation, ContextSnapshot, DeliveryReport, EvidenceImage, Intent, Status, Task, View, Workspace } from './types.js';
 
 export interface Outgoing { id: string; chatId: string; text: string; attempts: number; view: string | null }
 export class Store {
@@ -36,7 +36,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS task_conversations (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS context_snapshots (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS conversation_bindings (chatId TEXT NOT NULL, messageKey TEXT NOT NULL, taskId TEXT NOT NULL, PRIMARY KEY(chatId,messageKey));
-      PRAGMA user_version=5;`);
+      CREATE TABLE IF NOT EXISTS evidence (id TEXT PRIMARY KEY, taskId TEXT NOT NULL, data TEXT NOT NULL);
+      PRAGMA user_version=6;`);
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -242,6 +243,13 @@ export class Store {
   retry(id: string, attempts: number): void {
     this.db.prepare('UPDATE outbox SET attempts=attempts+1,due=? WHERE id=?')
       .run(Date.now() + Math.min(300_000, 1000 * 2 ** Math.min(attempts, 8)), id);
+  }
+  saveEvidence(image: EvidenceImage): void {
+    this.db.prepare('INSERT INTO evidence VALUES (?,?,?)').run(image.id,image.taskId,JSON.stringify(image));
+  }
+  evidence(id: string, taskId: string): EvidenceImage | undefined {
+    const row = this.db.prepare('SELECT data FROM evidence WHERE id=? AND taskId=?').get(id,taskId) as {data:string} | undefined;
+    return row ? JSON.parse(row.data) : undefined;
   }
   close(): void { this.db.close(); }
 }

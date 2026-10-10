@@ -1,7 +1,7 @@
 import { codeSourceSummary, codeSourceDetails, configuredCheckSummary } from '../code-source.js';
 import type { Config, Intent, Status, View } from '../types.js';
 import { Store } from '../store.js';
-import { canPublish, publicationKey, publicationText } from '../workspace.js';
+import { canPublish, publicationKey, publicationText, publicationBlocker } from '../workspace.js';
 
 type Element = Record<string, unknown>;
 const plain = (content: string) => ({ tag: 'plain_text', content });
@@ -111,7 +111,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   ]);
   if (view.kind === 'publication') {
     if (!report || !canPublish(task, project, report)) return card('暂不能交付 PR', projectLabel(task.project), 'orange', [
-      box('需要允许修改的项目、实际文件改动，以及配置的验证全部通过。'), button('返回任务', intent('status'), true)]);
+      box(publicationBlocker(task, project, report) ?? '请先完成代码验证。'), button('返回任务', intent('status'), true)]);
     const target = project.worktree!.github!, preview = publicationText(task, report);
     const fits = Buffer.byteLength(preview.body) < 20_000;
     return card(report.prUrl ? '更新现有 PR' : '创建草稿 PR', `${target.repository} → ${target.baseBranch}`, 'blue', [
@@ -160,6 +160,8 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   const metadata = (): Element => ({ tag: 'collapsible_panel', expanded: false, header: { title: plain('代码与验证记录') }, elements: [
     text(codeSourceDetails(report, project, !!conversation)),
     ...(report ? [text(`Steward 独立检查：${configuredCheckSummary(report, project)}`)] : []),
+    ...(report?.evidenceIds?.length ? [caption(`本次已保存 ${report.evidenceIds.length} 张截图，发送状态以话题消息为准。`)] : []),
+    ...(report?.evidenceWarning ? [caption(report.evidenceWarning)] : []),
     ...(contextSummary ? [caption(contextSummary)] : []),
   ] });
   if (view.kind === 'result') {

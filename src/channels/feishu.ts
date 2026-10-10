@@ -1,3 +1,4 @@
+import { evidenceBytes } from '../evidence.js';
 import { createHash } from 'node:crypto';
 import * as lark from '@larksuiteoapi/node-sdk';
 import type { CardAction, Channel, Config, Incoming, Task, View } from '../types.js';
@@ -100,6 +101,27 @@ export class FeishuChannel implements Channel {
   async send(chatId: string, text: string, deliveryId: string, view?: View): Promise<void> {
     const scopedTask = view && 'taskId' in view ? this.store.get(view.taskId) : undefined;
     if (view && scopedTask?.conversation) view = { ...view, conversation: scopedTask.conversation };
+    if (view?.kind === 'evidence') {
+      if (!scopedTask || scopedTask.chatId !== chatId || view.evidenceIds.length > 3) throw Error('截图不属于当前任务。');
+      for (const id of view.evidenceIds) {
+        const key = `evidence:${deliveryId}:${id}`;
+        if (this.store.cardMessage(chatId,key)) continue;
+        const item = this.store.evidence(id,scopedTask.id);
+        if (!item) throw Error('截图记录不存在。');
+        const upload = await this.client.im.image.create({data:{image_type:'message',image:evidenceBytes(item,this.config.stateDir)}});
+        if (!upload?.image_key) throw Error('截图上传失败。');
+        const caption = `${item.scope === 'local-preview' ? '本地预览' : '已部署页面'} · ${item.caption}\n执行 Agent 提供的截图，不等同于独立验收或发布证明。`;
+        const content = JSON.stringify({zh_cn:{content:[[{tag:'text',text:caption}],[{tag:'img',image_key:upload.image_key}]]}});
+        const uuid = createHash('sha256').update(key).digest('hex').slice(0,32);
+        const response = view.conversation
+          ? await this.client.im.message.reply({path:{message_id:view.conversation.anchorId},data:{msg_type:'post',content,uuid,reply_in_thread:true}})
+          : await this.client.im.message.create({params:{receive_id_type:'chat_id'},data:{receive_id:chatId,msg_type:'post',content,uuid}});
+        if (response.code !== 0 || !response.data?.message_id) throw Error('截图消息发送失败。');
+        this.store.saveCardMessage(chatId,key,response.data.message_id);
+        if (scopedTask.conversation) this.store.bindConversation(chatId,response.data.message_id,scopedTask.id);
+      }
+      return;
+    }
     if (view?.kind === 'reply' || (view?.kind === 'notice' && view.conversation)) {
       const workspace = scopedTask && this.store.workspace(scopedTask.id);
       const roots = [workspace?.path, workspace?.source, scopedTask && this.config.projects[scopedTask.project]?.path]
