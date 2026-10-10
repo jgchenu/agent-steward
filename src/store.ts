@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import type { Intent, Status, Task, View } from './types.js';
+import type { DeliveryReport, Intent, Status, Task, View, Workspace } from './types.js';
 
 export interface Outgoing { id: string; chatId: string; text: string; attempts: number; view: string | null }
 export class Store {
@@ -27,7 +27,11 @@ export class Store {
         chatId TEXT NOT NULL, viewKey TEXT NOT NULL, messageId TEXT NOT NULL, PRIMARY KEY(chatId,viewKey));`);
     const columns = this.db.prepare('PRAGMA table_info(outbox)').all() as Array<{ name: string }>;
     if (!columns.some(c => c.name === 'view')) this.db.exec('ALTER TABLE outbox ADD COLUMN view TEXT');
-    this.db.exec('PRAGMA user_version=2');
+    const taskColumns = this.db.prepare('PRAGMA table_info(tasks)').all() as Array<{ name: string }>;
+    if (!taskColumns.some(c => c.name === 'mode')) this.db.exec("ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'read-only'");
+    if (!taskColumns.some(c => c.name === 'nextAction')) this.db.exec("ALTER TABLE tasks ADD COLUMN nextAction TEXT NOT NULL DEFAULT 'execute'");
+    this.db.exec(`CREATE TABLE IF NOT EXISTS workspaces (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS deliveries (taskId TEXT PRIMARY KEY, data TEXT NOT NULL); PRAGMA user_version=3;`);
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -37,10 +41,10 @@ export class Store {
   consume(id: string): boolean {
     return this.db.prepare('INSERT OR IGNORE INTO inbox VALUES (?)').run(id).changes === 1;
   }
-  create(chatId: string, project: string, prompt: string): Task {
+  create(chatId: string, project: string, prompt: string, mode: Task['mode'] = 'read-only'): Task {
     const id = randomUUID().slice(0, 8), now = new Date().toISOString();
-    this.db.prepare('INSERT INTO tasks VALUES (?,?,?,?,?,NULL,NULL,?,?)')
-      .run(id, chatId, project, prompt, 'queued', now, now);
+    this.db.prepare('INSERT INTO tasks(id,chatId,project,prompt,status,createdAt,updatedAt,mode) VALUES (?,?,?,?,?,?,?,?)')
+      .run(id, chatId, project, prompt, 'queued', now, now, mode);
     this.event(id, 'created', prompt);
     return this.get(id)!;
   }
@@ -60,9 +64,30 @@ export class Store {
     this.event(id, status, result ?? '');
   }
   resume(id: string, prompt: string): void {
-    this.db.prepare('UPDATE tasks SET prompt=?, result=NULL WHERE id=?').run(prompt, id);
+    this.db.prepare("UPDATE tasks SET prompt=?, result=NULL, nextAction='execute' WHERE id=?").run(prompt, id);
+    const report = this.delivery(id);
+    if (report) this.saveDelivery(id, { ...report, ready: false });
     this.set(id, 'queued');
     this.event(id, 'followup', prompt);
+  }
+  queuePublication(id: string): void {
+    this.db.prepare("UPDATE tasks SET nextAction='publish' WHERE id=?").run(id);
+    this.set(id, 'queued');
+  }
+  workspace(id: string): Workspace | undefined {
+    const row = this.db.prepare('SELECT data FROM workspaces WHERE taskId=?').get(id) as { data: string } | undefined;
+    return row && JSON.parse(row.data) as Workspace;
+  }
+  saveWorkspace(workspace: Workspace): void {
+    this.db.prepare('INSERT INTO workspaces VALUES (?,?) ON CONFLICT(taskId) DO UPDATE SET data=excluded.data')
+      .run(workspace.taskId, JSON.stringify(workspace));
+  }
+  delivery(id: string): DeliveryReport | undefined {
+    const row = this.db.prepare('SELECT data FROM deliveries WHERE taskId=?').get(id) as { data: string } | undefined;
+    return row && JSON.parse(row.data) as DeliveryReport;
+  }
+  saveDelivery(id: string, report: DeliveryReport): void {
+    this.db.prepare('INSERT INTO deliveries VALUES (?,?) ON CONFLICT(taskId) DO UPDATE SET data=excluded.data').run(id, JSON.stringify(report));
   }
   thread(id: string, threadId: string): void {
     this.db.prepare('UPDATE tasks SET threadId=? WHERE id=?').run(threadId, id);

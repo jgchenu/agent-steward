@@ -78,7 +78,7 @@ Edit the private config:
 }
 ```
 
-Paths are resolved relative to the config file. The project must already exist. Start with a disposable directory. To allow edits, explicitly select `workspace-write`. A run can request additional permissions; only you can answer those requests. The timeout includes time spent waiting for you.
+Paths are resolved relative to the config file. The project must already exist. Start with a disposable directory. To allow edits, configure `workspace-write` **and** an isolated Git `worktree`, then choose modification mode for each task. See [project setup and PR delivery](docs/project-delivery.md). A run can request additional permissions; only you can answer those requests. The timeout includes time spent waiting for you.
 
 ```sh
 npm run doctor  # Checks configuration, App Server and ChatGPT auth; no inference
@@ -101,7 +101,9 @@ Keep the process and machine awake. Closing the service interrupts active work; 
 | Command | Behavior |
 | --- | --- |
 | `/help`, `/projects` | Usage and configured project aliases |
-| `/new <project> <task>` | Create a durable task |
+| `/new <project> <task>` | Create a read-only task |
+| `/edit <project> <task>` | Modify an allowlisted project in an isolated Git worktree |
+| `/publish <task>` | Open the Feishu PR preview; publication needs the card confirmation |
 | Plain text | Create a task when exactly one project is configured |
 | `/list`, `/status <task>` | View status, latest recorded progress, result and outstanding request IDs |
 | `/cancel <task>` | Stop execution; existing changes are retained |
@@ -109,6 +111,8 @@ Keep the process and machine awake. Closing the service interrupts active work; 
 | `/approve <request>`, `/deny <request>` | Answer one live permission request |
 | `/answer <request> <answer>` | Answer a question; multiple questions require JSON keyed by question ID |
 | `/done <task>` | Record the owner's acceptance of a result in `review` |
+
+Git project tasks retain their own worktree and continuation session. Modification tasks run locally configured checks after Codex finishes; delivery cards show actual changed files and check exit results. Passing checks enables an explicit draft PR preview and confirmation. Validation binds to file contents and check configuration; target-branch movement stops publication. The publisher reuses an existing open PR and never merges it.
 
 Feishu uses interactive cards: send `工作台` or `/help` to open a project selector and task form. Task cards offer progress refresh, stop, result pagination, acceptance and follow-up forms; permission requests have explicit one-shot buttons. Commands remain available in Feishu and the terminal. A generic “yes” never grants permission. Each instance runs one task at a time.
 
@@ -142,7 +146,7 @@ npm ci
 npm run check
 ```
 
-Tests use fake executors and temporary databases. They do not require credentials or send messages. GitHub Actions runs these checks on Linux and macOS.
+Tests use fake executors, temporary databases, real temporary Git repositories and simulated GitHub responses. `npm run smoke:workspace` is an opt-in live subscription edit and validation smoke test, outside CI. They do not require credentials or send messages. GitHub Actions runs these checks on Linux and macOS.
 
 Optional live check, deliberately outside CI:
 

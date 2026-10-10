@@ -16,7 +16,8 @@
     "demo": "tsx src/cli.ts demo",
     "doctor": "tsx --env-file-if-exists=.env src/cli.ts doctor",
     "setup:feishu": "tsx scripts/setup-feishu.ts",
-    "smoke:codex": "tsx scripts/smoke-codex.ts"
+    "smoke:codex": "tsx scripts/smoke-codex.ts",
+    "smoke:workspace": "tsx scripts/smoke-workspace.ts"
   },
   "dependencies": { "@larksuiteoapi/node-sdk": "1.74.0" },
   "devDependencies": { "@types/node": "^24.0.0", "tsx": "^4.20.0", "typescript": "7.0.2" }

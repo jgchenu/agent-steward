@@ -12,4 +12,4 @@ Build a personal, self-hosted task coordinator. Reuse official agent runtimes; d
 - Distinguish implementation, simulated validation, live-provider validation, live-Feishu acceptance and publication.
 - Changes to the task state machine need behavioral tests and matching architecture docs.
 - Prepare changes through feature branches and PRs. Never merge PRs, enable auto-merge, or directly push existing remote main/staging.
-- Claude Code, other providers, A2A, worktree creation and independent verification are roadmap items until implemented and tested.
+- Claude Code, other providers and A2A remain roadmap items. Worktree and configured-check tests do not establish live Feishu publication acceptance.

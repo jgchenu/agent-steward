@@ -1,9 +1,12 @@
 import { Store } from './store.js';
+import { canPublish, publicationKey } from './workspace.js';
 import type { CardAction, Channel, Config, Executor, HumanRequest, Incoming, Status, Task, View } from './types.js';
 
 const HELP = `Agent Steward · 个人数字员工（预览版）
 /projects — 可用项目
-/new <项目> <任务要求> — 派活
+/new <项目> <任务要求> — 只读分析
+/edit <项目> <任务要求> — 在独立目录修改并验证
+/publish <任务ID> — 预览草稿 PR 交付
 /list 或 /status <任务ID> — 查进度
 /cancel <任务ID> — 取消执行（不会回滚已有改动）
 /continue <任务ID> <后续要求> — 继续已结束或中断的任务
@@ -45,7 +48,7 @@ export class Engine {
       if (command === '/projects') {
         reply(Object.entries(this.config.projects).map(([name, p]) => `${name} · ${p.sandbox}`).join('\n'), { kind: 'home' }); return;
       }
-      if (command === '/new') {
+      if (command === '/new' || command === '/edit') {
         const names = Object.keys(this.config.projects);
         let project: string, prompt: string;
         if (!match && names.length === 1) { project = names[0]; prompt = text; }
@@ -55,7 +58,10 @@ export class Engine {
           [, project, prompt] = parts;
         }
         if (!Object.hasOwn(this.config.projects, project)) { reply('未配置该项目，请用 /projects 查询。'); return; }
-        const task = this.store.create(message.chatId, project, prompt);
+        const mode = command === '/edit' ? 'workspace-write' : 'read-only';
+        const p = this.config.projects[project];
+        if (mode === 'workspace-write' && (p.sandbox !== mode || !p.worktree)) { reply('该项目仅支持只读分析。'); return; }
+        const task = this.store.create(message.chatId, project, prompt, mode);
         reply(`已接单 ${task.id} · ${project}\n任务已排队。查询：/status ${task.id}`, { kind: 'task', taskId: task.id }); return;
       }
       if (command === '/list' || (command === '/status' && !args)) {
@@ -86,6 +92,7 @@ export class Engine {
       }
       const task = this.store.get(id);
       if (!task || task.chatId !== message.chatId) { reply('任务不存在，请重新选择。', { kind: 'home' }); return; }
+      if (command === '/publish') { reply('请先查看交付预览，再明确创建草稿 PR。', { kind: 'publication', taskId: id, fresh: true }); return; }
       if (command === '/status') {
         const requests = this.store.requests(id).map(r => `待处理请求：${r.id} · ${r.kind}`).join('\n');
         reply(`${id} · ${task.project} · ${task.status}\n${task.result ?? this.store.latestProgress(id)}\n${requests}`, { kind: 'task', taskId: id, fresh: true }); return;
@@ -123,12 +130,32 @@ export class Engine {
     }
     const i = saved.intent, task = i.taskId ? this.store.get(i.taskId) : undefined;
     if (i.taskId && (!task || task.chatId !== action.chatId)) return fail('任务不属于当前会话。');
-    const mutating = ['new', 'continue', 'done', 'cancel', 'approve', 'deny', 'answer'].includes(i.op);
+    const mutating = ['new', 'continue', 'done', 'cancel', 'approve', 'deny', 'answer', 'publish'].includes(i.op);
     if (mutating && task && i.revision !== task.updatedAt) return fail('任务状态已变化，请刷新后再操作。');
     const body = typeof action.fields.body === 'string' ? action.fields.body.trim() : '';
     if (['new', 'continue', 'answer'].includes(i.op) && (!body || body.length > 1000)) return fail('请填写 1–1000 字的内容。');
     if (i.op === 'new' && (typeof action.fields.project !== 'string' || !Object.hasOwn(this.config.projects, action.fields.project))) {
       return fail('请选择已配置的项目。');
+    }
+    if (i.op === 'new') {
+      if (action.fields.mode !== undefined && !['read-only', 'workspace-write'].includes(String(action.fields.mode))) return fail('请选择有效的工作模式。');
+      const project = this.config.projects[String(action.fields.project)];
+      if (action.fields.mode === 'workspace-write' && (project.sandbox !== 'workspace-write' || !project.worktree)) return fail('该项目仅支持只读分析，请重新选择模式。');
+    }
+    if (i.op === 'publish') {
+      if (!task || this.active?.task.id === task.id || !['review', 'completed', 'failed'].includes(task.status)
+        || !canPublish(task, this.config.projects[task.project], this.store.delivery(task.id))) return fail('尚不具备 PR 交付条件，请检查文件与验证结果。');
+      const report = this.store.delivery(task.id)!, project = this.config.projects[task.project];
+      if (i.publicationKey !== publicationKey(task, project, report)) return fail('交付内容或目标已变化，请重新预览后确认。');
+      this.store.transaction(() => {
+        if (!this.store.consume('card:' + action.id) || !this.store.useAction(action.actionId)) return;
+        this.store.saveDelivery(task.id, { ...report, authorizedKey: i.publicationKey });
+        this.store.queuePublication(task.id);
+        this.store.event(task.id, 'publication_authorized', 'Owner confirmed source-branch push and draft PR only.');
+        this.store.enqueue(task.chatId, '正在准备草稿 PR', { kind: 'task', taskId: task.id });
+      });
+      this.tick(); void this.flush();
+      return { toast: { type: 'success', content: '已排队准备草稿 PR，不会自动合并。' } };
     }
     if (i.op === 'done' && task?.status !== 'review') return fail('该任务当前不需要验收。');
     if (['continue', 'followup'].includes(i.op) && (this.active?.task.id === task?.id ||
@@ -145,6 +172,7 @@ export class Engine {
       home: { kind: 'home' }, list: { kind: 'list', page: i.page },
       status: { kind: 'task', taskId: i.taskId! }, result: { kind: 'result', taskId: i.taskId!, page: i.page },
       followup: { kind: 'followup', taskId: i.taskId! },
+      delivery: { kind: 'delivery', taskId: i.taskId! }, publication: { kind: 'publication', taskId: i.taskId! },
     };
     const view = views[i.op];
     if (view) {
@@ -153,7 +181,7 @@ export class Engine {
       });
       void this.flush();
     } else {
-      const command = i.op === 'new' ? `/new ${action.fields.project} ${body}`
+      const command = i.op === 'new' ? `${action.fields.mode === 'workspace-write' ? '/edit' : '/new'} ${action.fields.project} ${body}`
         : ['approve', 'deny', 'answer'].includes(i.op) ? `/${i.op} ${i.requestId} ${body}`
         : `/${i.op} ${i.taskId} ${body}`;
       this.receive({ id: 'card:' + action.id, senderId: action.senderId, chatId: action.chatId,
@@ -204,7 +232,9 @@ export class Engine {
       }, abort.signal);
       if (abort.signal.aborted) throw abort.signal.reason;
       this.store.set(task.id, 'review', result);
-      this.store.enqueue(task.chatId, `任务 ${task.id} 已产出结果，等待你验收（执行器报告，尚非独立验证）。\n${result}\n`
+      const report = this.store.delivery(task.id);
+      const evidence = report ? `\n实际改动：${report.files.length} 个文件\n验证：${report.checks.map(c => `${c.name}: ${c.status}`).join('；') || '未运行'}\n${report.prUrl ?? ''}` : '';
+      this.store.enqueue(task.chatId, `任务 ${task.id} 已产出结果，等待你验收（执行器报告，尚非独立验证）。\n${result}${evidence}\n`
         + `验收：/done ${task.id}\n继续：/continue ${task.id} <要求>`, { kind: 'task', taskId: task.id });
     } catch (error) {
       const state = this.store.get(task.id)?.status;
