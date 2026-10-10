@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import type { Conversation, ContextSnapshot, DeliveryReport, EvidenceImage, Intent, Status, Task, View, Workspace } from './types.js';
+import type { Conversation, ContextSnapshot, DeliveryReport, MergeReceipt, EvidenceImage, Intent, Status, Task, View, Workspace } from './types.js';
 
 export interface Outgoing { id: string; chatId: string; text: string; attempts: number; view: string | null }
 export class Store {
@@ -137,7 +137,7 @@ export class Store {
     this.set(id, 'queued');
   }
   queueMerge(id: string, url: string): void {
-    this.db.prepare("UPDATE tasks SET nextAction='merge', mergeUrl=? WHERE id=?").run(url,id);
+    this.db.prepare("UPDATE tasks SET result=NULL, nextAction='merge', mergeUrl=? WHERE id=?").run(url,id);
     this.set(id,'queued');
   }
   workspace(id: string): Workspace | undefined {
@@ -161,6 +161,10 @@ export class Store {
   event(taskId: string, kind: string, body: string): void {
     this.db.prepare('INSERT INTO events(taskId,kind,body,at) VALUES (?,?,?,?)')
       .run(taskId, kind, body, new Date().toISOString());
+  }
+  mergeReceipt(taskId: string): MergeReceipt | undefined {
+    const row = this.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='merge_receipt' AND seq > (SELECT COALESCE(MAX(seq),0) FROM events WHERE taskId=? AND kind='queued') ORDER BY seq DESC LIMIT 1").get(taskId, taskId) as { body: string } | undefined;
+    return row ? JSON.parse(row.body) as MergeReceipt : undefined;
   }
   latestProgress(taskId: string): string {
     const event = this.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='progress' ORDER BY seq DESC LIMIT 1")

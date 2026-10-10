@@ -26,9 +26,26 @@ export function codeSourceDetails(report: DeliveryReport | undefined, project: P
 }
 
 export function codeSourceReceipt(label: string, report: DeliveryReport): string {
-  return `我会在 ${label} 的独立副本中${report.mode === 'read-only' ? '分析' : '处理'}。基准：${report.workspace.baseRef} @ ${report.workspace.baseSha.slice(0, 12)}；开始时提交：${report.headSha.slice(0, 12)}。`
-    + (report.files.length ? `副本已有相对基准累计 ${report.files.length} 个文件改动，会在此基础上继续。` : '')
-    + '可在任务详情查看代码来源；群话题里也可以 @我说“代码来源”。';
+  return `正在${report.mode === 'read-only' ? '分析' : '处理'} ${label}，使用独立副本（${report.workspace.baseRef} @ ${report.workspace.baseSha.slice(0, 12)}）。代码来源可在任务详情查看。`;
+}
+
+// File counts and timestamps change during normal continuation; only a changed
+// execution location/version needs another source announcement.
+export function codeSourceChanged(previous: DeliveryReport | undefined, current: DeliveryReport): boolean {
+  return !previous || previous.workspace.path !== current.workspace.path
+    || previous.workspace.baseRef !== current.workspace.baseRef
+    || previous.workspace.baseSha !== current.workspace.baseSha
+    || previous.headSha !== current.headSha || previous.mode !== current.mode;
+}
+
+export function deliveryFooter(report: DeliveryReport, project?: Project): string {
+  const checks = report.checks.length || project?.worktree?.checks.length
+    ? `自动检查：${configuredCheckSummary(report, project)}` : '';
+  return [
+    `相对基准累计改动：${report.files.length} 个文件（不是本轮新增数量）`,
+    checks,
+    report.prUrl ? `PR：${report.prUrl}` : '',
+  ].filter(Boolean).join('\n');
 }
 
 export function configuredCheckSummary(report: DeliveryReport, project?: Project): string {

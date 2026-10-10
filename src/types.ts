@@ -92,3 +92,8 @@ export interface Channel {
   releaseContext?(snapshot: ContextSnapshot): Promise<void>;
   send(chatId: string, text: string, deliveryId: string, view?: View): Promise<void>;
 }
+
+export interface MergeReceipt {
+  url: string; number: number; title: string; summary: string; target: string;
+  head: string; commit: string; files: number; additions: number; deletions: number;
+}
