@@ -75,6 +75,10 @@ export class CodexExecutor implements Executor {
         };
         if (message.method === 'item/commandExecution/requestApproval'
           || message.method === 'item/fileChange/requestApproval') {
+          if (permissions.approvalPolicy === 'never') {
+            respond({decision:'decline'});
+            hooks.progress('当前模式不允许扩大执行权限，该操作已拒绝。'); return;
+          }
           const details = message.method.includes('commandExecution')
             ? { command: p.command, cwd: p.cwd, reason: p.reason, network: p.networkApprovalContext }
             : { reason: p.reason, grantRoot: p.grantRoot, changes: fileChanges.get(p.itemId) };
@@ -149,7 +153,8 @@ export class CodexExecutor implements Executor {
         ...(a.visuals ?? []).flatMap(v => [{ type: 'text', text: `消息 ${a.messageId}：${v.label}`, text_elements: [] }, { type: 'localImage', path: v.path }]),
       ]);
       await rpc.request('turn/start', { threadId, ...(task.modelSelection ?? {}), input: [{ type: 'text', text: taskInput(task), text_elements: [] }, ...images],
-        approvalPolicy: permissions.approvalPolicy, approvalsReviewer: permissions.approvalsReviewer });
+        approvalPolicy: permissions.approvalPolicy, approvalsReviewer: permissions.approvalsReviewer,
+        sandboxPolicy: permissions.sandbox === 'danger-full-access' ? {type:'dangerFullAccess'} : permissions.sandbox === 'read-only' ? {type:'readOnly',networkAccess:false} : {type:'workspaceWrite', writableRoots:[project.path], networkAccess:task.permissionMode === 'sandbox-auto', excludeTmpdirEnvVar:task.permissionMode === 'sandbox-auto', excludeSlashTmp:task.permissionMode === 'sandbox-auto'} });
       return await completion;
     } finally {
       finished = true;

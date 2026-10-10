@@ -190,14 +190,18 @@ test('unsupported automatic reviewer fails without full-access or manual-policy 
 });
 
 test('console modes map explicitly on new and resumed threads; full access cannot widen read-only tasks', async () => {
-  for (const permissionMode of ['ask','auto','full-access'] as const) for (const sandbox of ['read-only','workspace-write'] as const) for (const threadId of [null,'thread']) {
+  for (const permissionMode of ['ask','auto','sandbox-auto','full-access'] as const) for (const sandbox of ['read-only','workspace-write'] as const) for (const threadId of [null,'thread']) {
     const rpc = new FakeRpc(), s = setup(rpc);rpc.onTurn=()=>rpc.finish();
     await s.executor.run({...task,permissionMode,threadId}, {path:'.',sandbox},s.hooks,AbortSignal.timeout(5000));
     const common=rpc.params[threadId?'thread/resume':'thread/start'];
     assert.equal(common.sandbox,permissionMode==='full-access'&&sandbox==='workspace-write'?'danger-full-access':sandbox);
-    assert.equal(common.approvalPolicy,permissionMode==='full-access'?'never':'on-request');
+    assert.equal(common.approvalPolicy,['full-access','sandbox-auto'].includes(permissionMode)?'never':'on-request');
     assert.equal(common.approvalsReviewer,permissionMode==='auto'?'auto_review':'user');
     assert.equal(rpc.params['turn/start'].approvalPolicy,common.approvalPolicy);
+    const policy=rpc.params['turn/start'].sandboxPolicy;
+    assert.equal(policy.type,common.sandbox==='danger-full-access'?'dangerFullAccess':sandbox==='read-only'?'readOnly':'workspaceWrite');
+    if(policy.type==='workspaceWrite'){assert.deepEqual(policy.writableRoots,['.']);assert.equal(policy.networkAccess,permissionMode==='sandbox-auto');assert.equal(policy.excludeSlashTmp,permissionMode==='sandbox-auto');}
+    if(policy.type==='readOnly')assert.equal(policy.networkAccess,false);
     assert.equal(rpc.params['turn/start'].approvalsReviewer,common.approvalsReviewer);
   }
 });
@@ -219,4 +223,10 @@ test('explicit model and effort are applied to new and resumed turns; unavailabl
  }
  const rpc=new FakeRpc();rpc.request=async()=>({data:[]});
  await assert.rejects(setup(rpc).run({...task,modelSelection:{model:'gone',effort:'high'}}),/不可用/);assert.ok(!rpc.calls.includes('turn/start'));
+});
+
+
+test('never-approval modes reject unexpected escalation without creating a human request',async()=>{
+ const rpc=new FakeRpc(),requests:HumanRequest[]=[];rpc.onTurn=()=>{rpc.emit('item/commandExecution/requestApproval',{command:'outside operation'},77);rpc.finish()};
+ await setup(rpc,requests).run({...task,permissionMode:'sandbox-auto'});assert.equal(requests.length,0);assert.deepEqual(rpc.writes.find(m=>m.id===77).result,{decision:'decline'});
 });

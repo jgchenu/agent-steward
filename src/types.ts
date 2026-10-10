@@ -15,7 +15,7 @@ export interface Attachment {
   status: 'unread' | 'attached' | 'text' | 'processed' | 'partial'; detail: string; path?: string; text?: string;
   visuals?: Array<{ path: string; label: string }>;
 }
-export type PermissionMode = 'ask' | 'auto' | 'full-access';
+export type PermissionMode = 'ask' | 'auto' | 'sandbox-auto' | 'full-access';
 export interface Task {
   modelSelection?: import('./models.js').ModelSelection;
   permissionMode?: PermissionMode;
