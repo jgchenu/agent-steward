@@ -18,7 +18,9 @@
 - [ ] Guided setup and diagnostics, with locally completed authentication
 - [x] Interactive Feishu task forms, task cards, one-shot decisions and result pagination
 - [ ] Live acceptance of every card form/permission path across desktop and mobile
-- [ ] Reply-to-task natural-language routing
+- [x] Owner-only group @mention dispatch, topic-bound cards and natural-language task continuation
+- [x] Bounded group/topic reference context with explicit failure and truncation reporting
+- [ ] Live group and thread acceptance across normal and topic-style groups
 - [x] Isolated Git task worktrees, artifact inventory and independent configured checks
 - [x] Owner-confirmed draft PR delivery with source/head/base verification and PR reuse
 - [ ] Worktree cleanup, retention and integration after target-branch movement

@@ -2,11 +2,11 @@
 
 **Your own digital coworker, backed by your coding-agent subscription.**
 
-[中文说明](README.zh-CN.md) · [Architecture](docs/architecture.md) · [Feishu setup](docs/feishu-setup.md) · [Roadmap](docs/roadmap.md)
+[中文说明](README.zh-CN.md) · [Architecture](docs/architecture.md) · [Feishu setup](docs/feishu-setup.md) · [Roadmap](docs/roadmap.md) · [Group and thread setup](docs/group-context.md)
 
 Send work from Feishu. Steward keeps the task, runs Codex on your machine, brings permission requests back to you, and returns the result for review. Each person deploys their own instance with their own account, projects and data.
 
-**Status: early preview, v0.1.** A runnable owner-only vertical slice, not a production service. Codex is the only implemented real executor. Claude Code, domestic coding plans and agent-to-agent delegation are planned.
+**Status: early preview, v0.1.** A runnable owner-only vertical slice with opt-in group threads, not a production service. Codex is the only implemented real executor. Claude Code, domestic coding plans and agent-to-agent delegation are planned.
 
 ```text
 Feishu DM / local terminal
@@ -118,6 +118,10 @@ Feishu uses interactive cards: send `工作台` or `/help` to open a project sel
 
 Enable `card.action.trigger` under the application’s **callback configuration**, using the existing long connection. An existing installation must verify this separately. Ordinary progress refreshes update a card in place; requests for input, results and failures produce a fresh notification so they are not silently hidden in an old message. Forms accept up to 1,000 characters; longer tasks can still be sent as text.
 
+## Group conversations
+
+With group mode enabled, owner @mentions start tasks or open a prefilled project form. Replies within a bound topic continue the same task and Codex session. Cards retain their originating topic, and results are posted as thread replies. Steward reads bounded text/rich-text/card context from that group or topic before inference; missing permissions stop execution explicitly. Other members cannot control tasks. Group results and human requests are visible to group participants.
+
 ## What survives a restart
 
 - Tasks, session IDs, events, inbound message deduplication and outbound notifications live in SQLite.
@@ -130,7 +134,7 @@ Enable `card.action.trigger` under the application’s **callback configuration*
 
 ## Boundaries
 
-- Only the configured owner can control this release, and only in direct messages. Group messages and bot-authored events are ignored.
+- Only the configured owner can control this release. Set `groupChats: true` to enable owner @mentions, thread replies and group cards; other members contribute reference context but cannot dispatch or approve. See [group setup](docs/group-context.md). Bot-authored events never dispatch tasks.
 - Project aliases are configured locally; message text cannot supply an arbitrary working directory.
 - Credentials, private config and runtime state are gitignored. Never share them with a deployment template.
 - Run on a trusted machine. Steward is not a security boundary against a malicious local user or process. Codex's configured tools, MCP servers, plugins and repository instructions still matter.

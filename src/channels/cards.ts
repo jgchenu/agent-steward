@@ -34,16 +34,19 @@ const stateBox = (prompt: string, state: Status): Element => ({
     elements: [badge(state), taskHeading(prompt), caption(status[state][3])] }],
 });
 export function viewKey(view: View): string {
-  return 'taskId' in view ? `${view.kind}:${view.taskId}` : view.kind;
+  const key = 'taskId' in view ? `${view.kind}:${view.taskId}` : view.kind;
+  return view.conversation ? `group:${view.conversation.anchorId}:${key}` : key;
 }
 export function buildCard(store: Store, config: Config, chatId: string, view?: View, notice = ''): Record<string, unknown> {
+  const conversation = view?.conversation ?? (view && 'taskId' in view ? store.get(view.taskId)?.conversation : undefined);
+  const action = (intent: Intent) => store.action(chatId, { ...intent, ...(conversation ? { conversation } : {}) });
   const button = (label: string, intent: Intent, primary = false, confirm?: string): Element => ({
     tag: 'button', text: plain(label), type: primary ? 'primary_filled' : 'default', width: 'fill',
-    behaviors: [{ type: 'callback', value: { actionId: store.action(chatId, intent) } }],
+    behaviors: [{ type: 'callback', value: { actionId: action(intent) } }],
     ...(confirm ? { confirm: { title: plain(label), text: plain(confirm) } } : {}),
   });
   const form = (label: string, intent: Intent, fields: Element[]): Element => ({ tag: 'form', name: 'steward_form',
-    elements: [...fields, { tag: 'button', name: store.action(chatId, intent), text: plain(label),
+    elements: [...fields, { tag: 'button', name: action(intent), text: plain(label),
       type: 'primary_filled', width: 'fill', form_action_type: 'submit' }] });
   const input = (label: string, placeholder: string): Element => ({ tag: 'input', name: 'body', required: true,
     label: plain(label), placeholder: plain(placeholder), input_type: 'multiline_text', rows: 3, max_length: 1000, width: 'fill' });
@@ -54,11 +57,12 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     body: { direction: 'vertical', padding: '12px 12px 20px 12px', vertical_spacing: '12px', elements },
   });
   const homeButton = (primary = false) => button('派新任务', { op: 'home' }, primary);
-  if (!view) return card('Agent Steward', '工作动态', 'blue', [box(notice), homeButton()]);
+  if (!view || view.kind === 'notice') return card('Agent Steward', '工作动态', 'blue', [box(notice), homeButton()]);
   if (view.kind === 'home') {
     const projects = Object.entries(config.projects);
     return card('交给我来做', 'Agent Steward · 你的数字员工', 'blue', [
       box('选择工作项目和本次工作方式，再告诉我希望完成什么。需要你决定时，我会在这里找你。'),
+      ...(conversation ? [caption(`自动读取${conversation.scope === 'thread' ? '当前话题' : '当前群最近讨论'}作为参考；结果会回复到对应话题，仅主人可操作。`)] : []),
       form('开始执行', { op: 'new' }, [
         text('工作项目'),
         { tag: 'select_static', name: 'project', required: true, width: 'fill', placeholder: plain('选择项目'),
@@ -68,17 +72,18 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
         { tag: 'select_static', name: 'mode', required: true, width: 'fill', initial_option: 'read-only',
           options: [{ text: plain('只读分析 · 不修改文件'), value: 'read-only' },
             ...(projects.some(([, p]) => p.sandbox === 'workspace-write' && p.worktree) ? [{ text: plain('允许修改 · 完成后自动验证'), value: 'workspace-write' }] : [])] },
-        input('任务要求', '例如：检查这个项目，并给我三条改进建议'),
+        { ...input('任务要求', '例如：检查这个项目，并给我三条改进建议'), ...(view.draft ? { default_value: view.draft.slice(0, 1000) } : {}) },
       ]), row(button('我的任务', { op: 'list' }), button('刷新入口', { op: 'home' })),
     ]);
   }
   if (view.kind === 'list') {
-    const tasks = store.list(chatId), page = Math.min(Math.max(0, view.page ?? 0), Math.max(0, Math.ceil(tasks.length / 3) - 1));
+    const bound = conversation ? store.conversationTask(chatId, conversation) : undefined;
+    const tasks = conversation ? (bound ? [bound] : []) : store.list(chatId), page = Math.min(Math.max(0, view.page ?? 0), Math.max(0, Math.ceil(tasks.length / 3) - 1));
     const items = tasks.slice(page * 3, page * 3 + 3).map(t => ({
       tag: 'interactive_container', width: 'fill', has_border: true, corner_radius: '8px',
       border_color: `${status[t.status][1]}-100`, background_style: `${status[t.status][1]}-50`,
       padding: '12px', vertical_spacing: '8px',
-      behaviors: [{ type: 'callback', value: { actionId: store.action(chatId, { op: 'status', taskId: t.id }) } }],
+      behaviors: [{ type: 'callback', value: { actionId: action({ op: 'status', taskId: t.id }) } }],
       elements: [badge(t.status), taskHeading(t.prompt), caption(`项目 · ${t.project}`),
         row(caption(status[t.status][3]), { tag: 'div', text: { ...plain('打开任务 ›'), text_color: status[t.status][1], text_align: 'right', text_size: 'notation' } })],
     }));
@@ -90,6 +95,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   const task = store.get(view.taskId);
   if (!task || task.chatId !== chatId) return card('任务不可用', '请重新打开任务列表', 'grey', [box('找不到当前会话中的任务。'), homeButton()]);
   const [label, color] = status[task.status];
+  const contextSummary = store.context(task.id)?.summary;
   const report = store.delivery(task.id), project = config.projects[task.project];
   const modeLabel = task.mode === 'workspace-write' ? '允许修改 · 独立目录' : '只读分析';
   const intent = (op: Intent['op']): Intent => ({ op, taskId: task.id, revision: task.updatedAt });
@@ -162,6 +168,8 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   actions.push(button('查看全文', intent('result')));
   return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : label, `${task.project} · ${modeLabel}`, color, [stateBox(task.prompt, task.status),
     text((task.result ?? store.latestProgress(task.id)) || (task.status === 'queued' ? '正在排队，轮到后自动开始。' : '任务已开始，结果会更新在这里。'), 4),
+    ...(contextSummary ? [caption(contextSummary)] : []),
+    ...(conversation ? [caption('在此话题继续回复可接着处理同一任务；只有主人可派活或确认。')] : []),
     ...(report ? [caption(`实际改动 ${report.files.length} 个文件 · ${report.ready ? '配置验证已通过' : '验证未通过或未运行'}${report.prUrl ? ' · PR 已准备' : ''}`)]
       : task.status === 'review' ? [caption('这是执行结果；请检查内容后确认完成。')] : []), row(...actions),
     row(button('我的任务', { op: 'list' }), ...(report ? [button('查看交付', intent('delivery'))] : []), homeButton()),

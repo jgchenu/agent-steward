@@ -40,10 +40,11 @@ export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.
     projects[name] = { path, sandbox, ...(worktree ? { worktree } : {}) };
   }
   if (!Object.keys(projects).length) throw new Error('Configure at least one project.');
+  if (raw.groupChats !== undefined && typeof raw.groupChats !== 'boolean') throw new Error('groupChats must be boolean.');
   const maxRunMinutes = raw.maxRunMinutes ?? 60;
   if (!Number.isFinite(maxRunMinutes) || maxRunMinutes < 1 || maxRunMinutes > 1440) {
     throw new Error('maxRunMinutes must be between 1 and 1440.');
   }
-  return { ownerId, projects, maxRunMinutes, stateDir: resolve(base, raw.stateDir ?? '.steward'),
+  return { ownerId, projects, maxRunMinutes, groupChats: raw.groupChats ?? false, stateDir: resolve(base, raw.stateDir ?? '.steward'),
     codexCommand: raw.codexCommand ?? 'codex' };
 }

@@ -54,7 +54,7 @@ async function main(): Promise<void> {
   engine.start();
   if (feishu) {
     await feishu.connect(message => engine.receive(message), action => engine.handleAction(action));
-    console.log('Agent Steward started. Owner-only Feishu DMs. Use /help.');
+    console.log('Agent Steward started. Owner-only Feishu tasks. Use /help; group mode follows local configuration.');
   } else {
     console.log(mode === 'demo' ? 'DEMO · 模拟执行器，不调用模型。输入任务或 /help。'
       : 'LOCAL · 真实 Codex 订阅执行。输入任务或 /help。');
