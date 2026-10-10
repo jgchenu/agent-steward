@@ -188,3 +188,79 @@ test('write configuration requires worktree and a consistent GitHub base', () =>
     f.close();
   }
 });
+
+test('baseline restart pins an approved SHA, preserves old WIP/session and leaves project defaults alone', async () => {
+  const { baselinePreview, restartAtBaseline } = await import('../src/baseline.js');
+  const f = fixture();
+  try {
+    const old = await prepareWorkspace(f.store,f.config.stateDir,f.task,f.project,signal());
+    f.store.thread(f.task.id,'old-session'); writeFileSync(join(old.path,'README.md'),'unfinished work');
+    writeFileSync(join(f.source,'feature.txt'),'new implementation'); f.g('add','feature.txt'); f.g('commit','-m','new base');
+    const sha=f.g('rev-parse','HEAD'); f.store.set(f.task.id,'review');
+    const preview=await baselinePreview(f.store,f.task,f.project,'main',signal());
+    assert.equal(preview.sha,sha); assert.equal(preview.before.files.length,1);
+    const next=await restartAtBaseline(f.store,f.config,f.store.get(f.task.id)!,preview,signal());
+    assert.equal(next.threadId,null); assert.equal(next.mode,f.task.mode); assert.match(next.prompt,/Update README/);
+    assert.equal(f.store.get(f.task.id)?.threadId,'old-session'); assert.equal(readFileSync(join(old.path,'README.md'),'utf8'),'unfinished work');
+    const newer=await prepareWorkspace(f.store,f.config.stateDir,next,f.project,signal());
+    assert.equal(await git(newer.path,['rev-parse','HEAD'],signal()),sha); assert.equal(readFileSync(join(newer.path,'README.md'),'utf8'),'base\n');
+    assert.equal(f.project.worktree?.baseRef,'origin/main'); assert.equal(f.g('branch','--show-current'),'main');
+    writeFileSync(join(f.source,'later'),'later');f.g('add','later');f.g('commit','-m','move main');
+    await prepareWorkspace(f.store,f.config.stateDir,next,f.project,signal());
+    assert.equal(await git(newer.path,['rev-parse','HEAD'],signal()),sha);
+  } finally { f.close(); }
+});
+test('baseline approval cannot apply after WIP or grants change and refs cannot contain expressions',async()=>{
+  const { baselinePreview, restartAtBaseline, validBaseRef }=await import('../src/baseline.js'); const f=fixture();
+  try {
+    const old=await prepareWorkspace(f.store,f.config.stateDir,f.task,f.project,signal());f.store.set(f.task.id,'review');
+    assert.equal(validBaseRef('main~1'),false); assert.equal(validBaseRef('--help'),false); assert.equal(validBaseRef('a..b'),false);
+    const preview=await baselinePreview(f.store,f.task,f.project,'main',signal());
+    writeFileSync(join(old.path,'README.md'),'new WIP');
+    await assert.rejects(restartAtBaseline(f.store,f.config,f.task,preview,signal()),/内容已变化/);
+    const fresh=await baselinePreview(f.store,f.task,f.project,'main',signal());f.project.sandbox='read-only';
+    await assert.rejects(restartAtBaseline(f.store,f.config,f.task,fresh,signal()),/权限已变化/);
+    assert.equal(f.store.list().length,1);assert.equal(readFileSync(join(old.path,'README.md'),'utf8'),'new WIP');
+  }finally{f.close()}
+});
+
+test('topic baseline flow requires one owner confirmation, hands off bindings and invalidates old controls',async()=>{
+  const f=fixture(); f.config.groupChats=true;
+  const conversation={anchorId:'root',sourceId:'root',scope:'thread' as const,threadId:'topic'};
+  const wait=async(fn:()=>boolean)=>{for(let i=0;i<300;i++){if(fn())return;await new Promise(r=>setTimeout(r,10))}assert.fail('timed out')};
+  const engine=new Engine(f.store,f.config,{run:async task=>{assert.equal(task.threadId,null);return 'new execution'}},{send:async()=>{},context:async()=>({summary:'',capturedAt:'',truncated:false,messages:[]})});
+  let n=0;const send=(text:string,senderId='owner')=>engine.receive({id:'baseline-'+(++n),senderId,chatId:'dm',senderType:'user',chatType:'group',botMentioned:true,text,conversation});
+  try{
+    const old=await prepareWorkspace(f.store,f.config.stateDir,f.task,f.project,signal());
+    f.store.saveConversation(f.task.id,conversation);f.store.set(f.task.id,'review');
+    const oldAction=f.store.action('dm',{op:'continue',taskId:f.task.id,revision:f.store.get(f.task.id)!.updatedAt,conversation});
+    send(`/restart ${f.task.id} main`);
+    await wait(()=>f.store.get(f.task.id)?.status==='waiting_approval');
+    const req=f.store.requests(f.task.id)[0];assert.equal(req.kind,'approval');
+    const card=JSON.stringify(buildCard(f.store,f.config,'dm',{kind:'task',taskId:f.task.id}));
+    assert.ok(card.includes(old.baseSha));assert.match(card,/旧任务有 0 个改动文件/);
+    send(`/approve ${req.id}`,'stranger');send('可以');assert.equal(f.store.getRequest(req.id)?.status,'pending');
+    send(`/approve ${req.id}`);
+    await wait(()=>f.store.list().some(t=>t.id!==f.task.id&&t.status==='review'));
+    const next=f.store.conversationTask('dm',conversation)!;assert.notEqual(next.id,f.task.id);
+    assert.equal(f.store.workspace(next.id)?.baseRef,'main');assert.equal(f.store.workspace(f.task.id)?.baseRef,'origin/main');
+    assert.equal(engine.handleAction({id:'stale',senderId:'owner',chatId:'dm',actionId:oldAction,messageId:'msg',fields:{body:'modify'}}).toast.type,'error');
+    send(`/approve ${req.id}`);assert.equal(f.store.list().length,2);
+  }finally{await engine.stop();f.close()}
+});
+
+test('declining a baseline leaves the task/session untouched and cancellation expires the pending confirmation',async()=>{
+  const f=fixture();let runs=0;
+  const engine=new Engine(f.store,f.config,{run:async()=>{runs++;return 'unexpected'}},{send:async()=>{}});
+  const wait=async(fn:()=>boolean)=>{for(let i=0;i<300;i++){if(fn())return;await new Promise(r=>setTimeout(r,10))}assert.fail('timed out')};
+  let n=0;const send=(text:string)=>engine.receive({id:'cancel-'+(++n),senderId:'owner',chatId:'dm',senderType:'user',chatType:'p2p',text});
+  try{
+    await prepareWorkspace(f.store,f.config.stateDir,f.task,f.project,signal());f.store.thread(f.task.id,'keep');f.store.set(f.task.id,'review','original result');
+    send(`/restart ${f.task.id} main`);await wait(()=>f.store.requests(f.task.id).length===1);
+    send(`/deny ${f.store.requests(f.task.id)[0].id}`);await wait(()=>f.store.get(f.task.id)?.status==='review');
+    assert.equal(f.store.get(f.task.id)?.result,'original result');assert.equal(f.store.get(f.task.id)?.threadId,'keep');
+    send(`/restart ${f.task.id} main`);await wait(()=>f.store.requests(f.task.id).length===1);
+    const req=f.store.requests(f.task.id)[0].id;send(`/cancel ${f.task.id}`);await new Promise(r=>setTimeout(r,30));
+    send(`/approve ${req}`);assert.equal(f.store.getRequest(req)?.status,'expired');assert.equal(f.store.list().length,1);assert.equal(runs,0);
+  }finally{await engine.stop();f.close()}
+});

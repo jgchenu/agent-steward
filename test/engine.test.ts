@@ -119,3 +119,16 @@ test('invalid human input leaves the request pending', async () => {
     assert.equal(f.store.getRequest(req)?.status, 'answered');
   } finally { resolve?.('stop'); await f.close(); }
 });
+
+test('structured tool permission input cannot be answered by ordinary topic prose',async()=>{
+  const cfg={...config,groupChats:true};const store=new Store(':memory:');let resolved=0,requestId='';
+  const engine=new Engine(store,cfg,{run:async(_t,_p,hooks)=>new Promise<string>(resolve=>{
+    requestId=hooks.request({kind:'input',explicit:true,description:'structured tool permission',resolve:()=>{resolved++;resolve('done')}});
+  })},{send:async()=>{},context:async()=>({summary:'',capturedAt:'',truncated:false,messages:[]})});
+  const conversation={anchorId:'root',sourceId:'root',scope:'thread' as const};
+  const send=(text:string)=>engine.receive(message(text,{chatType:'group',botMentioned:true,conversation}));
+  try{
+    send('do work');await until(()=>!!requestId);send('yes');assert.equal(resolved,0);
+    send(`/answer ${requestId} {"decision":"once"}`);await until(()=>resolved===1);
+  }finally{await engine.stop();store.close()}
+});

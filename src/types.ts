@@ -18,8 +18,8 @@ export interface Attachment {
 export interface Task {
   id: string; chatId: string; project: string; prompt: string; status: Status;
   threadId: string | null; result: string | null; createdAt: string; updatedAt: string;
-  conversation?: Conversation; contextSnapshot?: ContextSnapshot;
-  mode?: 'read-only' | 'workspace-write'; nextAction?: 'execute' | 'publish'; routingContext?: string;
+  conversation?: Conversation; contextSnapshot?: ContextSnapshot; codeVersion?: { ref: string; baseSha: string; headSha: string };
+  mode?: 'read-only' | 'workspace-write'; nextAction?: 'execute' | 'publish' | 'baseline'; baselineRef?: string | null; routingContext?: string;
 }
 export interface Incoming {
   id: string; senderId: string; chatId: string; text: string;
@@ -32,7 +32,7 @@ export interface Project {
   worktree?: { baseRef: string; checks: Check[]; github?: { repository: string; baseBranch: string } };
 }
 export interface Workspace {
-  taskId: string; source: string; path: string; branch: string; baseSha: string; baseRef: string;
+  taskId: string; source: string; path: string; branch: string; baseSha: string; baseRef: string; configBaseRef?: string;
 }
 export interface DeliveryReport {
   workspace: Workspace; mode: 'read-only' | 'workspace-write'; capturedAt: string;
@@ -45,7 +45,7 @@ export interface Config {
   projects: Record<string, Project>; groupChats?: boolean; defaultProject?: string;
 }
 export interface HumanRequest {
-  kind: 'approval' | 'input'; description: string;
+  kind: 'approval' | 'input'; description: string; explicit?: boolean;
   validate?: (answer: string) => void;
   // Reply is interpreted by the adapter, never executed as shell text.
   resolve: (answer: string) => void;
@@ -60,7 +60,7 @@ export interface Executor {
   run(task: Task, project: Project, hooks: RunHooks, signal: AbortSignal): Promise<string>;
 }
 export type View = ({ kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string; fromTaskId?: string; revision?: string } | { kind: 'list'; page?: number }
-  | { kind: 'reply' | 'task' | 'followup' | 'result' | 'delivery' | 'publication'; taskId: string; page?: number })
+  | { kind: 'reply' | 'task' | 'followup' | 'result' | 'delivery' | 'publication' | 'baseline'; taskId: string; page?: number })
   & { targetMessageId?: string; fresh?: boolean; conversation?: Conversation; draft?: string };
 export interface CardAction {
   id: string; senderId: string; chatId: string; actionId: string; messageId: string;
@@ -68,7 +68,7 @@ export interface CardAction {
 }
 export interface Intent {
   op: 'dispatch' | 'home' | 'list' | 'status' | 'result' | 'followup' | 'new' | 'continue' | 'done' | 'cancel' | 'approve' | 'deny' | 'answer'
-    | 'delivery' | 'publication' | 'publish';
+    | 'delivery' | 'publication' | 'publish' | 'baseline' | 'restart';
   conversation?: Conversation; project?: string; prompt?: string; selectionKey?: string; taskId?: string; requestId?: string; revision?: string; page?: number; publicationKey?: string;
 }
 export interface Channel {
