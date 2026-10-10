@@ -98,3 +98,5 @@ npm run check
 分享源码和配置示例即可。`.env`、私人配置、数据库、任务历史以及 Codex 认证文件不能随项目分发。
 
 项目使用 [MIT](LICENSE) 许可证。欢迎通过 Issue / PR 参与，见[贡献指南](CONTRIBUTING.md)。
+
+群聊中的截图、语音、视频和 PDF 读取与部署方式见[媒体支持](docs/media.md)。音频使用本地转写，不调用计费语音 API。

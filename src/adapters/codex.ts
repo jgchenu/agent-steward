@@ -124,8 +124,10 @@ export class CodexExecutor implements Executor {
       if (typeof threadId !== 'string') throw new Error('Codex 未返回会话 ID');
       hooks.thread(threadId);
       signal.throwIfAborted();
-      const images = (task.contextSnapshot?.attachments ?? []).filter(a => a.kind === 'image' && a.status === 'attached' && a.path)
-        .map(a => ({ type: 'localImage', path: a.path! }));
+      const images = (task.contextSnapshot?.attachments ?? []).flatMap(a => a.status === 'unread' ? [] : [
+        ...(a.kind === 'image' && a.status === 'attached' && a.path ? [{ type: 'localImage', path: a.path }] : []),
+        ...(a.visuals ?? []).flatMap(v => [{ type: 'text', text: `消息 ${a.messageId}：${v.label}`, text_elements: [] }, { type: 'localImage', path: v.path }]),
+      ]);
       await rpc.request('turn/start', { threadId, input: [{ type: 'text', text: taskInput(task), text_elements: [] }, ...images],
         approvalPolicy: 'on-request', approvalsReviewer: 'user' });
       return await completion;
