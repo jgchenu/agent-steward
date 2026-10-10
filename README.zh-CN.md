@@ -1,6 +1,6 @@
 # Agent Steward
 
-**属于你的数字员工，使用你自己的编码代理订阅。**
+**你的 Agent 分身，使用你自己的编码代理订阅，在已授权的工作空间里持续协作。**
 
 [English](README.md) · [架构](docs/architecture.md) · [飞书接入](docs/feishu-setup.md) · [路线图](docs/roadmap.md) · [群聊与话题](docs/group-context.md)
 

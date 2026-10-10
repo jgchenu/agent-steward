@@ -71,8 +71,23 @@ export class Store {
     for (const key of [conversation.anchorId, conversation.sourceId, conversation.threadId]) if (key) this.bindConversation(task.chatId, key, id);
   }
   bindConversation(chatId: string, key: string, taskId: string): void {
-    // A thread is permanently assigned to one task; never silently redirect old replies.
+    // Late deliveries from a previous execution must still lead to the topic's current task.
+    const anchor = this.get(taskId)?.conversation?.anchorId;
+    const active = anchor && this.db.prepare('SELECT taskId FROM conversation_bindings WHERE chatId=? AND messageKey=?').get(chatId, anchor) as { taskId: string } | undefined;
+    if (active) taskId = active.taskId;
     this.db.prepare('INSERT OR IGNORE INTO conversation_bindings VALUES (?,?,?)').run(chatId, key, taskId);
+  }
+  originalPrompt(id: string): string {
+    return (this.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='created' ORDER BY seq LIMIT 1").get(id) as {body:string} | undefined)?.body ?? this.get(id)!.prompt;
+  }
+  handoff(from: Task, project: string, prompt: string, mode: Task['mode'], conversation: Conversation): Task {
+    if (!['review','completed','failed','cancelled','interrupted'].includes(this.get(from.id)?.status ?? '')) throw Error('当前任务仍在执行，无法切换项目。');
+    const next = this.create(from.chatId, project, prompt, mode, conversation);
+    this.db.prepare('UPDATE conversation_bindings SET taskId=? WHERE chatId=? AND taskId=?').run(next.id, from.chatId, from.id);
+    this.expire(from.id);
+    this.set(from.id, from.status); // Invalidate controls issued before the handoff.
+    this.event(from.id, 'handoff_to', next.id); this.event(next.id, 'handoff_from', from.id);
+    return next;
   }
   conversationTask(chatId: string, conversation?: Conversation): Task | undefined {
     if (!conversation) return;

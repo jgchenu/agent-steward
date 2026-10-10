@@ -3,10 +3,10 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, realpat
 import { resolve, dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { loadConfig } from './config.js';
+import { loadConfig, projectAliases } from './config.js';
 import { workspacePage } from './workspace-page.js';
 
-type Candidate = { id: string; label: string; path: string; description?: string };
+type Candidate = { id: string; label: string; path: string; description?: string; aliases?: string[] };
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const git = (path: string, args: string[]) => execFileSync('git', ['-C', path, ...args], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
 function workspaceBase(path: string, label: string): string {
@@ -35,7 +35,7 @@ export class WorkspaceRegistry {
     const map = new Map(items.map(item => [resolve(item.path), item]));
     for (const [id, p] of Object.entries<any>(this.raw().projects ?? {})) {
       const path = resolve(dirname(this.file), p.path);
-      map.set(path, { id, label: p.label ?? id, description: p.description, path });
+      map.set(path, { id, label: p.label ?? id, description: p.description, aliases:p.aliases, path });
     }
     return [...map.values()];
   }
@@ -65,7 +65,7 @@ export class WorkspaceRegistry {
     writeFileSync(temp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
     renameSync(temp, file);
   }
-  apply(input: { revision: string; grants: Array<{ id: string; mode: string }>; defaultProject?: string }) {
+  apply(input: { revision: string; grants: Array<{ id: string; mode: string; aliases?: string[] }>; defaultProject?: string }) {
     const state = this.state();
     if (input.revision !== state.revision) throw Error('配置已变化，请刷新页面后再保存。');
     if (!Array.isArray(input.grants) || input.grants.length !== state.projects.length) throw Error('项目清单不完整，请刷新。');
@@ -74,10 +74,11 @@ export class WorkspaceRegistry {
       const item = state.projects.find(p => p.id === grant.id);
       if (!item || seen.has(grant.id) || !['none', 'read-only', 'workspace-write'].includes(grant.mode)) throw Error('项目或权限无效。');
       seen.add(grant.id);
+      item.aliases = projectAliases(grant.aliases ?? item.aliases, item.label);
       if (grant.mode === 'none') continue;
       if (!item.available) throw Error(`目录不存在：${item.label}`);
       const previous = raw.projects?.[grant.id];
-      const p: any = { ...previous, path: item.path, label: item.label, ...(item.description ? { description: item.description } : {}), sandbox: grant.mode, naturalMode: grant.mode };
+      const p: any = { ...previous, path: item.path, label: item.label, aliases:item.aliases, ...(item.description ? { description: item.description } : {}), sandbox: grant.mode, naturalMode: grant.mode };
       if (grant.mode === 'workspace-write' && !p.worktree) {
         if (!item.gitRepository) throw Error(`${item.label} 不是 Git 仓库根目录，当前只能只读授权。`);
         // Use this workspace's own branch, never a guessed production/default branch.
@@ -96,7 +97,7 @@ export class WorkspaceRegistry {
       loadConfig(temp);
       if (digest(readFileSync(this.file, 'utf8')) !== input.revision) throw Error('配置已变化，请刷新后重试。');
       // Retain revoked projects in the catalog so they remain visible as unauthorized.
-      this.write(this.catalog, state.projects.map(({ id, label, path, description }) => ({ id, label, path, description })));
+      this.write(this.catalog, state.projects.map(({ id, label, path, description, aliases }) => ({ id, label, path, description, aliases })));
       renameSync(temp, this.file);
     } finally { if (existsSync(temp)) unlinkSync(temp); }
     return this.state();
