@@ -105,6 +105,7 @@ Keep the process and machine awake. Closing the service interrupts active work; 
 | `/new <project> <task>` | Create a read-only task |
 | `/edit <project> <task>` | Modify an allowlisted project in an isolated Git worktree |
 | `/publish <task>` | Open the Feishu PR preview; publication needs the card confirmation |
+| `/merge <task> <PR URL>` | Inspect remote commits and checks, then request one explicit merge confirmation |
 | Plain text | Use a named authorized Codex project for code; ordinary conversation needs no project; ask when the code target is missing |
 | `/list`, `/status <task>` | View status, latest recorded progress, result and outstanding request IDs |
 | `/cancel <task>` | Stop execution; existing changes are retained |
@@ -113,7 +114,7 @@ Keep the process and machine awake. Closing the service interrupts active work; 
 | `/answer <request> <answer>` | Answer a question; multiple questions require JSON keyed by question ID |
 | `/done <task>` | Record the owner's acceptance of a result in `review` |
 
-Git project tasks retain their own worktree and continuation session. Modification tasks run locally configured checks after Codex finishes; delivery cards show actual changed files and check exit results. Passing checks enables an explicit draft PR preview and confirmation. Validation binds to file contents and check configuration; target-branch movement stops publication. The publisher reuses an existing open PR and never merges it. In an existing topic, address the agent with “创建 PR” to open the same preview. UI tasks can return bounded native screenshot images to the original thread; see [screenshot delivery](docs/project-delivery.md#截图交付) for the manifest and evidence boundary.
+Git project tasks retain their own worktree and continuation session. Modification tasks run locally configured checks after Codex finishes; delivery cards show actual changed files and check exit results. Passing checks enables an explicit draft PR preview and confirmation. Validation binds to file contents and check configuration; target-branch movement stops publication. The publisher reuses an existing open PR. A separate owner-confirmed merge flow checks the remote head, base, CI and review state; say “合并 PR <URL>” in the bound topic. In an existing topic, address the agent with “创建 PR” to open the same preview. UI tasks can return bounded native screenshot images to the original thread; see [screenshot delivery](docs/project-delivery.md#截图交付) for the manifest and evidence boundary.
 
 In Feishu, directly @mention the bot with your request. Configure [approval modes, Codex project grants](docs/workspaces.md) with `npm run workspaces`. The optional `工作台` or `/help` entry opens the manual task form. Group answers and clarifying questions are ordinary threaded posts with Markdown and complete long-answer splitting; reply naturally to continue. Explicit permission requests and on-demand task management retain their cards. Commands remain available in Feishu and the terminal. A generic “yes” never grants permission. Each instance runs one task at a time.
 

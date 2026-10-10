@@ -31,6 +31,7 @@ export class Store {
     if (!taskColumns.some(c => c.name === 'mode')) this.db.exec("ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'read-only'");
     if (!taskColumns.some(c => c.name === 'nextAction')) this.db.exec("ALTER TABLE tasks ADD COLUMN nextAction TEXT NOT NULL DEFAULT 'execute'");
     if (!taskColumns.some(c => c.name === 'baselineRef')) this.db.exec('ALTER TABLE tasks ADD COLUMN baselineRef TEXT');
+    if (!taskColumns.some(c => c.name === 'mergeUrl')) this.db.exec('ALTER TABLE tasks ADD COLUMN mergeUrl TEXT');
     this.db.exec(`CREATE TABLE IF NOT EXISTS workspaces (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS deliveries (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS task_conversations (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -134,6 +135,10 @@ export class Store {
   queuePublication(id: string): void {
     this.db.prepare("UPDATE tasks SET nextAction='publish' WHERE id=?").run(id);
     this.set(id, 'queued');
+  }
+  queueMerge(id: string, url: string): void {
+    this.db.prepare("UPDATE tasks SET nextAction='merge', mergeUrl=? WHERE id=?").run(url,id);
+    this.set(id,'queued');
   }
   workspace(id: string): Workspace | undefined {
     const row = this.db.prepare('SELECT data FROM workspaces WHERE taskId=?').get(id) as { data: string } | undefined;
