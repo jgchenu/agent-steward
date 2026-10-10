@@ -1,3 +1,4 @@
+import { runtimePermissions } from '../permissions.js';
 import { elicitation } from './elicitation.js';
 import { taskInput } from '../channels/context.js';
 import { CodexRpc, type RpcMessage } from './rpc.js';
@@ -46,6 +47,7 @@ export class CodexExecutor implements Executor {
 
   async run(task: Task, project: Project, hooks: RunHooks, signal: AbortSignal): Promise<string> {
     signal.throwIfAborted();
+    const permissions = runtimePermissions(task.permissionMode ?? (this.approvalsReviewer === 'auto_review' ? 'auto' : 'ask'), project.sandbox);
     const rpc = this.factory(this.command, project.path);
     let threadId: string | undefined, result = '', finished = false;
     const settled = new Set<string | number>();
@@ -132,8 +134,7 @@ export class CodexExecutor implements Executor {
       await rpc.initialize();
       await rpc.subscription();
       signal.throwIfAborted();
-      const common = { cwd: project.path, modelProvider: 'openai', sandbox: project.sandbox,
-        approvalPolicy: 'on-request', approvalsReviewer: this.approvalsReviewer, developerInstructions: INSTRUCTIONS };
+      const common = { cwd: project.path, modelProvider: 'openai', ...permissions, developerInstructions: INSTRUCTIONS };
       const response = await rpc.request(task.threadId ? 'thread/resume' : 'thread/start',
         task.threadId ? { ...common, threadId: task.threadId } : common);
       threadId = response?.thread?.id;
@@ -145,7 +146,7 @@ export class CodexExecutor implements Executor {
         ...(a.visuals ?? []).flatMap(v => [{ type: 'text', text: `消息 ${a.messageId}：${v.label}`, text_elements: [] }, { type: 'localImage', path: v.path }]),
       ]);
       await rpc.request('turn/start', { threadId, input: [{ type: 'text', text: taskInput(task), text_elements: [] }, ...images],
-        approvalPolicy: 'on-request', approvalsReviewer: this.approvalsReviewer });
+        approvalPolicy: permissions.approvalPolicy, approvalsReviewer: permissions.approvalsReviewer });
       return await completion;
     } finally {
       finished = true;

@@ -1,3 +1,6 @@
+import { permissionMode, PERMISSION_MODES } from './permissions.js';
+import { readPermissionRuntime } from './permission-runtime.js';
+import type { PermissionMode } from './types.js';
 import { createServer } from 'node:http';
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, realpathSync, statSync, unlinkSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
@@ -49,7 +52,7 @@ export class WorkspaceRegistry {
       return { ...item, id: configured?.[0] ?? item.id, available, gitRepository, mode,
         default: configured?.[0] === raw.defaultProject, baseRef: configured?.[1].worktree?.baseRef };
     });
-    return { revision: digest(text), projects };
+    return { revision: digest(text), projects, permissionMode: permissionMode(raw), runtime: readPermissionRuntime(resolve(dirname(this.file), raw.stateDir ?? '.steward')) };
   }
   add(path: string, label: string): void {
     if (typeof path !== 'string' || typeof label !== 'string' || !label.trim() || label.length > 40) throw Error('请填写有效的名称和目录。');
@@ -65,10 +68,12 @@ export class WorkspaceRegistry {
     writeFileSync(temp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
     renameSync(temp, file);
   }
-  apply(input: { revision: string; grants: Array<{ id: string; mode: string; aliases?: string[] }>; defaultProject?: string }) {
+  apply(input: { revision: string; grants: Array<{ id: string; mode: string; aliases?: string[] }>; defaultProject?: string; permissionMode?: PermissionMode; confirmFullAccess?: boolean }) {
     const state = this.state();
     if (input.revision !== state.revision) throw Error('配置已变化，请刷新页面后再保存。');
     if (!Array.isArray(input.grants) || input.grants.length !== state.projects.length) throw Error('项目清单不完整，请刷新。');
+    if (input.permissionMode !== undefined && !PERMISSION_MODES.includes(input.permissionMode)) throw Error('审批模式无效。');
+    if (input.permissionMode === 'full-access' && state.permissionMode !== 'full-access' && input.confirmFullAccess !== true) throw Error('请明确确认完全访问权限的范围后再保存。');
     const raw = this.raw(), projects: Record<string, any> = Object.create(null), seen = new Set<string>();
     for (const grant of input.grants) {
       const item = state.projects.find(p => p.id === grant.id);
@@ -88,7 +93,7 @@ export class WorkspaceRegistry {
     }
     if (!Object.keys(projects).length) throw Error('请至少保留一个通用分析空间。');
     if (input.defaultProject && !Object.hasOwn(projects, input.defaultProject)) throw Error('默认空间必须已经授权。');
-    const next = { ...raw, projects, ...(input.defaultProject ? { defaultProject: input.defaultProject } : {}) };
+    const next = { ...raw, ...(input.permissionMode ? { permissionMode: input.permissionMode } : {}), projects, ...(input.defaultProject ? { defaultProject: input.defaultProject } : {}) };
     if (!input.defaultProject) delete next.defaultProject;
     // Validate before replacement; the existing application identity and unrelated settings survive.
     const temp = this.file + '.' + randomUUID() + '.tmp';

@@ -1,3 +1,4 @@
+import { permissionMode, permissionRank } from './permissions.js';
 import { codeSourceReceipt, codeSourceDetails, configuredCheckSummary } from './code-source.js';
 import { baselinePreview, restartAtBaseline, validBaseRef } from './baseline.js';
 import { namedProjects, projectChoices } from './routing.js';
@@ -29,13 +30,23 @@ export class Engine {
   constructor(readonly store: Store, readonly config: Config, private executor: Executor,
     private channel: Channel) {}
 
-  updateProjects(next: Pick<Config, 'projects' | 'defaultProject'>): void {
+  updateProjects(next: Pick<Config, 'projects' | 'defaultProject'> & Partial<Pick<Config, 'permissionMode' | 'approvalsReviewer'>>): void {
     const previous = this.config.projects;
+    if ('permissionMode' in next || 'approvalsReviewer' in next) {
+      const mode = permissionMode(next);
+      this.config.permissionMode = mode; this.config.approvalsReviewer = next.approvalsReviewer;
+      if (this.active && permissionRank(mode) < permissionRank(this.active.task.permissionMode ?? 'ask')) {
+        this.active.abort.abort(new Error('审批模式已收紧，本轮执行已停止；已有改动保留，请继续任务以应用新设置。'));
+      }
+    }
     this.config.projects = next.projects; this.config.defaultProject = next.defaultProject;
     if (this.active) {
       const t = this.active.task, p = next.projects[t.project];
       if (!p || p.path !== previous[t.project]?.path || (t.mode === 'workspace-write' && p.sandbox !== 'workspace-write')) this.active.abort.abort(new Error('项目授权已撤销或降为只读，执行已停止。'));
     }
+  }
+  permissionState() {
+    return { permissionMode: permissionMode(this.config), activeMode: this.active?.task.permissionMode, active: !!this.active };
   }
   start(): void {
     this.store.recover();
@@ -292,8 +303,9 @@ export class Engine {
   }
   private tick(): void {
     if (this.stopped || this.active) return;
-    const task = this.store.list().find(t => t.status === 'queued');
-    if (!task) return;
+    const queued = this.store.list().find(t => t.status === 'queued');
+    if (!queued) return;
+    const task = { ...queued, permissionMode: permissionMode(this.config) };
     const abort = new AbortController();
     this.store.set(task.id, 'running');
     if (!task.conversation || !this.channel.acknowledge) this.store.enqueue(task.chatId, `开始执行 ${task.id} · ${task.project}`, { kind: 'task', taskId: task.id });
@@ -305,6 +317,8 @@ export class Engine {
     const timeout = setTimeout(() => abort.abort(new Error('执行超过配置时限')), this.config.maxRunMinutes * 60_000);
     let snapshot: ContextSnapshot | undefined;
     try {
+      abort.signal.throwIfAborted();
+      this.store.event(task.id, 'permission_mode', task.permissionMode ?? 'ask');
       const project = this.config.projects[task.project];
       if (!project) throw new Error('项目配置已移除。');
       const hooks: RunHooks = {

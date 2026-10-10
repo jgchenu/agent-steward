@@ -188,3 +188,16 @@ test('unsupported automatic reviewer fails without full-access or manual-policy 
   assert.equal(rpc.calls.filter(c=>c==='thread/start').length,1);
   assert.ok(!rpc.calls.includes('turn/start')); assert.equal(rpc.closed,true);
 });
+
+test('console modes map explicitly on new and resumed threads; full access cannot widen read-only tasks', async () => {
+  for (const permissionMode of ['ask','auto','full-access'] as const) for (const sandbox of ['read-only','workspace-write'] as const) for (const threadId of [null,'thread']) {
+    const rpc = new FakeRpc(), s = setup(rpc);rpc.onTurn=()=>rpc.finish();
+    await s.executor.run({...task,permissionMode,threadId}, {path:'.',sandbox},s.hooks,AbortSignal.timeout(5000));
+    const common=rpc.params[threadId?'thread/resume':'thread/start'];
+    assert.equal(common.sandbox,permissionMode==='full-access'&&sandbox==='workspace-write'?'danger-full-access':sandbox);
+    assert.equal(common.approvalPolicy,permissionMode==='full-access'?'never':'on-request');
+    assert.equal(common.approvalsReviewer,permissionMode==='auto'?'auto_review':'user');
+    assert.equal(rpc.params['turn/start'].approvalPolicy,common.approvalPolicy);
+    assert.equal(rpc.params['turn/start'].approvalsReviewer,common.approvalsReviewer);
+  }
+});

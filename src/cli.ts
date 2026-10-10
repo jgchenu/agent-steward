@@ -1,3 +1,4 @@
+import { writePermissionRuntime, clearPermissionRuntime } from './permission-runtime.js';
 import { mkdirSync, mkdtempSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -55,12 +56,15 @@ async function main(): Promise<void> {
     } catch { console.warn('Project configuration invalid; retaining last valid grants.'); }
   };
   refreshProjects();
-  const configTimer = setInterval(refreshProjects, 1000);
+  const configTimer = setInterval(() => {
+    refreshProjects();
+    try { writePermissionRuntime(config.stateDir, engine.permissionState()); } catch { console.warn('Permission status unavailable.'); }
+  }, 1000);
   let closing = false;
   const shutdown = async () => {
     if (closing) return; closing = true;
     clearInterval(configTimer); feishu?.close();
-    await engine.stop(); store.close(); release(); process.exit(0);
+    await engine.stop(); clearPermissionRuntime(config.stateDir); store.close(); release(); process.exit(0);
   };
   process.on('SIGINT', () => void shutdown()); process.on('SIGTERM', () => void shutdown());
   engine.start();

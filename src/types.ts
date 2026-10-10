@@ -15,7 +15,9 @@ export interface Attachment {
   status: 'unread' | 'attached' | 'text' | 'processed' | 'partial'; detail: string; path?: string; text?: string;
   visuals?: Array<{ path: string; label: string }>;
 }
+export type PermissionMode = 'ask' | 'auto' | 'full-access';
 export interface Task {
+  permissionMode?: PermissionMode;
   id: string; chatId: string; project: string; prompt: string; status: Status;
   threadId: string | null; result: string | null; createdAt: string; updatedAt: string;
   evidenceDirectory?: string;
@@ -46,6 +48,7 @@ export interface DeliveryReport {
   ready: boolean; validationKey?: string; authorizedKey?: string; prUrl?: string; publishedSha?: string; targetBefore?: string; error?: string;
 }
 export interface Config {
+  permissionMode?: PermissionMode;
   approvalsReviewer?: 'user' | 'auto_review';
   ownerId: string; stateDir: string; codexCommand: string; maxRunMinutes: number;
   projects: Record<string, Project>; groupChats?: boolean; defaultProject?: string;
