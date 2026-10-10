@@ -43,7 +43,9 @@ test('only addressed owner messages dispatch; topic replies continue the same ta
     const msg = incoming('inspect'); engine.receive(msg); engine.receive(msg);
     await until(() => store.list()[0]?.status === 'review'); const task = store.list()[0];
     assert.equal(runs.length, 1); assert.equal(runs[0].contextSnapshot!.messages[0].author, 'user:other');
-    const follow = incoming('refine this', { botMentioned: false, conversation: { ...ref(), sourceId: 'follow', scope: 'thread', threadId: 'thread' } });
+    store.saveCardMessage('group', 'reply:result:0', 'bot-result');
+    store.bindConversation('group', 'bot-result', task.id);
+    const follow = incoming('refine this', { botMentioned: false, conversation: { ...ref(), sourceId: 'follow', parentId:'bot-result', scope: 'thread', threadId: 'thread' } });
     engine.receive(follow); await until(() => runs.length === 2 && store.get(task.id)?.status === 'review');
     assert.equal(runs[1].id, task.id); assert.equal(runs[1].threadId, 'codex-thread'); assert.equal(runs[1].prompt, 'refine this');
     assert.equal(store.get(task.id)!.conversation!.sourceId, 'follow');
@@ -184,4 +186,49 @@ test('long topics retain root and explicitly quoted message even when history re
   const result = await readContext(api, {...task, conversation: {...task.conversation!, parentId: 'quote'}}, AbortSignal.timeout(1000), []);
   assert.deepEqual(result.messages.slice(0, 2).map(m => m.id), ['root', 'quote']);
   assert.equal(result.messages.length, 22); assert.equal(result.truncated, true);
+});
+
+test('ordinary topic chatter stays silent; only owner mentions or direct replies to our persisted messages resume', async () => {
+  const store=new Store(':memory:');let runs=0,reads=0,reactions=0;
+  const engine=new Engine(store,config,{run:async()=>{runs++;return 'done'}},{send:async()=>{},acknowledge:async()=>{reactions++},context:async()=>{reads++;return snapshot}});
+  try{
+    engine.receive(incoming('start'));await until(()=>store.list()[0]?.status==='review');const t=store.list()[0];
+    store.saveCardMessage('group','reply:answer:0','our-reply');store.bindConversation('group','our-reply',t.id);
+    store.saveCardMessage('elsewhere','reply:answer:0','other-chat-reply');
+    for(const extra of [
+      {},{senderId:'other',botMentioned:true},{senderType:'app',botMentioned:true},
+      {conversation:{...ref(),parentId:'root'}},{conversation:{...ref(),parentId:'someone-else'}},
+      {conversation:{...ref(),parentId:'other-chat-reply'}},
+      {mentionsOthers:true,conversation:{...ref(),parentId:'our-reply'}},
+    ]) engine.receive(incoming('human conversation',{botMentioned:false,...extra}));
+    await engine.flush();assert.equal(runs,1);assert.equal(reads,1);assert.equal(reactions,1);
+    const quoted=incoming('refine',{botMentioned:false,conversation:{...ref(),parentId:'our-reply',sourceId:'quoted'}});
+    engine.receive(quoted);engine.receive(quoted);await until(()=>runs===2&&store.get(t.id)?.status==='review');
+    assert.equal(reads,2);engine.receive(incoming('continue',{botMentioned:true}));await until(()=>runs===3);
+  }finally{await engine.stop();store.close()}
+});
+
+test('only a single pending input accepts an unmentioned owner answer in that topic',async()=>{
+  const store=new Store(':memory:');let answered='';
+  const engine=new Engine(store,config,{run:async(_t,_p,h,signal)=>new Promise((yes,no)=>{
+    signal.addEventListener('abort',()=>no(signal.reason),{once:true});
+    h.request({kind:'input',description:'Which range?',resolve:a=>{answered=a;yes('done')}});
+  })},{send:async()=>{},context:async()=>snapshot});
+  try{
+    engine.receive(incoming('start'));await until(()=>store.list()[0]?.status==='waiting_input');
+    engine.receive(incoming('wrong',{senderId:'other',botMentioned:false}));
+    engine.receive(incoming('wrong',{botMentioned:false,conversation:ref('elsewhere')}));
+    engine.receive(incoming('wrong',{botMentioned:false,mentionsOthers:true}));assert.equal(answered,'');
+    engine.receive(incoming('last week',{botMentioned:false}));await until(()=>answered==='last week');
+  }finally{await engine.stop();store.close()}
+});
+
+test('context resources are released after both successful and failed executions',async()=>{
+  for(const fail of [false,true]){
+    const store=new Store(':memory:');let releases=0;
+    const engine=new Engine(store,config,{run:async()=>{if(fail)throw Error('executor failed');return 'done'}},
+      {send:async()=>{},context:async()=>snapshot,releaseContext:async s=>{assert.equal(s,snapshot);releases++}});
+    try{engine.receive(incoming('inspect'));await until(()=>releases===1);assert.equal(store.list()[0].status,fail?'failed':'review')}
+    finally{await engine.stop();store.close()}
+  }
 });

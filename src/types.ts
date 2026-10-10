@@ -7,6 +7,12 @@ export interface Conversation {
 export interface ContextSnapshot {
   summary: string; capturedAt: string; truncated: boolean;
   messages: Array<{ id: string; author: string; text: string }>;
+  attachments?: Attachment[];
+  mediaDir?: string;
+}
+export interface Attachment {
+  messageId: string; key?: string; kind: 'image' | 'file' | 'video' | 'audio'; name?: string;
+  status: 'unread' | 'attached' | 'text'; detail: string; path?: string; text?: string;
 }
 export interface Task {
   id: string; chatId: string; project: string; prompt: string; status: Status;
@@ -67,5 +73,6 @@ export interface Intent {
 export interface Channel {
   acknowledge?(task: Task, signal: AbortSignal): Promise<void>;
   context?(task: Task, signal: AbortSignal): Promise<ContextSnapshot>;
+  releaseContext?(snapshot: ContextSnapshot): Promise<void>;
   send(chatId: string, text: string, deliveryId: string, view?: View): Promise<void>;
 }

@@ -9,12 +9,12 @@ const task: Task = { id: 'task', chatId: 'dm', project: 'p', prompt: 'do work', 
 class FakeRpc implements RpcPort {
   onMessage: (m: RpcMessage) => void = () => {};
   onExit: (e: Error) => void = () => {};
-  calls: string[] = []; writes: any[] = []; closed = false;
+  params: Record<string, any> = {}; calls: string[] = []; writes: any[] = []; closed = false;
   onTurn: () => void = () => {};
   async initialize() { this.calls.push('initialize'); }
   async subscription() { this.calls.push('subscription'); }
-  async request(method: string) {
-    this.calls.push(method);
+  async request(method: string, params: unknown) {
+    this.calls.push(method); this.params[method] = params;
     if (method === 'thread/start' || method === 'thread/resume') return { thread: { id: 'thread' } };
     if (method === 'turn/start') queueMicrotask(this.onTurn);
     return {};
@@ -98,4 +98,16 @@ test('multi-question responses require complete, explicit answers', () => {
   assert.throws(() => inputAnswers(questions, '{"a":"yes"}'), /b/);
   assert.deepEqual(inputAnswers(questions, '{"a":"yes","b":"no"}'),
     { a: { answers: ['yes'] }, b: { answers: ['no'] } });
+});
+
+
+test('image attachments reach the subscription turn as localImage inputs, unread resources do not',async()=>{
+  const rpc=new FakeRpc();rpc.onTurn=()=>rpc.finish();
+  await setup(rpc).run({...task,contextSnapshot:{summary:'media',capturedAt:'',truncated:false,messages:[],attachments:[
+    {messageId:'source',kind:'image',status:'attached',detail:'attached',path:'/private/image.png'},
+    {messageId:'source',kind:'video',status:'unread',detail:'video unread'},
+    {messageId:'source',kind:'image',status:'unread',detail:'failed'},
+  ]}});
+  const input=rpc.params['turn/start'].input;assert.equal(input.length,2);
+  assert.deepEqual(input[1],{type:'localImage',path:'/private/image.png'});assert.match(input[0].text,/video unread/);
 });

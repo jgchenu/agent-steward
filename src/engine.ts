@@ -1,7 +1,7 @@
 import { namedProjects, projectChoices } from './routing.js';
 import { Store } from './store.js';
 import { canPublish, publicationKey } from './workspace.js';
-import type { CardAction, Channel, Config, Executor, HumanRequest, Incoming, Status, Task, View } from './types.js';
+import type { CardAction, Channel, Config, ContextSnapshot, Executor, HumanRequest, Incoming, Status, Task, View } from './types.js';
 
 const HELP = `Agent Steward · 个人 Agent 分身（预览版）
 /projects — 可用项目
@@ -42,8 +42,11 @@ export class Engine {
   receive(message: Incoming, actionId?: string): void {
     if (this.stopped || message.senderId !== this.config.ownerId || message.senderType !== 'user') return;
     const bound = message.chatType === 'group' ? this.store.conversationTask(message.chatId, message.conversation) : undefined;
+    const pendingInput = bound && this.store.requests(bound.id);
+    const answering = pendingInput?.length === 1 && pendingInput[0].kind === 'input';
+    const replying = bound && this.store.isOwnMessage(message.chatId, message.conversation?.parentId);
     if (message.chatType === 'group' && (!this.config.groupChats || !message.conversation
-      || (!message.botMentioned && (message.mentionsOthers || !bound)))) return;
+      || (!message.botMentioned && (message.mentionsOthers || (!replying && !answering))))) return;
     if (bound?.conversation && message.conversation) message = { ...message, conversation: {
       ...message.conversation, anchorId: bound.conversation.anchorId, scope: 'thread',
     } };
@@ -278,6 +281,7 @@ export class Engine {
   }
   private async run(task: Task, abort: AbortController): Promise<void> {
     const timeout = setTimeout(() => abort.abort(new Error('执行超过配置时限')), this.config.maxRunMinutes * 60_000);
+    let snapshot: ContextSnapshot | undefined;
     try {
       const project = this.config.projects[task.project];
       if (!project) throw new Error('项目配置已移除。');
@@ -294,7 +298,7 @@ export class Engine {
       if (task.conversation && task.nextAction !== 'publish') {
         if (!this.config.groupChats || !this.channel.context) throw new Error('群上下文读取未启用，任务未执行。');
         this.store.event(task.id, 'progress', '正在读取当前会话上下文。');
-        const snapshot = await this.channel.context(task, abort.signal);
+        snapshot = await this.channel.context(task, abort.signal);
         abort.signal.throwIfAborted();
         this.store.saveContext(task.id, snapshot); this.store.event(task.id, 'context_loaded', snapshot.summary);
         executionTask = { ...task, contextSnapshot: snapshot };
@@ -331,12 +335,16 @@ export class Engine {
       if (state !== 'cancelled') {
         const reason = error instanceof Error ? error.message : '执行失败';
         this.store.set(task.id, this.stopped ? 'interrupted' : 'failed', reason);
-        if (task.conversation) this.store.enqueue(task.chatId, `这次没能完成：${reason}\n你可以直接回复补充要求，我会接着处理。`, { kind: 'reply', taskId: task.id });
+        if (task.conversation) this.store.enqueue(task.chatId, `这次没能完成：${reason}\n你可以引用回复这条消息，或 @我补充要求，我会接着处理。`, { kind: 'reply', taskId: task.id });
         else this.store.enqueue(task.chatId, `任务 ${task.id} ${this.stopped ? '已中断' : '失败'}：${reason}\n`
           + `不会自动重试已发生的操作。检查后用 /continue ${task.id} <要求> 继续。`, { kind: 'task', taskId: task.id });
       }
     } finally {
       clearTimeout(timeout);
+      if (snapshot && this.channel.releaseContext) {
+        try { await this.channel.releaseContext(snapshot); }
+        catch { this.store.event(task.id, 'media_cleanup_failed', '本次附件临时目录未能清理。'); }
+      }
       for (const id of this.pending.keys()) {
         if (this.store.getRequest(id)?.taskId === task.id) this.pending.delete(id);
       }

@@ -99,6 +99,9 @@ export class Store {
     }
     return tasks.size === 1 ? this.get([...tasks][0]) : undefined;
   }
+  isOwnMessage(chatId: string, messageId?: string): boolean {
+    return !!messageId && !!this.db.prepare("SELECT 1 FROM card_messages WHERE chatId=? AND messageId=? AND viewKey NOT LIKE 'reaction:%' LIMIT 1").get(chatId, messageId);
+  }
   saveContext(id: string, snapshot: ContextSnapshot): void {
     this.db.prepare('INSERT INTO context_snapshots VALUES (?,?) ON CONFLICT(taskId) DO UPDATE SET data=excluded.data').run(id, JSON.stringify(snapshot));
   }
