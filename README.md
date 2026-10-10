@@ -1,6 +1,6 @@
 # Agent Steward
 
-**Your own digital coworker, backed by your coding-agent subscription.**
+**Your personal agent counterpart, backed by your coding-agent subscription and working in the projects you authorize.**
 
 [中文说明](README.zh-CN.md) · [Architecture](docs/architecture.md) · [Feishu setup](docs/feishu-setup.md) · [Roadmap](docs/roadmap.md) · [Group and thread setup](docs/group-context.md)
 

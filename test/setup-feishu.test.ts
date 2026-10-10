@@ -15,6 +15,8 @@ test('onboarding uses new-app flow with minimal permissions and binds the verifi
     const result = await setupFeishu({ root: dir, signal: new AbortController().signal,
       onQRCodeReady: ({ url }) => urls.push(url) }, async options => {
       assert.equal(options.createOnly, true); assert.equal(options.addons?.preset, false);
+      assert.equal(options.appPreset?.name, '{user}的 Agent 分身');
+      assert.match(options.appPreset?.desc ?? '', /已授权的工作空间/);
       assert.deepEqual(options.addons?.scopes, { tenant: ['im:message:send_as_bot', 'im:message.p2p_msg:readonly'] });
       assert.equal(options.appId, undefined);
       options.onQRCodeReady({ url: 'https://example.test/authorize?code=a%2Bb', expireIn: 60 });

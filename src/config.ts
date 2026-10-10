@@ -2,6 +2,12 @@ import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { Config, Project } from './types.js';
 
+export function projectAliases(value: unknown, name: string): string[] | undefined {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length > 10 || value.some(alias => typeof alias !== 'string' || !alias.trim() || alias.length > 40 || /[\r\n\0]/.test(alias))) throw new Error(`Invalid project aliases: ${name}`);
+  return [...new Set(value.map(alias => (alias as string).trim()))];
+}
+
 export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.json'): Config {
   const base = dirname(resolve(file));
   const raw = JSON.parse(readFileSync(file, 'utf8'));
@@ -19,6 +25,7 @@ export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.
     for (const [field, limit] of [['label', 40], ['description', 200]] as const) {
       if (p[field] !== undefined && (typeof p[field] !== 'string' || !p[field]!.trim() || p[field]!.length > limit)) throw new Error(`Invalid project ${field}: ${name}`);
     }
+    const aliases = projectAliases(p.aliases, name);
     const sandbox = p.sandbox ?? 'read-only';
     if (!['read-only', 'workspace-write'].includes(sandbox)) throw new Error(`Invalid sandbox: ${name}`);
     if (p.naturalMode !== undefined && (!['read-only', 'workspace-write'].includes(p.naturalMode) || (p.naturalMode === 'workspace-write' && sandbox !== 'workspace-write'))) throw new Error(`Invalid naturalMode: ${name}`);
@@ -41,7 +48,7 @@ export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.
       worktree = { baseRef: w.baseRef, checks: w.checks, ...(w.github ? { github: w.github } : {}) };
     }
     if (sandbox === 'workspace-write' && !worktree) throw new Error(`workspace-write requires an isolated worktree: ${name}`);
-    projects[name] = { path, sandbox, ...(p.naturalMode ? { naturalMode: p.naturalMode } : {}), ...(p.label ? { label: p.label.trim() } : {}), ...(p.description ? { description: p.description.trim() } : {}), ...(worktree ? { worktree } : {}) };
+    projects[name] = { path, sandbox, ...(aliases ? { aliases } : {}), ...(p.naturalMode ? { naturalMode: p.naturalMode } : {}), ...(p.label ? { label: p.label.trim() } : {}), ...(p.description ? { description: p.description.trim() } : {}), ...(worktree ? { worktree } : {}) };
   }
   if (!Object.keys(projects).length) throw new Error('Configure at least one project.');
   if (raw.defaultProject !== undefined && (typeof raw.defaultProject !== 'string' || !Object.hasOwn(projects, raw.defaultProject))) throw new Error('defaultProject must name a configured project.');

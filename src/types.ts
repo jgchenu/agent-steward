@@ -12,7 +12,7 @@ export interface Task {
   id: string; chatId: string; project: string; prompt: string; status: Status;
   threadId: string | null; result: string | null; createdAt: string; updatedAt: string;
   conversation?: Conversation; contextSnapshot?: ContextSnapshot;
-  mode?: 'read-only' | 'workspace-write'; nextAction?: 'execute' | 'publish';
+  mode?: 'read-only' | 'workspace-write'; nextAction?: 'execute' | 'publish'; routingContext?: string;
 }
 export interface Incoming {
   id: string; senderId: string; chatId: string; text: string;
@@ -21,7 +21,7 @@ export interface Incoming {
 }
 export interface Check { name: string; command: string; args: string[]; timeoutSeconds?: number }
 export interface Project {
-  path: string; sandbox: 'read-only' | 'workspace-write'; label?: string; description?: string; naturalMode?: 'read-only' | 'workspace-write';
+  path: string; sandbox: 'read-only' | 'workspace-write'; label?: string; aliases?: string[]; description?: string; naturalMode?: 'read-only' | 'workspace-write';
   worktree?: { baseRef: string; checks: Check[]; github?: { repository: string; baseBranch: string } };
 }
 export interface Workspace {
@@ -52,7 +52,7 @@ export interface RunHooks {
 export interface Executor {
   run(task: Task, project: Project, hooks: RunHooks, signal: AbortSignal): Promise<string>;
 }
-export type View = ({ kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string } | { kind: 'list'; page?: number }
+export type View = ({ kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string; fromTaskId?: string; revision?: string } | { kind: 'list'; page?: number }
   | { kind: 'reply' | 'task' | 'followup' | 'result' | 'delivery' | 'publication'; taskId: string; page?: number })
   & { targetMessageId?: string; fresh?: boolean; conversation?: Conversation; draft?: string };
 export interface CardAction {

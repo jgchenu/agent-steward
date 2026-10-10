@@ -2,7 +2,7 @@
   "name": "agent-steward",
   "version": "0.1.0",
   "private": true,
-  "description": "Your self-hosted digital coworker. Bring your own coding-agent subscription.",
+  "description": "Your self-hosted agent counterpart. Bring your own coding-agent subscription.",
   "type": "module",
   "license": "MIT",
   "engines": { "node": ">=24.0.0 <25" },

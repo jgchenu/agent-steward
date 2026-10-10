@@ -1,9 +1,9 @@
-import { projectChoices } from './routing.js';
+import { namedProjects, projectChoices } from './routing.js';
 import { Store } from './store.js';
 import { canPublish, publicationKey } from './workspace.js';
 import type { CardAction, Channel, Config, Executor, HumanRequest, Incoming, Status, Task, View } from './types.js';
 
-const HELP = `Agent Steward · 个人数字员工（预览版）
+const HELP = `Agent Steward · 个人 Agent 分身（预览版）
 /projects — 可用项目
 /new <项目> <任务要求> — 只读分析
 /edit <项目> <任务要求> — 在独立目录修改并验证
@@ -68,16 +68,20 @@ export class Engine {
         if (pending.length === 1 && pending[0].kind === 'input') { command = '/answer'; args = `${pending[0].id} ${text}`; }
         else if (['queued', 'running', 'waiting_input', 'waiting_approval'].includes(bound.status)) {
           reply(bound.status === 'waiting_approval' ? '这一步需要你确认具体操作，我在等你的决定。' : '我还在处理前面的内容，完成后会在这里回复你。', { kind: bound.status === 'waiting_approval' ? 'task' : 'reply', taskId: bound.id }); return;
-        } else { command = '/continue'; args = `${bound.id} ${text}`; }
+        } else {
+          const choices = namedProjects(this.config, text);
+          if (choices.length > 1) {
+            reply('这次处理哪个项目？', { kind:'choose-project', draft:text, choices, selectionKey:message.id, fromTaskId:bound.id, revision:bound.updatedAt }); return;
+          }
+          if (choices.length === 1 && choices[0] !== bound.project) command = '/new';
+          else { command = '/continue'; args = `${bound.id} ${text}`; }
+        }
       }
       if (command === '/help' || (!match && ['首页', '工作台', '帮助'].includes(text))) { reply(HELP, { kind: 'home' }); return; }
       if (command === '/projects') {
         reply(Object.entries(this.config.projects).map(([name, p]) => `${name} · ${p.sandbox}`).join('\n'), { kind: 'home' }); return;
       }
       if (command === '/new' || command === '/edit') {
-        if (message.conversation && this.store.conversationTask(message.chatId, message.conversation)) {
-          reply('此话题已绑定任务。直接在话题回复可继续；新任务请在群里另起消息 @我。', { kind: 'task', taskId: bound!.id }); return;
-        }
         let project: string, prompt: string;
         if (!match) {
           const choices = projectChoices(this.config, text);
@@ -93,7 +97,20 @@ export class Engine {
         const mode = command === '/edit' ? 'workspace-write' : !match ? this.config.projects[project].naturalMode ?? 'read-only' : 'read-only';
         const p = this.config.projects[project];
         if (mode === 'workspace-write' && (p.sandbox !== mode || !p.worktree)) { reply('该项目仅支持只读分析。'); return; }
-        const task = this.store.create(message.chatId, project, prompt, mode, message.conversation);
+        if (bound && (this.active?.task.id === bound.id || !['review','completed','failed','cancelled','interrupted'].includes(bound.status))) {
+          reply('我还在处理当前工作，完成或停止后才能切换项目。'); return;
+        }
+        if (bound && bound.project === project) {
+          if (mode !== bound.mode) { reply('这段工作的执行权限保持不变。需要不同权限时，请另起消息说明任务。'); return; }
+          this.store.resume(bound.id, prompt); this.store.saveConversation(bound.id, message.conversation!); return;
+        }
+        if (bound && bound.project === this.config.defaultProject && !this.store.workspace(bound.id)) {
+          // Recover a request previously misrouted to general discussion, using owner input only.
+          prompt = `本话题最初的需求：\n${this.store.originalPrompt(bound.id)}\n\n主人本次补充：\n${prompt}`;
+        }
+        const task = bound && message.conversation
+          ? this.store.handoff(bound, project, prompt, mode, message.conversation)
+          : this.store.create(message.chatId, project, prompt, mode, message.conversation);
         if (!message.conversation || !this.channel.acknowledge) reply(`已接单 ${task.id} · ${project}\n任务已排队。查询：/status ${task.id}`, { kind: 'task', taskId: task.id }); return;
       }
       if (command === '/list' || (command === '/status' && !args)) {
@@ -124,6 +141,7 @@ export class Engine {
       }
       const task = this.store.get(id);
       if (!task || task.chatId !== message.chatId || (message.conversation && task.conversation?.anchorId !== message.conversation.anchorId)) { reply('任务不存在，请重新选择。', { kind: 'home' }); return; }
+      if (bound && bound.id !== task.id && !['/status'].includes(command)) { reply('这个话题已转到另一个项目，请直接在话题里说明当前需求。'); return; }
       if (command === '/publish') { reply('请先查看交付预览，再明确创建草稿 PR。', { kind: 'publication', taskId: id, fresh: true }); return; }
       if (command === '/status') {
         const requests = this.store.requests(id).map(r => `待处理请求：${r.id} · ${r.kind}`).join('\n');
@@ -166,10 +184,14 @@ export class Engine {
     if (i.conversation && !this.config.groupChats) return fail('群聊功能已关闭。');
     if (i.op === 'new' && i.conversation && this.store.conversationTask(action.chatId, i.conversation)) return fail('此话题已绑定任务，请继续原任务；新任务请另起话题。');
     if (i.taskId && (!task || task.chatId !== action.chatId)) return fail('任务不属于当前会话。');
+    const current = i.conversation && this.store.conversationTask(action.chatId, i.conversation);
+    if (task && current && task.id !== current.id && ['dispatch','continue','done','cancel','approve','deny','answer','publish'].includes(i.op)) return fail('话题已转到另一个项目，旧操作已失效。');
     if (i.op === 'dispatch') {
       const p = i.project && this.config.projects[i.project];
       if (!p || !i.prompt || !i.selectionKey || i.prompt.length > 16000) return fail('该项目已撤销授权，请重新派活。');
-      if (i.conversation && this.store.conversationTask(action.chatId, i.conversation)) return fail('此话题已绑定任务，请在话题继续。');
+      if (current && (!task || current.id !== task.id || i.revision !== task.updatedAt
+        || this.active?.task.id === task.id || !['review','completed','failed','cancelled','interrupted'].includes(task.status))) return fail('话题状态已变化，请在话题里继续说明需求。');
+      if (i.taskId && !current) return fail('原话题已失效，请重新选择。');
       this.receive({ id: 'choice:' + i.selectionKey, senderId: action.senderId, senderType: 'user', chatId: action.chatId,
         chatType: i.conversation ? 'group' : 'p2p', botMentioned: !!i.conversation, conversation: i.conversation,
         text: `${p.naturalMode === 'workspace-write' ? '/edit' : '/new'} ${i.project} ${i.prompt}` }, action.actionId);
@@ -277,6 +299,8 @@ export class Engine {
         this.store.saveContext(task.id, snapshot); this.store.event(task.id, 'context_loaded', snapshot.summary);
         executionTask = { ...task, contextSnapshot: snapshot };
       }
+      executionTask = { ...executionTask, routingContext: JSON.stringify({ currentProject: project.label ?? task.project,
+        availableProjects: Object.entries(this.config.projects).map(([id,p]) => ({ name:p.label ?? id, aliases:p.aliases ?? [], capability:p.sandbox })) }) };
       const result = await this.executor.run(executionTask, project, {
         thread: id => this.store.thread(task.id, id),
         progress: text => this.store.event(task.id, 'progress', text.slice(0, 8000)),

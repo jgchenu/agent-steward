@@ -59,3 +59,14 @@ test('local console blocks cross-origin writes and unauthenticated API access; e
  const response=await fetch(app.url+'api/grants',{method:'POST',headers,body});assert.equal(response.status,200);assert.equal(loadConfig(f.file).defaultProject,'general');
  }finally{await new Promise<void>((yes,no)=>app.server.close(e=>e?no(e):yes()));if(owner===undefined)delete process.env.STEWARD_OWNER_ID;else process.env.STEWARD_OWNER_ID=owner;rmSync(f.dir,{recursive:true,force:true})}
 });
+
+test('workspace aliases persist without expanding grants and survive revocation; malformed aliases fail atomically',()=>{
+ const f=fixture(),owner=process.env.STEWARD_OWNER_ID;process.env.STEWARD_OWNER_ID='owner';try{
+  const r=new WorkspaceRegistry(f.file);r.add(join(f.dir,'code'),'代码项目');let s=r.state();const id=s.projects.find(p=>p.label==='代码项目')!.id;
+  s=r.apply({revision:s.revision,grants:s.projects.map(p=>({id:p.id,mode:'read-only',aliases:p.id===id?['ProductName','产品甲']:[]})),defaultProject:'general'});
+  assert.deepEqual(loadConfig(f.file).projects[id].aliases,['ProductName','产品甲']);assert.equal(loadConfig(f.file).projects[id].sandbox,'read-only');
+  const before=readFileSync(f.file,'utf8');assert.throws(()=>r.apply({revision:s.revision,grants:s.projects.map(p=>({id:p.id,mode:p.mode,aliases:['bad\nname']}))}),/aliases/);assert.equal(readFileSync(f.file,'utf8'),before);
+  s=r.apply({revision:s.revision,grants:s.projects.map(p=>({id:p.id,mode:p.id===id?'none':'read-only'})),defaultProject:'general'});
+  assert.equal(loadConfig(f.file).projects[id],undefined);assert.deepEqual(s.projects.find(p=>p.id===id)!.aliases,['ProductName','产品甲']);
+ }finally{if(owner===undefined)delete process.env.STEWARD_OWNER_ID;else process.env.STEWARD_OWNER_ID=owner;rmSync(f.dir,{recursive:true,force:true})}
+});

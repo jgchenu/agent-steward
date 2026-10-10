@@ -65,7 +65,7 @@ export async function setupFeishu(options: {
     const registration = await register({
       createOnly: true,
       source: 'agent-steward',
-      appPreset: { name: 'Agent Steward', desc: '你的个人数字员工：飞书派活、Codex 执行、人工确认与结果交付。' },
+      appPreset: { name: '{user}的 Agent 分身', desc: '代表你接住讨论，在已授权的工作空间中执行任务，需要你决定时再来找你。' },
       addons: {
         preset: false,
         scopes: { tenant: ['im:message:send_as_bot', 'im:message.p2p_msg:readonly'] },

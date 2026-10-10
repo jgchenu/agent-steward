@@ -61,11 +61,12 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   if (!view || view.kind === 'notice') return card('Agent Steward', '工作动态', 'blue', [box(notice), homeButton()]);
   if (view.kind === 'choose-project') return card('这次处理哪个项目？', '选一下就开始，不用重新填写需求', 'blue', [
     box(view.draft), ...view.choices.filter(name => Object.hasOwn(config.projects, name)).map(project =>
-      button(projectLabel(project), { op: 'dispatch', project, prompt: view.draft, selectionKey: view.selectionKey }, true)),
+      button(projectLabel(project), { op: 'dispatch', project, prompt: view.draft, selectionKey: view.selectionKey,
+        taskId: view.fromTaskId, revision: view.revision }, true)),
   ]);
   if (view.kind === 'home') {
     const projects = Object.entries(config.projects);
-    return card('交给我来做', 'Agent Steward · 你的数字员工', 'blue', [
+    return card('交给我来做', 'Agent Steward · 你的 Agent 分身', 'blue', [
       box('直接发消息说需求就能开始，群里请 @我。这里也可以手动选择代码项目和工作方式。'),
       ...(conversation ? [caption(`自动读取${conversation.scope === 'thread' ? '当前话题' : '当前群最近讨论'}作为参考；结果会回复到对应话题，仅主人可操作。`)] : []),
       form('开始执行', { op: 'new' }, [
