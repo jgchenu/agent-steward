@@ -12,7 +12,8 @@ export interface ContextSnapshot {
 }
 export interface Attachment {
   messageId: string; key?: string; kind: 'image' | 'file' | 'video' | 'audio'; name?: string;
-  status: 'unread' | 'attached' | 'text'; detail: string; path?: string; text?: string;
+  status: 'unread' | 'attached' | 'text' | 'processed' | 'partial'; detail: string; path?: string; text?: string;
+  visuals?: Array<{ path: string; label: string }>;
 }
 export interface Task {
   id: string; chatId: string; project: string; prompt: string; status: Status;

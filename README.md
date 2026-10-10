@@ -18,6 +18,8 @@ Owner gate → task service → SQLite tasks, events, requests and outbox
           An allowlisted project
 ```
 
+For group screenshots, voice messages, videos and PDFs, see [media setup and reading limits](docs/media.md). Audio transcription runs locally; no paid speech API is used.
+
 ## Try it without accounts
 
 Requires **Node.js 24.x**. macOS and Linux are the initial targets.

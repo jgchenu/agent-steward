@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
 import { addAbortSignal, type Readable } from 'node:stream';
 import type { Attachment, ContextSnapshot } from '../types.js';
+import { conversionKind, convertMedia, MediaError } from './media-convert.js';
 
 // Only keys embedded in verified messages. Never follow URLs or parse executable card controls.
 export function messageAttachments(messageId: string, type: string, content: string): Attachment[] {
@@ -34,10 +35,10 @@ export interface ResourceApi {
   get(payload: { path: { message_id: string; file_key: string }; params: { type: string } }, options?: any): Promise<{ getReadableStream(): Readable; headers: any }>;
 }
 async function download(api: ResourceApi, item: Attachment, signal: AbortSignal, maxBytes: number): Promise<Buffer> {
-  const bounded = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
+  const bounded = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
   bounded.throwIfAborted();
   let listener = () => {};
-  const request = api.get({ path: { message_id: item.messageId, file_key: item.key! }, params: { type: item.kind === 'image' ? 'image' : 'file' } }, { timeout: 10_000 });
+  const request = api.get({ path: { message_id: item.messageId, file_key: item.key! }, params: { type: item.kind === 'image' ? 'image' : 'file' } }, { timeout: 30_000 });
   // A cancelled request that resolves late must not leave a resource stream open.
   void request.then(r => { if (bounded.aborted) r.getReadableStream().destroy(); }, () => {});
   let response: Awaited<typeof request>;
@@ -65,26 +66,40 @@ function imageExtension(bytes: Buffer): string | undefined {
   if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return 'jpg';
   if (bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP') return 'webp';
 }
-export async function loadMedia(snapshot: ContextSnapshot, api: ResourceApi, stateDir: string, signal: AbortSignal): Promise<ContextSnapshot> {
+export async function loadMedia(snapshot: ContextSnapshot, api: ResourceApi, stateDir: string, signal: AbortSignal, convert: typeof convertMedia = convertMedia): Promise<ContextSnapshot> {
   const attachments = (snapshot.attachments ?? []).map(a => ({ ...a }));
-  let mediaDir: string | undefined, images = 0, texts = 0, total = 0;
+  let mediaDir: string | undefined, images = 0, texts = 0, total = 0, converted = 0, visuals = 0, textLength = 0;
+  const directory = async () => {
+    if (!mediaDir) {
+      const root = resolve(stateDir, 'media'); await mkdir(root, { recursive: true, mode: 0o700 });
+      mediaDir = await mkdtemp(join(root, 'turn-'));
+    }
+    return mediaDir;
+  };
   try {
     for (const [index, item] of attachments.entries()) {
       signal.throwIfAborted();
       const isText = item.kind === 'file' && /\.(txt|md|csv|json|log)$/i.test(item.name ?? '');
-      if (item.kind !== 'image' && !isText) {
-        item.detail = item.kind === 'video' ? '视频尚未解析，未观看画面或收听声音'
-          : item.kind === 'audio' ? '音频尚未转写，未收听内容' : '此文件格式尚未解析';
+      const kind = conversionKind(item);
+      if (item.kind !== 'image' && !isText && !kind) {
+        item.detail = '此文件格式尚未解析';
         continue;
       }
       if (!item.key) { item.detail = '缺少有效消息资源标识，未读取'; continue; }
-      if ((item.kind === 'image' && images >= 4) || (isText && texts >= 2) || total >= 20 * 1024 * 1024) {
+      if ((item.kind === 'image' && (images >= 4 || visuals >= 12)) || (isText && texts >= 2) || (kind && converted >= 2) || total >= 100 * 1024 * 1024) {
         item.detail = '超过本轮附件数量或总大小上限，未读取'; continue;
       }
       try {
-        const bytes = await download(api, item, signal, Math.min(isText ? 256 * 1024 : 8 * 1024 * 1024, 20 * 1024 * 1024 - total));
+        if (kind) converted++;
+        const bytes = await download(api, item, signal, Math.min(isText ? 256 * 1024 : kind ? 50 * 1024 * 1024 : 8 * 1024 * 1024, 100 * 1024 * 1024 - total));
         total += bytes.length;
-        if (isText) {
+        if (kind) {
+          if (kind === 'pdf' && bytes.toString('ascii', 0, 5) !== '%PDF-') throw new MediaError('文件内容不是有效 PDF');
+          const dir = join(await directory(), String(index)); await mkdir(dir, { mode: 0o700 });
+          const source = join(dir, 'source'); await writeFile(source, bytes, { mode: 0o600, flag: 'wx' });
+          Object.assign(item, await convert(kind, source, dir, stateDir, 12 - visuals, signal));
+          visuals += item.visuals?.length ?? 0;
+        } else if (isText) {
           const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
           if (text.includes('\0')) throw Error('不是纯文本');
           item.text = text.slice(0, 8000); item.status = 'text'; texts++;
@@ -92,22 +107,23 @@ export async function loadMedia(snapshot: ContextSnapshot, api: ResourceApi, sta
         } else {
           const ext = imageExtension(bytes);
           if (!ext) { item.detail = '图片格式不支持，仅支持 PNG、JPEG、WebP'; continue; }
-          if (!mediaDir) {
-            const root = resolve(stateDir, 'media'); await mkdir(root, { recursive: true, mode: 0o700 });
-            mediaDir = await mkdtemp(join(root, 'turn-'));
-          }
-          item.path = join(mediaDir, `${index}.${ext}`);
+          item.path = join(await directory(), `${index}.${ext}`);
           await writeFile(item.path, bytes, { mode: 0o600, flag: 'wx' });
-          item.status = 'attached'; item.detail = `已作为第 ${++images} 张图片传入模型，可直接查看画面`;
+          visuals++; item.status = 'attached'; item.detail = `已作为第 ${++images} 张图片传入模型，可直接查看画面`;
         }
-      } catch {
+        if (item.text) {
+          const remaining = Math.max(0, 32000 - textLength);
+          if (item.text.length > remaining) { item.text = item.text.slice(0, remaining); item.status = 'partial'; item.detail += '；本轮文本预算已用完，正文被截断'; }
+          textLength += item.text.length;
+        }
+      } catch (error) {
         signal.throwIfAborted();
         item.status = 'unread'; delete item.path;
-        item.detail = '附件读取失败（权限、网络、大小上限或编码问题），内容不可见';
+        item.detail = error instanceof MediaError ? error.message : '附件读取失败（权限、网络、大小上限或编码问题），内容不可见';
       }
     }
     signal.throwIfAborted();
-    return { ...snapshot, attachments, mediaDir, summary: snapshot.summary + `；已附 ${images} 张图片、读取 ${texts} 个文本文件，另有 ${attachments.filter(a => a.status === 'unread').length} 个附件未读取。` };
+    return { ...snapshot, attachments, mediaDir, summary: snapshot.summary + `；已附 ${visuals} 张图片/页面/视频画面、读取 ${texts} 个文本文件，另有 ${attachments.filter(a => a.status === 'unread').length} 个附件未读取。` };
   } catch (error) {
     if (mediaDir) await rm(mediaDir, { recursive: true, force: true });
     throw error;

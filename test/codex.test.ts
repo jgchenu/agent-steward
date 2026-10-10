@@ -111,3 +111,14 @@ test('image attachments reach the subscription turn as localImage inputs, unread
   const input=rpc.params['turn/start'].input;assert.equal(input.length,2);
   assert.deepEqual(input[1],{type:'localImage',path:'/private/image.png'});assert.match(input[0].text,/video unread/);
 });
+
+test('PDF pages and sampled video frames keep source/time labels in model input; transcripts are text',async()=>{
+  const rpc=new FakeRpc();rpc.onTurn=()=>rpc.finish();
+  await setup(rpc).run({...task,contextSnapshot:{summary:'media',capturedAt:'',truncated:false,messages:[],attachments:[
+    {messageId:'pdf',kind:'file',status:'processed',detail:'2 pages',visuals:[{path:'/private/page.png',label:'PDF 第 2 页'}]},
+    {messageId:'video',kind:'video',status:'partial',detail:'sampled',text:'00:00:01 --> 00:00:02 speech',visuals:[{path:'/private/frame.png',label:'视频 1.00 秒抽样画面'}]},
+  ]}});
+  const input=rpc.params['turn/start'].input;
+  assert.equal(input.length,5);assert.match(input[1].text,/pdf.*第 2 页/);assert.equal(input[2].path,'/private/page.png');
+  assert.match(input[3].text,/video.*1.00 秒/);assert.equal(input[4].type,'localImage');assert.match(input[0].text,/speech/);assert.ok(!input[0].text.includes('/private/'));
+});
