@@ -67,6 +67,7 @@ export interface HumanRequest {
 }
 export interface RunHooks {
   proposeProject?: (projectId: string) => void;
+  proposePublication?: (target: PublicationTarget) => void;
   prepared?: (report: DeliveryReport) => void;
   thread: (id: string) => void;
   progress: (text: string) => void;
@@ -76,9 +77,11 @@ export interface RunHooks {
 export interface Executor {
   run(task: Task, project: Project, hooks: RunHooks, signal: AbortSignal): Promise<string>;
 }
+// Empty fields mean the owner did not specify an override; use the configured target.
+export interface PublicationTarget { repository: string; baseBranch: string }
 export type View = ({ kind: 'evidence'; taskId: string; evidenceIds: string[] } | { kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string; fromTaskId?: string; revision?: string } | { kind: 'list'; page?: number }
   | { kind: 'reply' | 'task' | 'followup' | 'result' | 'delivery' | 'publication' | 'baseline' | 'source'; taskId: string; page?: number })
-  & { targetMessageId?: string; fresh?: boolean; conversation?: Conversation; draft?: string };
+  & { targetMessageId?: string; fresh?: boolean; conversation?: Conversation; draft?: string; publicationTarget?: PublicationTarget };
 export interface CardAction {
   id: string; senderId: string; chatId: string; actionId: string; messageId: string;
   fields: Record<string, unknown>;

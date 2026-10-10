@@ -5,9 +5,9 @@ import { codeSourceReceipt, codeSourceDetails, codeSourceChanged, deliveryFooter
 import { baselinePreview, restartAtBaseline, validBaseRef } from './baseline.js';
 import { namedProjects, projectChoices, requiresProject, ungrantedNames, projectAnswer, projectGrantKey } from './routing.js';
 import { Store } from './store.js';
-import { canPublish, publicationKey } from './workspace.js';
+import { canPublish, publicationBlocker, publicationKey } from './workspace.js';
 import { mergeIntent, mergePullRequest } from './merge.js';
-import type { CardAction, Channel, Config, ContextSnapshot, Executor, HumanRequest, Incoming, RunHooks, Status, Task, View } from './types.js';
+import type { CardAction, Channel, Config, ContextSnapshot, Executor, HumanRequest, Incoming, PublicationTarget, RunHooks, Status, Task, View } from './types.js';
 
 const HELP = `Agent Steward · 个人 Agent 分身（预览版）
 /projects — 可用项目
@@ -377,7 +377,14 @@ export class Engine {
       if (!project) throw new Error('项目配置已移除。');
       const previousReport = this.store.delivery(task.id);
       let proposed: {project: string; grantKey: string} | undefined;
+      let publication: PublicationTarget | undefined;
+      const grantKey = projectGrantKey(project);
       const hooks: RunHooks = {
+        ...(task.project !== CONVERSATION && task.mode === 'workspace-write' && project.sandbox === 'workspace-write'
+          && (!task.nextAction || task.nextAction === 'execute') ? { proposePublication: (target: PublicationTarget) => {
+            abort.signal.throwIfAborted();
+            publication = { ...target };
+          } } : {}),
         ...(task.project === CONVERSATION && task.conversation ? { proposeProject: (id: string) => {
           abort.signal.throwIfAborted();
           const candidate = this.config.projects[id];
@@ -461,11 +468,23 @@ export class Engine {
         result = `${result}\n\n这次使用 ${candidate.label ?? proposed.project} 项目处理，对吗？回复“对的”即可分配工作区并继续，也可以直接告诉我其他项目名称。`;
       }
       const report = this.store.delivery(task.id);
+      if (publication && (!this.config.projects[task.project] || projectGrantKey(this.config.projects[task.project]) !== grantKey)) {
+        throw new Error('项目交付配置已变化，请按当前配置重新准备 PR。');
+      }
       const evidence = report ? `\n\n${deliveryFooter(report, project)}` : '';
       this.store.transaction(() => {
         this.store.set(task.id, 'review', result);
         if (proposed) this.store.saveProjectSelection(task.id, proposed.project, proposed.grantKey);
         if (task.conversation) this.store.enqueue(task.chatId, result + (report && task.mode === 'workspace-write' ? evidence : ''), {kind:'reply',taskId:task.id});
+        if (publication) {
+          // A semantic proposal opens a preview only; it never writes an authorization key.
+          const target = project.worktree?.github;
+          const publicationTarget = { repository: publication.repository || target?.repository || '',
+            baseBranch: publication.baseBranch || target?.baseBranch || '' };
+          this.store.event(task.id, 'publication_proposed', JSON.stringify(publicationTarget));
+          this.store.enqueue(task.chatId, publicationBlocker(task, project, report, publicationTarget) ?? '已接到 PR 交付请求，请核对交付预览。',
+            {kind:'publication',taskId:task.id,fresh:true,publicationTarget});
+        }
       });
       if (!task.conversation) this.store.enqueue(task.chatId, `任务 ${task.id} 已产出结果，等待你验收（执行器报告，尚非独立验证）。\n${result}${evidence}\n`
         + `验收：/done ${task.id}\n继续：/continue ${task.id} <要求>`, { kind: 'task', taskId: task.id });

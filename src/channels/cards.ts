@@ -112,8 +112,9 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     row(button('返回任务', intent('status')), ...(report ? [button('查看交付', intent('delivery'))] : [])),
   ]);
   if (view.kind === 'publication') {
-    if (!report || !canPublish(task, project, report)) return card('暂不能交付 PR', projectLabel(task.project), 'orange', [
-      box(publicationBlocker(task, project, report) ?? '请先完成代码验证。'), button('返回任务', intent('status'), true)]);
+    const blocker = publicationBlocker(task, project, report, view.publicationTarget);
+    if (!report || blocker) return card('暂不能交付 PR', projectLabel(task.project), 'orange', [
+      box(blocker ?? '请先完成代码验证。'), button('返回任务', intent('status'), true)]);
     const target = project.worktree!.github!, preview = publicationText(task, report);
     const fits = Buffer.byteLength(preview.body) < 20_000;
     return card(report.prUrl ? '更新现有 PR' : '创建草稿 PR', `${target.repository} → ${target.baseBranch}`, 'blue', [
