@@ -9,6 +9,17 @@ import { workspacePage } from './workspace-page.js';
 type Candidate = { id: string; label: string; path: string; description?: string };
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const git = (path: string, args: string[]) => execFileSync('git', ['-C', path, ...args], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+function workspaceBase(path: string, label: string): string {
+  // An unborn branch cannot seed a worktree. A detached checkout can: pin its commit.
+  let commit: string;
+  try { commit = git(path, ['rev-parse', '--verify', 'HEAD^{commit}']); }
+  catch { throw Error(`${label} 无法读取当前提交，请先确认仓库至少有一次提交且可以访问。`); }
+  try { return git(path, ['symbolic-ref', '--quiet', '--short', 'HEAD']); }
+  catch (error) {
+    if ((error as { status?: number }).status === 1) return commit;
+    throw Error(`${label} 无法读取当前分支，请检查仓库后重试。`);
+  }
+}
 export class WorkspaceRegistry {
   private catalog: string;
   constructor(readonly file: string) {
@@ -70,8 +81,7 @@ export class WorkspaceRegistry {
       if (grant.mode === 'workspace-write' && !p.worktree) {
         if (!item.gitRepository) throw Error(`${item.label} 不是 Git 仓库根目录，当前只能只读授权。`);
         // Use this workspace's own branch, never a guessed production/default branch.
-        const branch = git(item.path, ['symbolic-ref', '--short', 'HEAD']);
-        p.worktree = { baseRef: branch, checks: [] };
+        p.worktree = { baseRef: workspaceBase(item.path, item.label), checks: [] };
       }
       projects[grant.id] = p;
     }

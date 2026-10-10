@@ -100,7 +100,8 @@ export class FeishuChannel implements Channel {
         const key = `reply:${deliveryId}:${i}`;
         if (this.store.cardMessage(chatId, key)) continue;
         const content = JSON.stringify({ zh_cn: { content: [[{ tag: 'md', text: chunks[i] }]] } });
-        const uuid = createHash('sha256').update(`${deliveryId}:${i}`).digest('hex');
+        // Feishu accepts at most 50 characters, including for thread replies.
+        const uuid = createHash('sha256').update(`${deliveryId}:${i}`).digest('hex').slice(0, 32);
         const result = view.conversation
           ? await this.client.im.message.reply({ path: { message_id: view.conversation.anchorId },
             data: { msg_type: 'post', content, uuid, reply_in_thread: true } })

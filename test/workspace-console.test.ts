@@ -6,7 +6,30 @@ import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {WorkspaceRegistry,startWorkspaceConsole} from '../src/workspace-console.js';
 import {loadConfig} from '../src/config.js';
+import {Store} from '../src/store.js';
+import {prepareWorkspace} from '../src/workspace.js';
 function fixture(){const dir=mkdtempSync(join(tmpdir(),'steward-grants-')),file=join(dir,'config.json');mkdirSync(join(dir,'general'));mkdirSync(join(dir,'code'));writeFileSync(file,JSON.stringify({stateDir:'.state',maxRunMinutes:30,projects:{general:{path:'./general',sandbox:'read-only',label:'通用分析'}},defaultProject:'general'}));return{dir,file}}
+test('detached workspace grants pin HEAD and can create an isolated worktree without changing the source',async()=>{
+ const f=fixture(),owner=process.env.STEWARD_OWNER_ID,store=new Store(':memory:');process.env.STEWARD_OWNER_ID='owner';
+ const source=join(f.dir,'code'),run=(args:string[])=>execFileSync('git',['-C',source,...args],{encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim();
+ try{
+  run(['init','-b','feature/current']);run(['-c','user.name=Test','-c','user.email=test@example.invalid','commit','--allow-empty','-m','initial']);
+  run(['checkout','--detach','HEAD']);const sha=run(['rev-parse','HEAD']);writeFileSync(join(source,'local-only.txt'),'keep my changes');
+  const r=new WorkspaceRegistry(f.file);r.add(source,'代码项目');const s=r.state(),id=s.projects.find(p=>p.label==='代码项目')!.id;
+  r.apply({revision:s.revision,grants:s.projects.map(p=>({id:p.id,mode:p.id===id?'workspace-write':'read-only'})),defaultProject:'general'});
+  const config=loadConfig(f.file);assert.equal(config.projects[id].worktree!.baseRef,sha);
+  const task=store.create('chat',id,'inspect','workspace-write'),w=await prepareWorkspace(store,config.stateDir,task,config.projects[id],new AbortController().signal);
+  assert.equal(w.baseSha,sha);assert.equal(run(['rev-parse','HEAD']),sha);assert.throws(()=>run(['symbolic-ref','--quiet','HEAD']));assert.equal(readFileSync(join(source,'local-only.txt'),'utf8'),'keep my changes');
+ }finally{store.close();if(owner===undefined)delete process.env.STEWARD_OWNER_ID;else process.env.STEWARD_OWNER_ID=owner;rmSync(f.dir,{recursive:true,force:true})}
+});
+test('an unborn repository reports an actionable error and leaves all grants unchanged',()=>{
+ const f=fixture();try{
+  execFileSync('git',['-C',join(f.dir,'code'),'init','-b','feature/new'],{stdio:'ignore'});
+  const r=new WorkspaceRegistry(f.file);r.add(join(f.dir,'code'),'空项目');const s=r.state(),before=readFileSync(f.file,'utf8');
+  assert.throws(()=>r.apply({revision:s.revision,grants:s.projects.map(p=>({id:p.id,mode:p.id==='general'?'read-only':'workspace-write'})),defaultProject:'general'}),/空项目.*至少有一次提交/);
+  assert.equal(readFileSync(f.file,'utf8'),before);
+ }finally{rmSync(f.dir,{recursive:true,force:true})}
+});
 test('workspace catalog is not authorization; grants use the current branch, preserve settings, reject stale saves and retain revoked entries',()=>{
  const f=fixture(),owner=process.env.STEWARD_OWNER_ID;process.env.STEWARD_OWNER_ID='owner';
  try{const run=(args:string[])=>execFileSync('git',['-C',join(f.dir,'code'),...args],{stdio:'ignore'});run(['init','-b','feature/current']);run(['-c','user.name=Test','-c','user.email=test@example.invalid','commit','--allow-empty','-m','initial']);
