@@ -30,3 +30,9 @@ export function codeSourceReceipt(label: string, report: DeliveryReport): string
     + (report.files.length ? `副本已有相对基准累计 ${report.files.length} 个文件改动，会在此基础上继续。` : '')
     + '可在任务详情查看代码来源；群话题里也可以 @我说“代码来源”。';
 }
+
+export function configuredCheckSummary(report: DeliveryReport, project?: Project): string {
+  if (report.checks.length) return report.checks.map(c => `${c.name}: ${c.status === 'passed' ? '通过' : c.status === 'failed' ? '失败' : '执行中'}`).join('；');
+  if (report.mode === 'read-only') return '只读分析，不运行项目检查';
+  return project?.worktree?.checks.length ? '尚未运行' : '未配置（不代表执行 Agent 没有自行验证）';
+}

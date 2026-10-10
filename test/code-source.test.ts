@@ -21,7 +21,10 @@ test('code source shows actual snapshot instead of changed configuration, and ke
     const group = JSON.stringify(buildCard(store,config,'dm',{...view,conversation:{anchorId:'root',sourceId:'root',scope:'thread'}}));
     assert.ok(!group.includes('/private/'));
     const detail = JSON.stringify(buildCard(store,config,'dm',{kind:'task',taskId:task.id}));
-    assert.ok(detail.includes('old-base')); assert.ok(detail.includes('查看代码来源'));
+    assert.ok(detail.includes('old-base')); assert.ok(detail.includes('查看详情'));
+    const full = JSON.stringify(buildCard(store,config,'dm',{kind:'result',taskId:task.id}));
+    assert.ok(full.includes(report.workspace.baseSha)); assert.ok(full.includes('代码与验证记录'));
+    assert.ok(full.includes('未配置（不代表执行 Agent 没有自行验证）'));
     assert.ok(!JSON.stringify(buildCard(store,config,'other',view)).includes(report.headSha));
     const receipt = codeSourceReceipt('Demo',report);
     assert.ok(receipt.includes('累计 1')); assert.ok(receipt.includes(report.headSha.slice(0,12))); assert.ok(!receipt.includes('/private/'));

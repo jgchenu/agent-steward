@@ -170,3 +170,21 @@ test('navigation replaces the clicked card, never the old home card; background 
     assert.equal(creates, 2); assert.equal(patched.at(-1), 'om_new_2');
   } finally { await engine.stop(); channel.close(); store.close(); }
 });
+
+test('summary cards retain only details and stop while full records and rare actions live in collapsed panels', () => {
+  const store = new Store(':memory:');
+  const buttons = (value: any): string[] => !value || typeof value !== 'object' ? []
+    : [...(value.tag === 'button' ? [value.text.content] : []), ...Object.values(value).flatMap(buttons)];
+  try {
+    const t = store.create('dm','demo','继续改一下'); store.set(t.id,'review','结果已经说明');
+    const card = buildCard(store,config,'dm',{kind:'task',taskId:t.id}) as any;
+    assert.deepEqual(buttons(card),['查看详情']); assert.equal(card.header.title.content,'处理结果');
+    assert.ok(!JSON.stringify(card).includes('继续改一下'));
+    const details = buildCard(store,config,'dm',{kind:'result',taskId:t.id}) as any;
+    const panels = details.body.elements.filter((e: any)=>e.tag==='collapsible_panel');
+    assert.equal(panels.length,2); assert.ok(panels.every((e:any)=>e.expanded===false));
+    assert.ok(buttons(panels[1]).includes('标记完成'));
+    store.set(t.id,'running');
+    assert.deepEqual(buttons(buildCard(store,config,'dm',{kind:'task',taskId:t.id})),['查看详情','停止']);
+  } finally {store.close();}
+});

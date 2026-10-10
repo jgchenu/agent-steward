@@ -1,4 +1,4 @@
-import { codeSourceReceipt, codeSourceDetails } from './code-source.js';
+import { codeSourceReceipt, codeSourceDetails, configuredCheckSummary } from './code-source.js';
 import { baselinePreview, restartAtBaseline, validBaseRef } from './baseline.js';
 import { namedProjects, projectChoices } from './routing.js';
 import { Store } from './store.js';
@@ -370,7 +370,7 @@ export class Engine {
       if (abort.signal.aborted) throw abort.signal.reason;
       this.store.set(task.id, 'review', result);
       const report = this.store.delivery(task.id);
-      const evidence = report ? `\n实际改动：${report.files.length} 个文件\n验证：${report.checks.map(c => `${c.name}: ${c.status}`).join('；') || '未运行'}\n${report.prUrl ?? ''}` : '';
+      const evidence = report ? `\n实际改动：${report.files.length} 个文件\nSteward 独立检查：${configuredCheckSummary(report, project)}\n${report.prUrl ?? ''}` : '';
       if (task.conversation) this.store.enqueue(task.chatId, result + (report && task.mode === 'workspace-write' ? evidence : ''), { kind: 'reply', taskId: task.id });
       else this.store.enqueue(task.chatId, `任务 ${task.id} 已产出结果，等待你验收（执行器报告，尚非独立验证）。\n${result}${evidence}\n`
         + `验收：/done ${task.id}\n继续：/continue ${task.id} <要求>`, { kind: 'task', taskId: task.id });
