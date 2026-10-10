@@ -324,3 +324,31 @@ test('publication proposals are unavailable for read-only and projectless runs a
   };
   await assert.rejects(s.executor.run({...task,mode:'workspace-write'},{path:'.',sandbox:'workspace-write'},s.hooks,abort.signal),/cancelled/);
 });
+
+test('semantic baseline proposals bridge new and resumed project turns to Steward without authorizing mutation',async()=>{
+  for(const threadId of [null,'thread']){
+    const rpc=new FakeRpc(),s=setup(rpc),proposals:unknown[]=[];
+    s.hooks.proposeBaseline=p=>proposals.push(p);s.hooks.proposePublication=()=>assert.fail('publish before migration');
+    const baseline={ref:'origin/main',migrateChanges:true,delivery:null};
+    rpc.onTurn=()=>{rpc.emit('item/completed',{item:{type:'agentMessage',text:JSON.stringify({message:'将展示新副本确认。',publication:null,baseline})}});rpc.finish();};
+    const result=await s.executor.run({...task,threadId,mode:'workspace-write',prompt:'从最新 main 创建新副本，迁移这次改动',deliveryContext:'GitHub repository/baseBranch missing'},
+      {path:'.',sandbox:'workspace-write',worktree:{baseRef:'old-feature',checks:[]}},s.hooks,AbortSignal.timeout(5000));
+    assert.equal(result,'将展示新副本确认。');assert.deepEqual(proposals,[baseline]);
+    assert.ok(rpc.params['turn/start'].outputSchema.properties.baseline);
+    assert.match(rpc.params['turn/start'].input[0].text,/GitHub repository\/baseBranch missing/);
+    assert.match(rpc.params[threadId?'thread/resume':'thread/start'].developerInstructions,/working Steward baseline preparation handoff/);
+    assert.deepEqual(rpc.writes,[]);
+  }
+});
+
+test('baseline response validation rejects missing fields and concurrent old-copy publication before any hook',async()=>{
+  for(const response of [
+    {message:'ok',publication:null},
+    {message:'ok',publication:null,baseline:{ref:'main~1',migrateChanges:true,delivery:null}},
+    {message:'ok',publication:{repository:'test/repo',baseBranch:'main'},baseline:{ref:'origin/main',migrateChanges:true,delivery:null}},
+  ]){
+    const rpc=new FakeRpc(),s=setup(rpc);s.hooks.proposeBaseline=()=>assert.fail('invalid baseline');s.hooks.proposePublication=()=>assert.fail('invalid publication');
+    rpc.onTurn=()=>{rpc.emit('item/completed',{item:{type:'agentMessage',text:JSON.stringify(response)}});rpc.finish();};
+    await assert.rejects(s.executor.run({...task,mode:'workspace-write'},{path:'.',sandbox:'workspace-write',worktree:{baseRef:'old',checks:[]}},s.hooks,AbortSignal.timeout(5000)));
+  }
+});
