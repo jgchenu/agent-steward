@@ -1,3 +1,5 @@
+import { CONVERSATION } from '../conversation.js';
+import { runtimePermissions } from '../permissions.js';
 import { elicitation } from './elicitation.js';
 import { taskInput } from '../channels/context.js';
 import { CodexRpc, type RpcMessage } from './rpc.js';
@@ -46,6 +48,7 @@ export class CodexExecutor implements Executor {
 
   async run(task: Task, project: Project, hooks: RunHooks, signal: AbortSignal): Promise<string> {
     signal.throwIfAborted();
+    const permissions = task.project === CONVERSATION ? { sandbox: 'read-only' as const, approvalPolicy: 'never' as const, approvalsReviewer: 'user' as const } : runtimePermissions(task.permissionMode ?? (this.approvalsReviewer === 'auto_review' ? 'auto' : 'ask'), project.sandbox);
     const rpc = this.factory(this.command, project.path);
     let threadId: string | undefined, result = '', finished = false;
     const settled = new Set<string | number>();
@@ -132,10 +135,9 @@ export class CodexExecutor implements Executor {
       await rpc.initialize();
       await rpc.subscription();
       signal.throwIfAborted();
-      const common = { cwd: project.path, modelProvider: 'openai', sandbox: project.sandbox,
-        approvalPolicy: 'on-request', approvalsReviewer: this.approvalsReviewer, developerInstructions: INSTRUCTIONS };
+      const common = { cwd: project.path, modelProvider: 'openai', ...permissions, developerInstructions: INSTRUCTIONS + (task.project === CONVERSATION ? '\nThis is a conversation without a code project. The cwd is internal scratch space, not a user project. Answer using the message and attached context. Do not search local repositories, infer a project from cwd, change files or request broader tool permissions. If code is required, ask which authorized Codex project to use. Do not ask the owner to configure a general analysis directory.' : '') };
       const response = await rpc.request(task.threadId ? 'thread/resume' : 'thread/start',
-        task.threadId ? { ...common, threadId: task.threadId } : common);
+        task.threadId ? { ...common, threadId: task.threadId } : { ...common, projectId: project.codexProjectId ?? null });
       threadId = response?.thread?.id;
       if (typeof threadId !== 'string') throw new Error('Codex 未返回会话 ID');
       hooks.thread(threadId);
@@ -145,7 +147,7 @@ export class CodexExecutor implements Executor {
         ...(a.visuals ?? []).flatMap(v => [{ type: 'text', text: `消息 ${a.messageId}：${v.label}`, text_elements: [] }, { type: 'localImage', path: v.path }]),
       ]);
       await rpc.request('turn/start', { threadId, input: [{ type: 'text', text: taskInput(task), text_elements: [] }, ...images],
-        approvalPolicy: 'on-request', approvalsReviewer: this.approvalsReviewer });
+        approvalPolicy: permissions.approvalPolicy, approvalsReviewer: permissions.approvalsReviewer });
       return await completion;
     } finally {
       finished = true;

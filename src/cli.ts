@@ -1,3 +1,6 @@
+import { listCodexProjects, pinCodexGrants, type CodexProject } from './codex-projects.js';
+import { conversationProject } from './conversation.js';
+import { writePermissionRuntime, clearPermissionRuntime } from './permission-runtime.js';
 import { mkdirSync, mkdtempSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,12 +22,12 @@ async function main(): Promise<void> {
   if (!['demo', 'local', 'feishu', 'doctor'].includes(mode)) {
     console.log('Usage: agent-steward <demo|local|feishu|doctor>'); return;
   }
-  const config: Config = mode === 'demo' ? {
+  let config: Config = mode === 'demo' ? {
     ownerId: 'demo-owner', stateDir: mkdtempSync(join(tmpdir(), 'agent-steward-demo-')),
     projects: { demo: { path: process.cwd(), sandbox: 'read-only' } }, codexCommand: 'codex', maxRunMinutes: 60,
-  } : loadConfig();
+  } : loadConfig(undefined,[]);
   if (mode === 'doctor') {
-    const rpc = new CodexRpc(config.codexCommand, Object.values(config.projects)[0].path);
+    const rpc = new CodexRpc(config.codexCommand, Object.values(config.projects)[0]?.path ?? conversationProject(config).path);
     try {
       await rpc.initialize(); await rpc.subscription();
       console.log('OK: project paths, Codex App Server, ChatGPT login. No inference performed.');
@@ -35,6 +38,16 @@ async function main(): Promise<void> {
   }
   mkdirSync(config.stateDir, { recursive: true, mode: 0o700 });
   const release = acquireLock(config.stateDir);
+  let catalog: CodexProject[] = [];
+  if (mode !== 'demo') {
+    let discovered = false;
+    try { catalog = await listCodexProjects(config.codexCommand); discovered = true; }
+    catch { console.warn('Codex projects unavailable; code dispatch disabled.'); }
+    try {
+      if (discovered) pinCodexGrants(process.env.STEWARD_CONFIG ?? 'steward.config.json',catalog);
+      config = loadConfig(undefined,catalog);
+    } catch (error) { release(); throw error; }
+  }
   const store = new Store(join(config.stateDir, 'steward.sqlite'));
   let feishu: FeishuChannel | undefined;
   let channel: Channel = { send: async (_chatId, text) => { console.log(`\n${text}\n`); } };
@@ -49,18 +62,27 @@ async function main(): Promise<void> {
     if (mode === 'demo') return;
     try {
       const file = process.env.STEWARD_CONFIG ?? 'steward.config.json', stat = statSync(file);
-      const revision = `${stat.mtimeMs}:${stat.size}`;
+      const revision = `${stat.mtimeMs}:${stat.size}:${JSON.stringify(catalog)}`;
       if (revision === configRevision) return;
-      const next = loadConfig(file); engine.updateProjects(next); configRevision = revision;
+      const next = loadConfig(file,catalog); engine.updateProjects(next); configRevision = revision;
     } catch { console.warn('Project configuration invalid; retaining last valid grants.'); }
   };
   refreshProjects();
-  const configTimer = setInterval(refreshProjects, 1000);
-  let closing = false;
+  const configTimer = setInterval(() => {
+    refreshProjects();
+    try { writePermissionRuntime(config.stateDir, engine.permissionState()); } catch { console.warn('Permission status unavailable.'); }
+  }, 1000);
+  let closing = false, syncing = false;
+  const catalogTimer = setInterval(async () => {
+    if (mode === 'demo' || syncing || closing) return;
+    syncing = true;
+    try { catalog = await listCodexProjects(config.codexCommand); } catch { catalog = []; console.warn('Codex projects unavailable; code dispatch disabled.'); }
+    finally { syncing = false; if (!closing) refreshProjects(); }
+  }, 10_000);
   const shutdown = async () => {
     if (closing) return; closing = true;
-    clearInterval(configTimer); feishu?.close();
-    await engine.stop(); store.close(); release(); process.exit(0);
+    clearInterval(configTimer); clearInterval(catalogTimer); feishu?.close();
+    await engine.stop(); clearPermissionRuntime(config.stateDir); store.close(); release(); process.exit(0);
   };
   process.on('SIGINT', () => void shutdown()); process.on('SIGTERM', () => void shutdown());
   engine.start();

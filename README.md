@@ -53,7 +53,7 @@ Open the official authorization URL and confirm the new app in your Feishu organ
 
 After authorization, credentials go directly into a local `.env` file with mode `0600`. The authorizing user's app-scoped `open_id`, when returned, is bound as the owner. No credentials are printed. A missing owner or unsupported Lark tenant leaves the service disabled. Existing `.env` files are never overwritten.
 
-Setup also creates a read-only `sandbox` project in `playground/` if no config exists. It does not start model execution, send messages, or establish that your bot is published and reachable. Verify long-connection event settings and application availability in the console, then follow the [Feishu acceptance guide](docs/feishu-setup.md).
+Setup creates an empty project grant list if no config exists. Ordinary conversation needs no code project; authorize existing Codex projects in the local console. It does not start model execution, send messages, or establish that your bot is published and reachable. Verify long-connection event settings and application availability in the console, then follow the [Feishu acceptance guide](docs/feishu-setup.md).
 
 ### Manual configuration / terminal-only use
 
@@ -62,7 +62,6 @@ Use the following copy commands only if you have not completed automatic setup:
 ```sh
 cp .env.example .env
 cp steward.config.example.json steward.config.json
-mkdir -p playground
 ```
 
 Edit `.env` locally and set `STEWARD_OWNER_ID` to your bot application's Feishu `open_id`. For terminal-only evaluation, a private local identifier such as `local-owner` is sufficient. Feishu credentials are only needed for the Feishu mode.
@@ -74,20 +73,18 @@ Edit the private config:
   "stateDir": ".steward",
   "codexCommand": "codex",
   "maxRunMinutes": 60,
-  "projects": {
-    "sandbox": { "path": "./playground", "sandbox": "read-only" }
-  }
+  "projects": {}
 }
 ```
 
-Paths are resolved relative to the config file. The project must already exist. Start with a disposable directory. To allow edits, configure `workspace-write` **and** an isolated Git `worktree`, then choose modification mode for each task. See [project setup and PR delivery](docs/project-delivery.md). A run can request additional permissions; only you can answer those requests. The timeout includes time spent waiting for you.
+Paths are resolved relative to the config file. Code projects must exist in your local Codex project list and be explicitly authorized in the console. Conversation also works with zero project grants. To allow edits, configure `workspace-write` **and** an isolated Git `worktree`, then choose modification mode for each task. See [project setup and PR delivery](docs/project-delivery.md). A run can request additional permissions; requests are handled according to the selected console permission mode. The timeout includes time spent waiting for you.
 
 ```sh
 npm run doctor  # Checks configuration, App Server and ChatGPT auth; no inference
 npm run local   # Real Codex, terminal transport
 ```
 
-Then enter `/new sandbox inspect this directory and report what you find`.
+Then enter an ordinary message, for example `Summarize these requirements`. Authorize existing Codex projects with `npm run workspaces` before requesting code work.
 
 For Feishu, follow [the setup guide](docs/feishu-setup.md), then:
 
@@ -116,7 +113,7 @@ Keep the process and machine awake. Closing the service interrupts active work; 
 
 Git project tasks retain their own worktree and continuation session. Modification tasks run locally configured checks after Codex finishes; delivery cards show actual changed files and check exit results. Passing checks enables an explicit draft PR preview and confirmation. Validation binds to file contents and check configuration; target-branch movement stops publication. The publisher reuses an existing open PR and never merges it. In an existing topic, address the agent with “创建 PR” to open the same preview. UI tasks can return bounded native screenshot images to the original thread; see [screenshot delivery](docs/project-delivery.md#截图交付) for the manifest and evidence boundary.
 
-In Feishu, directly @mention the bot with your request. Configure [workspace grants and the default analysis space](docs/workspaces.md) with `npm run workspaces`. The optional `工作台` or `/help` entry opens the manual task form. Group answers and clarifying questions are ordinary threaded posts with Markdown and complete long-answer splitting; reply naturally to continue. Explicit permission requests and on-demand task management retain their cards. Commands remain available in Feishu and the terminal. A generic “yes” never grants permission. Each instance runs one task at a time.
+In Feishu, directly @mention the bot with your request. Configure [approval modes, Codex project grants](docs/workspaces.md) with `npm run workspaces`. The optional `工作台` or `/help` entry opens the manual task form. Group answers and clarifying questions are ordinary threaded posts with Markdown and complete long-answer splitting; reply naturally to continue. Explicit permission requests and on-demand task management retain their cards. Commands remain available in Feishu and the terminal. A generic “yes” never grants permission. Each instance runs one task at a time.
 
 Enable `card.action.trigger` under the application’s **callback configuration**, using the existing long connection. An existing installation must verify this separately. Ordinary progress refreshes update a card in place; requests for input, results and failures produce a fresh notification so they are not silently hidden in an old message. Forms accept up to 1,000 characters; longer tasks can still be sent as text.
 

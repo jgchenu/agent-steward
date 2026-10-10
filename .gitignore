@@ -10,3 +10,5 @@ playground/
 *.log
 .DS_Store
 coverage/
+
+*.before-codex-projects.json

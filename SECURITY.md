@@ -34,3 +34,5 @@ Use GitHub's private vulnerability reporting feature in the repository's Securit
 Only the current development version is maintained. There is no response-time or security-support SLA.
 
 The optional workspace authorization console listens only on loopback, rejects unexpected Host/cross-origin mutations, and requires a per-process API token. Candidate discovery does not grant project access. Explicit grants affect routing and runtime configuration; they do not provide OS-level filesystem isolation against the local Codex installation or a malicious local process. Do not publicly proxy this administration surface.
+
+The local permission console can explicitly enable full access for modification tasks. This removes Codex filesystem/network sandboxing and routine tool approvals; project grants then constrain dispatch rather than OS-level reach. Existing read-only tasks are not promoted. Saving full access requires an explicit scope acknowledgement. Loosening applies to subsequent turns; tightening aborts an active turn using wider permissions. Managed policy and browser confirmations remain authoritative.

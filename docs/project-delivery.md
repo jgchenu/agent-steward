@@ -78,11 +78,15 @@ Codex 的 `mcpServer/elicitation/request` 表单确认会转到飞书：展示�
 
 ## 减少执行过程中的手动审批
 
-本机 `steward.config.json` 可设置 `"approvalsReviewer": "auto_review"`，重启服务后对新一轮执行（包括继续已有任务）生效。默认 `user` 保留人工审批。Steward 把此选项同时传给 Codex 的 thread start/resume 和 turn start，仍使用原有只读/工作目录沙箱及 `on-request` 策略。
+在 `npm run workspaces` 打开的分身控制台选择审批方式，保存后约一秒内热更新。页面分别显示已保存模式、机器人已应用模式及当前执行模式：
 
-`auto_review` 使用 Codex 官方风险审查处理适用的工具/越界请求，**不是自动允许所有命令，也不是永久信任 Bash**。平台仍返回的人工请求继续通过原有单次确认处理；浏览器 Computer Use 应用层确认不由自动审查代替。Steward 的更换基准、发布草稿 PR 仍需独立人工确认。已弹出的请求不会被追溯批准，运行中的任务不会因修改此配置而被重启或重放。
+- **请求批准**：`permissionMode: "ask"`，沙箱内已允许的操作直接执行，触及边界时向主人请求一次批准，并非每条读取都询问。
+- **关键审批**：`permissionMode: "auto"`，使用 Codex 官方自动审查；仍需人工决定的请求转到飞书。自动审查可能拒绝操作，不代表所有危险动作都会先询问。
+- **完全访问权限**：`permissionMode: "full-access"`，修改任务使用无沙箱文件/网络访问及 `never` 工具审批策略。首次切换需在保存前明确勾选访问范围；项目列表不再构成系统级隔离。只读任务仍使用只读沙箱，不自动允许联网或提升为修改。
 
-账号、客户端和组织策略决定可用性；不支持或审查拒绝时报告原因，不退回全权限，不绕过拒绝。参见 [Codex 自动审查](https://learn.chatgpt.com/docs/sandboxing/auto-review)。配置生效和单元测试不等于真实命令已通过自动审查。
+放宽权限从下一轮执行（含继续任务）生效；当前任务保持启动时的模式，已弹出的请求不会被追溯批准。收紧权限会停止仍使用更宽权限的任务，已有改动保留，再次继续使用新模式。浏览器应用层确认、Steward 更换基准与草稿 PR 发布确认保留，禁止自动合并/部署的规则保持有效。
+
+旧配置只有 `approvalsReviewer` 时兼容映射为请求批准或关键审批，不会自动启用完全访问。显式 `permissionMode` 优先。机器人离线时页面只报告已保存，等待启动支持该配置的新版服务。账号、客户端及组织策略可能限制模式；被拒绝时不绕过、不自动降级到全权限。参见 [OpenAI 权限模式](https://learn.chatgpt.com/docs/permission-modes)与[自动审查](https://learn.chatgpt.com/docs/sandboxing/auto-review)。
 
 
 ## 截图交付

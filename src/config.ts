@@ -1,3 +1,5 @@
+import { projectBindings, type CodexProject } from './codex-projects.js';
+import { permissionMode } from './permissions.js';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { Config, Project } from './types.js';
@@ -8,13 +10,17 @@ export function projectAliases(value: unknown, name: string): string[] | undefin
   return [...new Set(value.map(alias => (alias as string).trim()))];
 }
 
-export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.json'): Config {
+export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.json', catalog?: CodexProject[]): Config {
   const base = dirname(resolve(file));
   const raw = JSON.parse(readFileSync(file, 'utf8'));
   const ownerId = process.env.STEWARD_OWNER_ID?.trim();
   if (!ownerId) throw new Error('STEWARD_OWNER_ID is required; there is no public/default owner.');
   if (!raw.projects || typeof raw.projects !== 'object' || Array.isArray(raw.projects)) {
-    throw new Error('Configure at least one project.');
+    throw new Error('projects must be an object.');
+  }
+  if (catalog) {
+    raw.projects = Object.fromEntries(projectBindings(raw.projects, catalog, base).filter(b => b.project).map(b => [b.id, {...b.project, label:b.codex.name, codexProjectId:b.codex.id}]));
+    delete raw.defaultProject;
   }
   const projects: Record<string, Project> = Object.create(null);
   for (const [name, value] of Object.entries(raw.projects)) {
@@ -48,9 +54,9 @@ export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.
       worktree = { baseRef: w.baseRef, checks: w.checks, ...(w.github ? { github: w.github } : {}) };
     }
     if (sandbox === 'workspace-write' && !worktree) throw new Error(`workspace-write requires an isolated worktree: ${name}`);
-    projects[name] = { path, sandbox, ...(aliases ? { aliases } : {}), ...(p.naturalMode ? { naturalMode: p.naturalMode } : {}), ...(p.label ? { label: p.label.trim() } : {}), ...(p.description ? { description: p.description.trim() } : {}), ...(worktree ? { worktree } : {}) };
+    if (p.codexProjectId !== undefined && typeof p.codexProjectId !== 'string') throw Error('Invalid Codex project identity');
+    projects[name] = { path, sandbox, ...(p.codexProjectId ? { codexProjectId: p.codexProjectId } : {}), ...(aliases ? { aliases } : {}), ...(p.naturalMode ? { naturalMode: p.naturalMode } : {}), ...(p.label ? { label: p.label.trim() } : {}), ...(p.description ? { description: p.description.trim() } : {}), ...(worktree ? { worktree } : {}) };
   }
-  if (!Object.keys(projects).length) throw new Error('Configure at least one project.');
   if (raw.defaultProject !== undefined && (typeof raw.defaultProject !== 'string' || !Object.hasOwn(projects, raw.defaultProject))) throw new Error('defaultProject must name a configured project.');
   if (raw.groupChats !== undefined && typeof raw.groupChats !== 'boolean') throw new Error('groupChats must be boolean.');
   if (raw.approvalsReviewer !== undefined && !['user', 'auto_review'].includes(raw.approvalsReviewer)) throw new Error('approvalsReviewer must be user or auto_review.');
@@ -58,6 +64,6 @@ export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.
   if (!Number.isFinite(maxRunMinutes) || maxRunMinutes < 1 || maxRunMinutes > 1440) {
     throw new Error('maxRunMinutes must be between 1 and 1440.');
   }
-  return { ownerId, projects, maxRunMinutes, approvalsReviewer: raw.approvalsReviewer ?? 'user', defaultProject: raw.defaultProject, groupChats: raw.groupChats ?? false, stateDir: resolve(base, raw.stateDir ?? '.steward'),
+  return { ownerId, projects, ...(catalog ? {codexProjects:catalog} : {}), maxRunMinutes, permissionMode: permissionMode(raw), approvalsReviewer: raw.approvalsReviewer ?? 'user', defaultProject: raw.defaultProject, groupChats: raw.groupChats ?? false, stateDir: resolve(base, raw.stateDir ?? '.steward'),
     codexCommand: raw.codexCommand ?? 'codex' };
 }

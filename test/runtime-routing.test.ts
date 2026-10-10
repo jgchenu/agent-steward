@@ -40,7 +40,7 @@ test('a previously misrouted discussion can move to a granted product in the sam
   await until(()=>h.runs.length===2&&h.store.list().every(t=>t.status==='review'));await h.engine.flush();
   const next=h.store.conversationTask('group',message('three','').conversation)!;
   assert.notEqual(next.id,old.id);assert.equal(next.project,'code');assert.equal(h.runs[1].threadId,null);assert.match(h.runs[1].prompt,/展示每个平台的数量/);
-  assert.equal(h.store.get(old.id)!.project,'general');assert.equal(h.store.get(old.id)!.threadId,'session-1');
+  assert.equal(h.store.get(old.id)!.project,'__conversation__');assert.equal(h.store.get(old.id)!.threadId,'session-1');
   h.store.bindConversation('group','late-reply',old.id);
   assert.equal(h.store.conversationTask('group',{anchorId:'root',sourceId:'three',parentId:'late-reply',scope:'thread'})!.id,next.id);
   h.engine.receive({...message('three','继续补充测试'),botMentioned:true});await until(()=>h.runs.length===3&&h.store.get(next.id)?.status==='review');
