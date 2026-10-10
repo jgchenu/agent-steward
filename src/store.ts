@@ -38,7 +38,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS context_snapshots (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS conversation_bindings (chatId TEXT NOT NULL, messageKey TEXT NOT NULL, taskId TEXT NOT NULL, PRIMARY KEY(chatId,messageKey));
       CREATE TABLE IF NOT EXISTS evidence (id TEXT PRIMARY KEY, taskId TEXT NOT NULL, data TEXT NOT NULL);
-      PRAGMA user_version=6;`);
+      CREATE TABLE IF NOT EXISTS project_selections (taskId TEXT PRIMARY KEY, project TEXT NOT NULL, grantKey TEXT NOT NULL, revision TEXT NOT NULL);
+      PRAGMA user_version=7;`);
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -83,9 +84,23 @@ export class Store {
   originalPrompt(id: string): string {
     return (this.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='created' ORDER BY seq LIMIT 1").get(id) as {body:string} | undefined)?.body ?? this.get(id)!.prompt;
   }
+  ownerRequirements(id: string): string {
+    const rows = this.db.prepare("SELECT body FROM events WHERE taskId=? AND kind IN ('created','followup') ORDER BY seq").all(id) as Array<{body: string}>;
+    return rows.map(row => row.body).join('\n\n主人补充：\n');
+  }
+  saveProjectSelection(taskId: string, project: string, grantKey: string): void {
+    this.db.prepare('INSERT OR REPLACE INTO project_selections VALUES (?,?,?,?)').run(taskId, project, grantKey, this.get(taskId)!.updatedAt);
+  }
+  projectSelection(taskId: string): { project: string; grantKey: string; revision: string } | undefined {
+    return this.db.prepare('SELECT project,grantKey,revision FROM project_selections WHERE taskId=?').get(taskId) as ReturnType<Store['projectSelection']>;
+  }
+  clearProjectSelection(taskId: string): void {
+    this.db.prepare('DELETE FROM project_selections WHERE taskId=?').run(taskId);
+  }
   handoff(from: Task, project: string, prompt: string, mode: Task['mode'], conversation: Conversation): Task {
     if (!['review','completed','failed','cancelled','interrupted'].includes(this.get(from.id)?.status ?? '')) throw Error('当前任务仍在执行，无法切换项目。');
     const next = this.create(from.chatId, project, prompt, mode, conversation);
+    this.clearProjectSelection(from.id);
     this.db.prepare('UPDATE conversation_bindings SET taskId=? WHERE chatId=? AND taskId=?').run(next.id, from.chatId, from.id);
     this.expire(from.id);
     this.set(from.id, from.status); // Invalidate controls issued before the handoff.
@@ -121,6 +136,7 @@ export class Store {
     this.event(id, status, result ?? '');
   }
   resume(id: string, prompt: string): void {
+    this.clearProjectSelection(id);
     this.db.prepare('DELETE FROM context_snapshots WHERE taskId=?').run(id);
     this.db.prepare("UPDATE tasks SET prompt=?, result=NULL, nextAction='execute' WHERE id=?").run(prompt, id);
     const report = this.delivery(id);

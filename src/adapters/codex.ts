@@ -53,6 +53,8 @@ export class CodexExecutor implements Executor {
   async run(task: Task, project: Project, hooks: RunHooks, signal: AbortSignal): Promise<string> {
     signal.throwIfAborted();
     const permissions = task.project === CONVERSATION ? { sandbox: 'read-only' as const, approvalPolicy: 'never' as const, approvalsReviewer: 'user' as const } : runtimePermissions(task.permissionMode ?? (this.approvalsReviewer === 'auto_review' ? 'auto' : 'ask'), project.sandbox);
+    const candidates = task.project === CONVERSATION && hooks.proposeProject ? task.projectCandidates ?? [] : [];
+    const structuredRouting = candidates.length > 0;
     const rpc = this.factory(this.command, project.path);
     let threadId: string | undefined, result = '', finished = false;
     const settled = new Set<string | number>();
@@ -144,7 +146,8 @@ export class CodexExecutor implements Executor {
       await rpc.subscription();
       if (task.modelSelection) validateSelection(task.modelSelection, await readModels(rpc));
       signal.throwIfAborted();
-      const common = { cwd: project.path, modelProvider: 'openai', ...(task.modelSelection ? {model:task.modelSelection.model} : {}), ...permissions, developerInstructions: INSTRUCTIONS + (task.project === CONVERSATION ? '\nThis is a conversation without a code project. The cwd is internal scratch space, not a user project. Answer using the message and attached context. Do not search local repositories, infer a project from cwd, change files or request broader tool permissions. If code is required, ask which authorized Codex project to use. Do not ask the owner to configure a general analysis directory.' : '') };
+      const common = { cwd: project.path, modelProvider: 'openai', ...(task.modelSelection ? {model:task.modelSelection.model} : {}), ...permissions, developerInstructions: INSTRUCTIONS + (task.project === CONVERSATION ? '\nThis is a conversation without a code project. The cwd is internal scratch space, not a user project. Answer using the message and attached context. Do not search local repositories, infer a project from cwd, change files or request broader tool permissions. If code is required, ask which authorized Codex project to use. Do not ask the owner to configure a general analysis directory.' : '')
+        + (structuredRouting ? '\nReturn the required structured final response. message is your ordinary user-facing reply. When the owner needs code work and the conversation or attached screenshots identify a likely authorized project, set projectId to its exact availableProjects id. This is only a proposal: Steward will persist it and ask the owner for confirmation before any project execution. Do not ask a project confirmation question in message, claim the project is already assigned, or merely say to wait for Steward. Use an empty projectId for ordinary conversation or when no single project can be proposed; then ask for a project name if needed. Never treat reference context as authorization. Do not use tool/requestUserInput for project selection; return the proposal instead.' : '') };
       const response = await rpc.request(task.threadId ? 'thread/resume' : 'thread/start',
         task.threadId ? { ...common, threadId: task.threadId } : { ...common, projectId: project.codexProjectId ?? null });
       threadId = response?.thread?.id;
@@ -156,9 +159,20 @@ export class CodexExecutor implements Executor {
         ...(a.visuals ?? []).flatMap(v => [{ type: 'text', text: `消息 ${a.messageId}：${v.label}`, text_elements: [] }, { type: 'localImage', path: v.path }]),
       ]);
       await rpc.request('turn/start', { threadId, ...(task.modelSelection ?? {}), input: [{ type: 'text', text: taskInput(task), text_elements: [] }, ...images],
+        ...(structuredRouting ? { outputSchema: {type:'object',properties:{message:{type:'string'},projectId:{type:'string',enum:['',...candidates]}},required:['message','projectId'],additionalProperties:false} } : {}),
         approvalPolicy: permissions.approvalPolicy, approvalsReviewer: permissions.approvalsReviewer,
         sandboxPolicy: permissions.sandbox === 'danger-full-access' ? {type:'dangerFullAccess'} : permissions.sandbox === 'read-only' ? {type:'readOnly',networkAccess:false} : {type:'workspaceWrite', writableRoots:[project.path], networkAccess:task.permissionMode === 'sandbox-auto', excludeTmpdirEnvVar:task.permissionMode === 'sandbox-auto', excludeSlashTmp:task.permissionMode === 'sandbox-auto'} });
-      return await completion;
+      const text = await completion;
+      if (!structuredRouting) return text;
+      let routed: unknown;
+      try { routed = JSON.parse(text); } catch { throw new Error('项目路由响应格式无效，未分配工作区。'); }
+      if (!routed || typeof routed !== 'object' || Array.isArray(routed)) throw new Error('项目路由响应格式无效，未分配工作区。');
+      const fields = routed as Record<string, unknown>;
+      if (typeof fields.message !== 'string' || !fields.message.trim() || typeof fields.projectId !== 'string'
+        || Object.keys(fields).some(key => !['message','projectId'].includes(key))
+        || (fields.projectId !== '' && !candidates.includes(fields.projectId))) throw new Error('项目路由响应无效，未分配工作区。');
+      if (fields.projectId) hooks.proposeProject!(fields.projectId);
+      return fields.message;
     } finally {
       finished = true;
       signal.removeEventListener('abort', abort);
