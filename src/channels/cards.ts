@@ -1,3 +1,4 @@
+import { codeSourceSummary, codeSourceDetails, configuredCheckSummary } from '../code-source.js';
 import type { Config, Intent, Status, View } from '../types.js';
 import { Store } from '../store.js';
 import { canPublish, publicationKey, publicationText } from '../workspace.js';
@@ -16,7 +17,7 @@ const status: Record<Status, [label: string, color: string, mark: string, hint: 
   running: ['执行中', 'blue', '◉', '正在处理，可随时查看进度'],
   waiting_approval: ['需要授权', 'orange', '!', '查看具体操作，再决定是否允许'],
   waiting_input: ['等你补充', 'orange', '?', '补充信息后即可继续'],
-  review: ['待你验收', 'purple', '◇', '已有结果，请检查后确认完成'],
+  review: ['已有结果', 'purple', '◇', '可直接继续讨论'],
   completed: ['已完成', 'green', '✓', '已由你确认验收'],
   failed: ['执行失败', 'red', '×', '查看原因后决定下一步'],
   cancelled: ['已停止', 'grey', '■', '执行已停止，已有改动保留'],
@@ -28,11 +29,6 @@ const badge = (state: Status): Element => {
   return { tag: 'markdown', content: `<text_tag color='${color === 'grey' ? 'neutral' : color}'>${mark} ${label}</text_tag>` };
 };
 const taskHeading = (prompt: string): Element => ({ tag: 'div', text: { ...plain(prompt), text_size: 'heading-3', lines: 2 } });
-const stateBox = (prompt: string, state: Status): Element => ({
-  tag: 'column_set', flex_mode: 'none', columns: [{ tag: 'column', width: 'weighted', weight: 1,
-    background_style: `${status[state][1]}-50`, padding: '12px', vertical_spacing: '8px',
-    elements: [badge(state), taskHeading(prompt), caption(status[state][3])] }],
-});
 export function viewKey(view: View): string {
   const key = 'taskId' in view ? `${view.kind}:${view.taskId}` : view.kind;
   return view.conversation ? `group:${view.conversation.anchorId}:${key}` : key;
@@ -109,6 +105,10 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   const intent = (op: Intent['op']): Intent => ({ op, taskId: task.id, revision: task.updatedAt });
   const prButton = () => report?.prUrl ? { tag: 'button', text: plain('打开 GitHub PR'), type: 'primary_filled', width: 'fill',
     behaviors: [{ type: 'open_url', default_url: report.prUrl }] } : undefined;
+  if (view.kind === 'source') return card('代码来源', `${projectLabel(task.project)} · ${modeLabel}`, 'blue', [
+    text(codeSourceDetails(report, project, !!conversation)),
+    row(button('返回任务', intent('status')), ...(report ? [button('查看交付', intent('delivery'))] : [])),
+  ]);
   if (view.kind === 'publication') {
     if (!report || !canPublish(task, project, report)) return card('暂不能交付 PR', projectLabel(task.project), 'orange', [
       box('需要允许修改的项目、实际文件改动，以及配置的验证全部通过。'), button('返回任务', intent('status'), true)]);
@@ -134,7 +134,9 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     const link = prButton(); if (link) actions.push(link);
     return card('项目交付', `${projectLabel(task.project)} · ${modeLabel}`, color, [
       box(`${report.files.length} 个改动文件 · ${report.ready ? '配置验证全部通过' : '尚未满足发布条件'}\n${report.workspace.branch}`),
-      text(checks || '未运行自动验证。只读分析不会执行修改项目的验证命令。'),
+      caption(codeSourceSummary(report)),
+      button('查看代码来源', intent('source')),
+      text(`Steward 独立检查：${checks || configuredCheckSummary(report, project)}`),
       { tag: 'collapsible_panel', expanded: true, header: { title: plain(`改动文件 · 第 ${page + 1} / ${pages} 页`) },
         elements: [text(report.files.slice(page * 20, (page + 1) * 20).join('\n') || '没有文件改动。'),
           ...(report.error ? [text(report.error)] : []), caption('日志和完整工作目录保留在本机。通过验证不代表已合并或已部署。')] },
@@ -154,6 +156,12 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   if (view.kind === 'followup') return card('继续这项任务', `${projectLabel(task.project)} · ${task.id}`, 'blue', [box(task.prompt),
     form('提交后续要求', intent('continue'), [input('希望调整什么', '说明需要补充、修改或继续的内容')]),
     button('返回任务', intent('status'))]);
+  const busy = ['queued', 'running', 'waiting_input', 'waiting_approval'].includes(task.status);
+  const metadata = (): Element => ({ tag: 'collapsible_panel', expanded: false, header: { title: plain('代码与验证记录') }, elements: [
+    text(codeSourceDetails(report, project, !!conversation)),
+    ...(report ? [text(`Steward 独立检查：${configuredCheckSummary(report, project)}`)] : []),
+    ...(contextSummary ? [caption(contextSummary)] : []),
+  ] });
   if (view.kind === 'result') {
     const chars = Array.from((task.result ?? store.latestProgress(task.id)) || '还没有可展示的内容。');
     const pages = Math.ceil(chars.length / 1800), page = Math.min(Math.max(0, view.page ?? 0), pages - 1);
@@ -161,7 +169,15 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     if (page > 0) nav.push(button('上一页', { ...intent('result'), page: page - 1 }));
     if (page + 1 < pages) nav.push(button('下一页', { ...intent('result'), page: page + 1 }));
     return card('任务详情', `${projectLabel(task.project)} · 第 ${page + 1} / ${pages} 页`, color, [
-      text(chars.slice(page * 1800, (page + 1) * 1800).join('')), row(...nav)]);
+      text(chars.slice(page * 1800, (page + 1) * 1800).join('')), row(...nav), metadata(),
+      { tag: 'collapsible_panel', expanded: false, header: { title: plain('更多操作') }, elements: [
+        ...(report ? [button('查看交付', intent('delivery'))] : []),
+        ...(!busy ? [button('补充要求', intent('followup'))] : []),
+        ...(store.workspace(task.id) && !busy ? [button('更换代码版本', intent('baseline'))] : []),
+        ...(task.status === 'review' ? [button('标记完成', intent('done'))] : []),
+        button('我的任务', { op: 'list' }), homeButton(),
+      ] },
+    ]);
   }
   const req = store.requests(task.id)[0];
   if (req) {
@@ -171,26 +187,19 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     const fits = Buffer.byteLength(JSON.stringify(request.description)) < 20_000;
     const detail = { tag: 'collapsible_panel', expanded: true, header: { title: plain('具体内容') },
       elements: [text(fits ? request.description : '请求内容过长，无法在一张卡片内完整展示。本卡片只允许拒绝；请在本地检查。')] };
-    return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : label, `${projectLabel(task.project)} · ${modeLabel}`, color, [stateBox(task.prompt, task.status), detail,
+    return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : label, `${projectLabel(task.project)} · ${modeLabel}`, color, [detail,
       ...(req.kind === 'approval' ? [row(...(fits ? [button('允许本次', action('approve'), true,
         '仅允许上方展示的本次操作，不授予后续操作权限。')] : []), button('拒绝', action('deny')))]
         : [form('提交回答', action('answer'), [input('你的回答', '填写回答；多个问题请按问题 ID 填写 JSON')]), button('停止任务', intent('cancel'))]),
-      caption('操作仅对当前请求有效。处理后会显示下一步。'),
+      caption('仅适用于本次操作。'), metadata(),
     ]);
   }
-  const actions: Element[] = [];
-  if (task.status === 'review') actions.push(button('确认完成', intent('done'), true));
-  if (['queued', 'running', 'waiting_input', 'waiting_approval'].includes(task.status)) {
-    actions.push(button('刷新进度', intent('status'), true), button('停止执行', intent('cancel'), false, '停止后会保留已有改动，不会自动回滚。'));
-  } else actions.push(button('继续修改', intent('followup'), actions.length === 0));
-  if (store.workspace(task.id) && ['review','completed','failed','cancelled','interrupted'].includes(task.status)) actions.push(button('更换代码版本', intent('baseline')));
-  actions.push(button('查看全文', intent('result')));
-  return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : label, `${projectLabel(task.project)} · ${modeLabel}`, color, [stateBox(task.prompt, task.status),
-    text((task.result ?? store.latestProgress(task.id)) || (task.status === 'queued' ? '正在排队，轮到后自动开始。' : '任务已开始，结果会更新在这里。'), 4),
-    ...(contextSummary ? [caption(contextSummary)] : []),
-    ...(conversation ? [caption('@我或引用回复我的消息，可接着处理同一任务；普通话题聊天不会触发。')] : []),
-    ...(report ? [caption(`实际改动 ${report.files.length} 个文件 · ${report.ready ? '配置验证已通过' : '验证未通过或未运行'}${report.prUrl ? ' · PR 已准备' : ''}`)]
-      : task.status === 'review' ? [caption('这是执行结果；请检查内容后确认完成。')] : []), row(...actions),
-    row(button('我的任务', { op: 'list' }), ...(report ? [button('查看交付', intent('delivery'))] : []), homeButton()),
+  const actions: Element[] = [button('查看详情', intent('result'))];
+  if (busy) actions.push(button('停止', intent('cancel'), false, '停止后会保留已有改动，不会自动回滚。'));
+  else { const link = prButton(); if (link) actions.push(link); }
+  return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : task.status === 'review' ? '处理结果' : label, projectLabel(task.project), color, [
+    text((task.result ?? store.latestProgress(task.id)) || (task.status === 'queued' ? '已排队，轮到后开始。' : '正在处理，结果会在这里回复。'), 6),
+    ...(report ? [caption(`${codeSourceSummary(report)} · ${report.files.length} 个改动文件`)] : []),
+    row(...actions),
   ]);
 }

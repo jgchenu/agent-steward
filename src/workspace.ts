@@ -169,6 +169,8 @@ export class WorkspaceExecutor implements Executor {
       ...(previous?.prUrl ? { prUrl: previous.prUrl, publishedSha: previous.publishedSha } : {}) };
     this.store.saveDelivery(task.id, report);
     try {
+      signal.throwIfAborted();
+      hooks.prepared?.(report);
       const result = await this.inner.run({ ...task, codeVersion: { ref: workspace.baseRef, baseSha: workspace.baseSha, headSha: initial.headSha } }, { ...project, path: workspace.path, sandbox: mode }, hooks, signal);
       signal.throwIfAborted();
       report = { ...report, ...await inventory(workspace, signal), capturedAt: new Date().toISOString() };
@@ -186,14 +188,14 @@ export class WorkspaceExecutor implements Executor {
         }
         const after = await inventory(workspace, signal);
         if (after.fingerprint !== report.fingerprint) report.error = '验证命令修改了交付文件，需要重新执行并验证。';
-        report = { ...report, ...after };
+        report = { ...report, ...after, capturedAt: new Date().toISOString() };
         report.ready = !report.error && report.checks.length === project.worktree.checks.length
           && report.checks.length > 0 && report.checks.every(c => c.status === 'passed');
       }
       this.store.saveDelivery(task.id, report);
       return result;
     } catch (error) {
-      try { report = { ...report, ...await inventory(workspace, AbortSignal.timeout(5000)) }; } catch { /* Preserve last known snapshot. */ }
+      try { report = { ...report, ...await inventory(workspace, AbortSignal.timeout(5000)), capturedAt: new Date().toISOString() }; } catch { /* Preserve last known snapshot. */ }
       report.ready = false; report.error = error instanceof Error ? error.message : '任务未完成';
       for (const check of report.checks) if (check.status === 'running') check.status = 'failed';
       this.store.saveDelivery(task.id, report); throw error;

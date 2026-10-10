@@ -264,3 +264,27 @@ test('declining a baseline leaves the task/session untouched and cancellation ex
     send(`/approve ${req}`);assert.equal(f.store.getRequest(req)?.status,'expired');assert.equal(f.store.list().length,1);assert.equal(runs,0);
   }finally{await engine.stop();f.close()}
 });
+
+test('code source receipt follows verified preparation and precedes inference, including continuation edits', async () => {
+  const f = fixture();
+  try {
+    let prepared = 0;
+    const ex = new WorkspaceExecutor(f.config, f.store, { run: async (t, p) => {
+      assert.equal(prepared, 1);
+      assert.equal(t.codeVersion!.baseSha, f.g('rev-parse', 'HEAD'));
+      assert.notEqual(p.path, f.source);
+      return 'done';
+    } });
+    await f.executor.run(f.task, f.project, hooks, signal());
+    await ex.run(f.task, f.project, { ...hooks, prepared: r => {
+      prepared++;
+      assert.deepEqual(r.files, ['README.md']);
+      assert.equal(r.workspace.baseRef, 'origin/main');
+      assert.equal(r.headSha, f.g('rev-parse', 'HEAD'));
+      assert.deepEqual(f.store.delivery(f.task.id), r);
+    } }, signal());
+    prepared = 0;
+    await assert.rejects(ex.run(f.task, { ...f.project, path: join(f.root, 'missing') }, { ...hooks, prepared: () => { prepared++; } }, signal()));
+    assert.equal(prepared, 0, 'failed preparation must not claim a code version');
+  } finally { f.close(); }
+});

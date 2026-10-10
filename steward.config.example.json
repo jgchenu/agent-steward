@@ -1,6 +1,7 @@
 {
   "stateDir": ".steward",
   "codexCommand": "codex",
+  "approvalsReviewer": "user",
   "maxRunMinutes": 60,
   "defaultProject": "sandbox",
   "projects": {
