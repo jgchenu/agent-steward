@@ -15,6 +15,8 @@
 
 ## Next — Make it useful every day
 
+- [x] Local workspace grant UI, default workspace and direct natural-language dispatch
+- [x] Group reaction acknowledgement before execution and threaded results
 - [ ] Guided setup and diagnostics, with locally completed authentication
 - [x] Interactive Feishu task forms, task cards, one-shot decisions and result pagination
 - [ ] Live acceptance of every card form/permission path across desktop and mobile

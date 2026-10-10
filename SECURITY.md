@@ -32,3 +32,5 @@ Do not share state across hosts/containers. The process lock is designed for a s
 Use GitHub's private vulnerability reporting feature in the repository's Security tab when enabled. If it is unavailable, open an issue requesting a private contact without posting exploit details, credentials or private data. Avoid public disclosure of an active credential; revoke it with the provider first.
 
 Only the current development version is maintained. There is no response-time or security-support SLA.
+
+The optional workspace authorization console listens only on loopback, rejects unexpected Host/cross-origin mutations, and requires a per-process API token. Candidate discovery does not grant project access. Explicit grants affect routing and runtime configuration; they do not provide OS-level filesystem isolation against the local Codex installation or a malicious local process. Do not publicly proxy this administration surface.

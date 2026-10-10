@@ -71,14 +71,14 @@ test('group plain yes never approves, and another topic cannot resolve an outsta
   } finally { await engine.stop(); store.close(); }
 });
 
-test('group card form persists trusted origin and draft, rejects other members and duplicate tasks in a topic', async () => {
+test('optional group card form persists trusted origin, rejects other members and duplicate tasks in a topic', async () => {
   const store = new Store(':memory:'); const sent: View[] = [];
   const cfg = { ...config, projects: { ...config.projects, second: config.projects.demo } };
   const engine = new Engine(store, cfg, { run: async () => 'done' }, { send: async (_c, _t, _d, v) => { if(v)sent.push(v); }, context: async () => snapshot });
   try {
-    engine.receive(incoming('summarize what they discussed')); await engine.flush();
+    engine.receive(incoming('工作台')); await engine.flush();
     const view = sent.find(v => v.kind === 'home')!;
-    assert.equal(view.draft, 'summarize what they discussed'); assert.equal(view.conversation!.anchorId, 'root');
+    assert.equal(view.conversation!.anchorId, 'root');
     const card = buildCard(store, cfg, 'group', view) as any;
     const form = card.body.elements.find((e: any) => e.tag === 'form');
     const submit = form.elements.find((e: any) => e.form_action_type === 'submit');

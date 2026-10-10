@@ -15,6 +15,7 @@
     "local": "tsx --env-file-if-exists=.env src/cli.ts local",
     "demo": "tsx src/cli.ts demo",
     "doctor": "tsx --env-file-if-exists=.env src/cli.ts doctor",
+    "workspaces": "tsx --env-file-if-exists=.env scripts/workspaces.ts",
     "setup:feishu": "tsx scripts/setup-feishu.ts",
     "smoke:codex": "tsx scripts/smoke-codex.ts",
     "smoke:workspace": "tsx scripts/smoke-workspace.ts"

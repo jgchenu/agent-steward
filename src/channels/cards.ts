@@ -56,24 +56,31 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
       icon: { tag: 'standard_icon', token: 'todo_colorful' } },
     body: { direction: 'vertical', padding: '12px 12px 20px 12px', vertical_spacing: '12px', elements },
   });
+  const projectLabel = (name: string) => config.projects[name]?.label ?? name;
   const homeButton = (primary = false) => button('派新任务', { op: 'home' }, primary);
   if (!view || view.kind === 'notice') return card('Agent Steward', '工作动态', 'blue', [box(notice), homeButton()]);
+  if (view.kind === 'choose-project') return card('这次处理哪个项目？', '选一下就开始，不用重新填写需求', 'blue', [
+    box(view.draft), ...view.choices.filter(name => Object.hasOwn(config.projects, name)).map(project =>
+      button(projectLabel(project), { op: 'dispatch', project, prompt: view.draft, selectionKey: view.selectionKey }, true)),
+  ]);
   if (view.kind === 'home') {
     const projects = Object.entries(config.projects);
     return card('交给我来做', 'Agent Steward · 你的数字员工', 'blue', [
-      box('选择工作项目和本次工作方式，再告诉我希望完成什么。需要你决定时，我会在这里找你。'),
+      box('直接发消息说需求就能开始，群里请 @我。这里也可以手动选择代码项目和工作方式。'),
       ...(conversation ? [caption(`自动读取${conversation.scope === 'thread' ? '当前话题' : '当前群最近讨论'}作为参考；结果会回复到对应话题，仅主人可操作。`)] : []),
       form('开始执行', { op: 'new' }, [
         text('工作项目'),
         { tag: 'select_static', name: 'project', required: true, width: 'fill', placeholder: plain('选择项目'),
-          ...(projects.length === 1 ? { initial_option: projects[0][0] } : {}),
-          options: projects.map(([name]) => ({ text: plain(name), value: name })) },
+          ...((config.defaultProject || projects.length === 1) ? { initial_option: config.defaultProject ?? projects[0][0] } : {}),
+          options: projects.map(([name]) => ({ text: plain(projectLabel(name)), value: name })) },
         text('本次工作方式'),
         { tag: 'select_static', name: 'mode', required: true, width: 'fill', initial_option: 'read-only',
           options: [{ text: plain('只读分析 · 不修改文件'), value: 'read-only' },
             ...(projects.some(([, p]) => p.sandbox === 'workspace-write' && p.worktree) ? [{ text: plain('允许修改 · 完成后自动验证'), value: 'workspace-write' }] : [])] },
         { ...input('任务要求', '例如：检查这个项目，并给我三条改进建议'), ...(view.draft ? { default_value: view.draft.slice(0, 1000) } : {}) },
-      ]), row(button('我的任务', { op: 'list' }), button('刷新入口', { op: 'home' })),
+      ]),
+        { tag: 'collapsible_panel', expanded: false, header: { title: plain('这些项目是什么？') }, elements: projects.map(([name, p]) => text(`${projectLabel(name)}${name === config.defaultProject ? ' · 默认' : ''}\n${p.description ?? '配置在这台电脑上的工作目录。'}${conversation ? '' : `\n本机位置：${p.path}`}`)) },
+      row(button('我的任务', { op: 'list' }), button('刷新入口', { op: 'home' })),
     ]);
   }
   if (view.kind === 'list') {
@@ -84,7 +91,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
       border_color: `${status[t.status][1]}-100`, background_style: `${status[t.status][1]}-50`,
       padding: '12px', vertical_spacing: '8px',
       behaviors: [{ type: 'callback', value: { actionId: action({ op: 'status', taskId: t.id }) } }],
-      elements: [badge(t.status), taskHeading(t.prompt), caption(`项目 · ${t.project}`),
+      elements: [badge(t.status), taskHeading(t.prompt), caption(`项目 · ${projectLabel(t.project)}`),
         row(caption(status[t.status][3]), { tag: 'div', text: { ...plain('打开任务 ›'), text_color: status[t.status][1], text_align: 'right', text_size: 'notation' } })],
     }));
     const nav = [homeButton(true)];
@@ -102,7 +109,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   const prButton = () => report?.prUrl ? { tag: 'button', text: plain('打开 GitHub PR'), type: 'primary_filled', width: 'fill',
     behaviors: [{ type: 'open_url', default_url: report.prUrl }] } : undefined;
   if (view.kind === 'publication') {
-    if (!report || !canPublish(task, project, report)) return card('暂不能交付 PR', task.project, 'orange', [
+    if (!report || !canPublish(task, project, report)) return card('暂不能交付 PR', projectLabel(task.project), 'orange', [
       box('需要允许修改的项目、实际文件改动，以及配置的验证全部通过。'), button('返回任务', intent('status'), true)]);
     const target = project.worktree!.github!, preview = publicationText(task, report);
     const fits = Buffer.byteLength(preview.body) < 20_000;
@@ -115,7 +122,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     ]);
   }
   if (view.kind === 'delivery') {
-    if (!report) return card('交付信息', task.project, 'grey', [box('该任务尚未记录项目交付信息。'), button('返回任务', intent('status'), true)]);
+    if (!report) return card('交付信息', projectLabel(task.project), 'grey', [box('该任务尚未记录项目交付信息。'), button('返回任务', intent('status'), true)]);
     const pages = Math.max(1, Math.ceil(report.files.length / 20)), page = Math.min(Math.max(0, view.page ?? 0), pages - 1);
     const checks = report.checks.map(c => `${c.status === 'passed' ? '✓' : c.status === 'failed' ? '×' : '◉'} ${c.name} · ${c.status === 'passed' ? '通过' : c.status === 'failed' ? '失败' : '验证中'}`).join('\n');
     const nav = [button('返回任务', intent('status'))];
@@ -124,7 +131,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     const actions: Element[] = [];
     if (canPublish(task, project, report) && ['review', 'completed', 'failed'].includes(task.status)) actions.push(button('预览 PR 交付', intent('publication'), true));
     const link = prButton(); if (link) actions.push(link);
-    return card('项目交付', `${task.project} · ${modeLabel}`, color, [
+    return card('项目交付', `${projectLabel(task.project)} · ${modeLabel}`, color, [
       box(`${report.files.length} 个改动文件 · ${report.ready ? '配置验证全部通过' : '尚未满足发布条件'}\n${report.workspace.branch}`),
       text(checks || '未运行自动验证。只读分析不会执行修改项目的验证命令。'),
       { tag: 'collapsible_panel', expanded: true, header: { title: plain(`改动文件 · 第 ${page + 1} / ${pages} 页`) },
@@ -133,7 +140,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
       ...(actions.length ? [row(...actions)] : []), row(...nav),
     ]);
   }
-  if (view.kind === 'followup') return card('继续这项任务', `${task.project} · ${task.id}`, 'blue', [box(task.prompt),
+  if (view.kind === 'followup') return card('继续这项任务', `${projectLabel(task.project)} · ${task.id}`, 'blue', [box(task.prompt),
     form('提交后续要求', intent('continue'), [input('希望调整什么', '说明需要补充、修改或继续的内容')]),
     button('返回任务', intent('status'))]);
   if (view.kind === 'result') {
@@ -142,7 +149,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     const nav = [button('返回任务', intent('status'))];
     if (page > 0) nav.push(button('上一页', { ...intent('result'), page: page - 1 }));
     if (page + 1 < pages) nav.push(button('下一页', { ...intent('result'), page: page + 1 }));
-    return card('任务详情', `${task.project} · 第 ${page + 1} / ${pages} 页`, color, [
+    return card('任务详情', `${projectLabel(task.project)} · 第 ${page + 1} / ${pages} 页`, color, [
       text(chars.slice(page * 1800, (page + 1) * 1800).join('')), row(...nav)]);
   }
   const req = store.requests(task.id)[0];
@@ -153,7 +160,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     const fits = Buffer.byteLength(JSON.stringify(request.description)) < 20_000;
     const detail = { tag: 'collapsible_panel', expanded: true, header: { title: plain('具体内容') },
       elements: [text(fits ? request.description : '请求内容过长，无法在一张卡片内完整展示。本卡片只允许拒绝；请在本地检查。')] };
-    return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : label, `${task.project} · ${modeLabel}`, color, [stateBox(task.prompt, task.status), detail,
+    return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : label, `${projectLabel(task.project)} · ${modeLabel}`, color, [stateBox(task.prompt, task.status), detail,
       ...(req.kind === 'approval' ? [row(...(fits ? [button('允许本次', action('approve'), true,
         '仅允许上方展示的本次操作，不授予后续操作权限。')] : []), button('拒绝', action('deny')))]
         : [form('提交回答', action('answer'), [input('你的回答', '填写回答；多个问题请按问题 ID 填写 JSON')])]),
@@ -166,7 +173,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     actions.push(button('刷新进度', intent('status'), true), button('停止执行', intent('cancel'), false, '停止后会保留已有改动，不会自动回滚。'));
   } else actions.push(button('继续修改', intent('followup'), actions.length === 0));
   actions.push(button('查看全文', intent('result')));
-  return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : label, `${task.project} · ${modeLabel}`, color, [stateBox(task.prompt, task.status),
+  return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : label, `${projectLabel(task.project)} · ${modeLabel}`, color, [stateBox(task.prompt, task.status),
     text((task.result ?? store.latestProgress(task.id)) || (task.status === 'queued' ? '正在排队，轮到后自动开始。' : '任务已开始，结果会更新在这里。'), 4),
     ...(contextSummary ? [caption(contextSummary)] : []),
     ...(conversation ? [caption('在此话题继续回复可接着处理同一任务；只有主人可派活或确认。')] : []),

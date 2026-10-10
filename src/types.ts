@@ -21,7 +21,7 @@ export interface Incoming {
 }
 export interface Check { name: string; command: string; args: string[]; timeoutSeconds?: number }
 export interface Project {
-  path: string; sandbox: 'read-only' | 'workspace-write';
+  path: string; sandbox: 'read-only' | 'workspace-write'; label?: string; description?: string; naturalMode?: 'read-only' | 'workspace-write';
   worktree?: { baseRef: string; checks: Check[]; github?: { repository: string; baseBranch: string } };
 }
 export interface Workspace {
@@ -35,7 +35,7 @@ export interface DeliveryReport {
 }
 export interface Config {
   ownerId: string; stateDir: string; codexCommand: string; maxRunMinutes: number;
-  projects: Record<string, Project>; groupChats?: boolean;
+  projects: Record<string, Project>; groupChats?: boolean; defaultProject?: string;
 }
 export interface HumanRequest {
   kind: 'approval' | 'input'; description: string;
@@ -52,19 +52,20 @@ export interface RunHooks {
 export interface Executor {
   run(task: Task, project: Project, hooks: RunHooks, signal: AbortSignal): Promise<string>;
 }
-export type View = ({ kind: 'home' } | { kind: 'notice' } | { kind: 'list'; page?: number }
-  | { kind: 'task' | 'followup' | 'result' | 'delivery' | 'publication'; taskId: string; page?: number })
+export type View = ({ kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string } | { kind: 'list'; page?: number }
+  | { kind: 'reply' | 'task' | 'followup' | 'result' | 'delivery' | 'publication'; taskId: string; page?: number })
   & { targetMessageId?: string; fresh?: boolean; conversation?: Conversation; draft?: string };
 export interface CardAction {
   id: string; senderId: string; chatId: string; actionId: string; messageId: string;
   fields: Record<string, unknown>;
 }
 export interface Intent {
-  op: 'home' | 'list' | 'status' | 'result' | 'followup' | 'new' | 'continue' | 'done' | 'cancel' | 'approve' | 'deny' | 'answer'
+  op: 'dispatch' | 'home' | 'list' | 'status' | 'result' | 'followup' | 'new' | 'continue' | 'done' | 'cancel' | 'approve' | 'deny' | 'answer'
     | 'delivery' | 'publication' | 'publish';
-  conversation?: Conversation; taskId?: string; requestId?: string; revision?: string; page?: number; publicationKey?: string;
+  conversation?: Conversation; project?: string; prompt?: string; selectionKey?: string; taskId?: string; requestId?: string; revision?: string; page?: number; publicationKey?: string;
 }
 export interface Channel {
+  acknowledge?(task: Task, signal: AbortSignal): Promise<void>;
   context?(task: Task, signal: AbortSignal): Promise<ContextSnapshot>;
   send(chatId: string, text: string, deliveryId: string, view?: View): Promise<void>;
 }
