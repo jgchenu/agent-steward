@@ -41,6 +41,7 @@ export interface DeliveryReport {
   ready: boolean; validationKey?: string; authorizedKey?: string; prUrl?: string; publishedSha?: string; targetBefore?: string; error?: string;
 }
 export interface Config {
+  approvalsReviewer?: 'user' | 'auto_review';
   ownerId: string; stateDir: string; codexCommand: string; maxRunMinutes: number;
   projects: Record<string, Project>; groupChats?: boolean; defaultProject?: string;
 }
@@ -51,6 +52,7 @@ export interface HumanRequest {
   resolve: (answer: string) => void;
 }
 export interface RunHooks {
+  prepared?: (report: DeliveryReport) => void;
   thread: (id: string) => void;
   progress: (text: string) => void;
   request: (request: HumanRequest) => string;
@@ -60,7 +62,7 @@ export interface Executor {
   run(task: Task, project: Project, hooks: RunHooks, signal: AbortSignal): Promise<string>;
 }
 export type View = ({ kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string; fromTaskId?: string; revision?: string } | { kind: 'list'; page?: number }
-  | { kind: 'reply' | 'task' | 'followup' | 'result' | 'delivery' | 'publication' | 'baseline'; taskId: string; page?: number })
+  | { kind: 'reply' | 'task' | 'followup' | 'result' | 'delivery' | 'publication' | 'baseline' | 'source'; taskId: string; page?: number })
   & { targetMessageId?: string; fresh?: boolean; conversation?: Conversation; draft?: string };
 export interface CardAction {
   id: string; senderId: string; chatId: string; actionId: string; messageId: string;
@@ -68,7 +70,7 @@ export interface CardAction {
 }
 export interface Intent {
   op: 'dispatch' | 'home' | 'list' | 'status' | 'result' | 'followup' | 'new' | 'continue' | 'done' | 'cancel' | 'approve' | 'deny' | 'answer'
-    | 'delivery' | 'publication' | 'publish' | 'baseline' | 'restart';
+    | 'delivery' | 'publication' | 'publish' | 'baseline' | 'restart' | 'source';
   conversation?: Conversation; project?: string; prompt?: string; selectionKey?: string; taskId?: string; requestId?: string; revision?: string; page?: number; publicationKey?: string;
 }
 export interface Channel {

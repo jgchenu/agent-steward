@@ -1,3 +1,4 @@
+import { codeSourceSummary, codeSourceDetails } from '../code-source.js';
 import type { Config, Intent, Status, View } from '../types.js';
 import { Store } from '../store.js';
 import { canPublish, publicationKey, publicationText } from '../workspace.js';
@@ -109,6 +110,10 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   const intent = (op: Intent['op']): Intent => ({ op, taskId: task.id, revision: task.updatedAt });
   const prButton = () => report?.prUrl ? { tag: 'button', text: plain('打开 GitHub PR'), type: 'primary_filled', width: 'fill',
     behaviors: [{ type: 'open_url', default_url: report.prUrl }] } : undefined;
+  if (view.kind === 'source') return card('代码来源', `${projectLabel(task.project)} · ${modeLabel}`, 'blue', [
+    text(codeSourceDetails(report, project, !!conversation)),
+    row(button('返回任务', intent('status')), ...(report ? [button('查看交付', intent('delivery'))] : [])),
+  ]);
   if (view.kind === 'publication') {
     if (!report || !canPublish(task, project, report)) return card('暂不能交付 PR', projectLabel(task.project), 'orange', [
       box('需要允许修改的项目、实际文件改动，以及配置的验证全部通过。'), button('返回任务', intent('status'), true)]);
@@ -134,6 +139,8 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     const link = prButton(); if (link) actions.push(link);
     return card('项目交付', `${projectLabel(task.project)} · ${modeLabel}`, color, [
       box(`${report.files.length} 个改动文件 · ${report.ready ? '配置验证全部通过' : '尚未满足发布条件'}\n${report.workspace.branch}`),
+      caption(codeSourceSummary(report)),
+      button('查看代码来源', intent('source')),
       text(checks || '未运行自动验证。只读分析不会执行修改项目的验证命令。'),
       { tag: 'collapsible_panel', expanded: true, header: { title: plain(`改动文件 · 第 ${page + 1} / ${pages} 页`) },
         elements: [text(report.files.slice(page * 20, (page + 1) * 20).join('\n') || '没有文件改动。'),
@@ -171,11 +178,11 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     const fits = Buffer.byteLength(JSON.stringify(request.description)) < 20_000;
     const detail = { tag: 'collapsible_panel', expanded: true, header: { title: plain('具体内容') },
       elements: [text(fits ? request.description : '请求内容过长，无法在一张卡片内完整展示。本卡片只允许拒绝；请在本地检查。')] };
-    return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : label, `${projectLabel(task.project)} · ${modeLabel}`, color, [stateBox(task.prompt, task.status), detail,
+    return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : label, `${projectLabel(task.project)} · ${modeLabel}`, color, [stateBox(task.prompt, task.status), caption(codeSourceSummary(report)), detail,
       ...(req.kind === 'approval' ? [row(...(fits ? [button('允许本次', action('approve'), true,
         '仅允许上方展示的本次操作，不授予后续操作权限。')] : []), button('拒绝', action('deny')))]
         : [form('提交回答', action('answer'), [input('你的回答', '填写回答；多个问题请按问题 ID 填写 JSON')]), button('停止任务', intent('cancel'))]),
-      caption('操作仅对当前请求有效。处理后会显示下一步。'),
+      caption('操作仅对当前请求有效。处理后会显示下一步。'), button('查看代码来源', intent('source')),
     ]);
   }
   const actions: Element[] = [];
@@ -186,6 +193,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   if (store.workspace(task.id) && ['review','completed','failed','cancelled','interrupted'].includes(task.status)) actions.push(button('更换代码版本', intent('baseline')));
   actions.push(button('查看全文', intent('result')));
   return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : label, `${projectLabel(task.project)} · ${modeLabel}`, color, [stateBox(task.prompt, task.status),
+    caption(codeSourceSummary(report)), button('查看代码来源', intent('source')),
     text((task.result ?? store.latestProgress(task.id)) || (task.status === 'queued' ? '正在排队，轮到后自动开始。' : '任务已开始，结果会更新在这里。'), 4),
     ...(contextSummary ? [caption(contextSummary)] : []),
     ...(conversation ? [caption('@我或引用回复我的消息，可接着处理同一任务；普通话题聊天不会触发。')] : []),

@@ -159,3 +159,32 @@ test('structured MCP forms require explicit validated JSON and do not inherit de
   };
   await s.run(); assert.deepEqual(rpc.writes[0].result,{action:'accept',content:{scope:'once'},_meta:null});
 });
+
+test('automatic reviewer is explicit on start/resume and turn without widening sandbox or bypassing human requests', async () => {
+  for (const threadId of [null, 'thread']) {
+    const rpc = new FakeRpc(), requests: HumanRequest[] = [], s = setup(rpc, requests);
+    const ex = new CodexExecutor('unused', () => rpc, 'auto_review');
+    rpc.onTurn = () => {
+      rpc.emit('item/commandExecution/requestApproval', {command:'needs human'}, 90);
+      assert.equal(rpc.writes.length,0); requests[0].resolve('decline'); rpc.finish();
+    };
+    await ex.run({...task,threadId}, {path:'.',sandbox:'read-only'},s.hooks,AbortSignal.timeout(5000));
+    const common = rpc.params[threadId ? 'thread/resume' : 'thread/start'];
+    assert.equal(common.approvalsReviewer,'auto_review'); assert.equal(common.sandbox,'read-only');
+    assert.equal(common.approvalPolicy,'on-request');
+    assert.equal(rpc.params['turn/start'].approvalsReviewer,'auto_review');
+    assert.deepEqual(rpc.writes[0].result,{decision:'decline'});
+  }
+});
+
+test('unsupported automatic reviewer fails without full-access or manual-policy retry', async () => {
+  const rpc = new FakeRpc(), s = setup(rpc);
+  const request = rpc.request.bind(rpc);
+  rpc.request = async (method, params) => {
+    if (method === 'thread/start') { rpc.calls.push(method); throw Error('reviewer unavailable'); }
+    return request(method, params);
+  };
+  await assert.rejects(new CodexExecutor('unused',()=>rpc,'auto_review').run(task,{path:'.',sandbox:'read-only'},s.hooks,AbortSignal.timeout(5000)), /reviewer unavailable/);
+  assert.equal(rpc.calls.filter(c=>c==='thread/start').length,1);
+  assert.ok(!rpc.calls.includes('turn/start')); assert.equal(rpc.closed,true);
+});

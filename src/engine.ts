@@ -1,3 +1,4 @@
+import { codeSourceReceipt, codeSourceDetails } from './code-source.js';
 import { baselinePreview, restartAtBaseline, validBaseRef } from './baseline.js';
 import { namedProjects, projectChoices } from './routing.js';
 import { Store } from './store.js';
@@ -8,6 +9,7 @@ const HELP = `Agent Steward · 个人 Agent 分身（预览版）
 /projects — 可用项目
 /new <项目> <任务要求> — 只读分析
 /edit <项目> <任务要求> — 在独立目录修改并验证
+/source <任务ID> — 查看实际代码来源
 /baseline <任务ID> — 选择代码版本并从新副本继续
 /publish <任务ID> — 预览草稿 PR 交付
 /list 或 /status <任务ID> — 查进度
@@ -68,6 +70,9 @@ export class Engine {
       let command = match?.[1] ?? '/new';
       let args = match?.[2]?.trim() ?? '';
       const navigation = ['首页', '工作台', '帮助'].includes(text);
+      if (!match && bound && /^(代码来源|查看代码来源|当前代码版本)$/.test(text)) {
+        reply(codeSourceDetails(this.store.delivery(bound.id), this.config.projects[bound.project], true), { kind: 'source', taskId: bound.id, fresh: true }); return;
+      }
       if (!match && bound && /^(更新代码版本|更换代码版本|更新任务基线)$/.test(text)) {
         reply('选择从哪个代码版本继续。原副本会保留。', { kind: 'baseline', taskId: bound.id, fresh: true }); return;
       }
@@ -149,7 +154,7 @@ export class Engine {
       }
       const task = this.store.get(id);
       if (!task || task.chatId !== message.chatId || (message.conversation && task.conversation?.anchorId !== message.conversation.anchorId)) { reply('任务不存在，请重新选择。', { kind: 'home' }); return; }
-      if (bound && bound.id !== task.id && !['/status'].includes(command)) { reply('这个话题已转到另一个项目，请直接在话题里说明当前需求。'); return; }
+      if (bound && bound.id !== task.id && !['/status', '/source'].includes(command)) { reply('这个话题已转到另一个项目，请直接在话题里说明当前需求。'); return; }
       if (command === '/baseline' || command === '/restart') {
         if (this.active?.task.id === id || !['review','completed','failed','cancelled','interrupted'].includes(task.status)) { reply('请等任务结束或停止后再更换版本。'); return; }
         if (!this.store.workspace(id) || !this.config.projects[task.project]?.worktree) { reply('这个任务没有 Git 工作副本。'); return; }
@@ -159,6 +164,7 @@ export class Engine {
         if (message.conversation) this.store.saveConversation(id, message.conversation);
         return;
       }
+      if (command === '/source') { reply(codeSourceDetails(this.store.delivery(id), this.config.projects[task.project], !!message.conversation), { kind: 'source', taskId: id, fresh: true }); return; }
       if (command === '/publish') { reply('请先查看交付预览，再明确创建草稿 PR。', { kind: 'publication', taskId: id, fresh: true }); return; }
       if (command === '/status') {
         const requests = this.store.requests(id).map(r => `待处理请求：${r.id} · ${r.kind}`).join('\n');
@@ -256,7 +262,7 @@ export class Engine {
       home: { kind: 'home' }, list: { kind: 'list', page: i.page },
       status: { kind: 'task', taskId: i.taskId! }, result: { kind: 'result', taskId: i.taskId!, page: i.page },
       followup: { kind: 'followup', taskId: i.taskId! },
-      baseline: { kind: 'baseline', taskId: i.taskId! },
+      baseline: { kind: 'baseline', taskId: i.taskId! }, source: { kind: 'source', taskId: i.taskId! },
       delivery: { kind: 'delivery', taskId: i.taskId! }, publication: { kind: 'publication', taskId: i.taskId! },
     };
     const view = views[i.op];
@@ -301,6 +307,11 @@ export class Engine {
       const project = this.config.projects[task.project];
       if (!project) throw new Error('项目配置已移除。');
       const hooks: RunHooks = {
+        prepared: report => {
+          abort.signal.throwIfAborted();
+          this.store.enqueue(task.chatId, codeSourceReceipt(project.label ?? task.project, report), { kind: 'reply', taskId: task.id });
+          void this.flush();
+        },
         thread: id => this.store.thread(task.id, id),
         progress: text => this.store.event(task.id, 'progress', text.slice(0, 8000)),
         request: req => {

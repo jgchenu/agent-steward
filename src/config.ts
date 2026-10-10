@@ -53,10 +53,11 @@ export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.
   if (!Object.keys(projects).length) throw new Error('Configure at least one project.');
   if (raw.defaultProject !== undefined && (typeof raw.defaultProject !== 'string' || !Object.hasOwn(projects, raw.defaultProject))) throw new Error('defaultProject must name a configured project.');
   if (raw.groupChats !== undefined && typeof raw.groupChats !== 'boolean') throw new Error('groupChats must be boolean.');
+  if (raw.approvalsReviewer !== undefined && !['user', 'auto_review'].includes(raw.approvalsReviewer)) throw new Error('approvalsReviewer must be user or auto_review.');
   const maxRunMinutes = raw.maxRunMinutes ?? 60;
   if (!Number.isFinite(maxRunMinutes) || maxRunMinutes < 1 || maxRunMinutes > 1440) {
     throw new Error('maxRunMinutes must be between 1 and 1440.');
   }
-  return { ownerId, projects, maxRunMinutes, defaultProject: raw.defaultProject, groupChats: raw.groupChats ?? false, stateDir: resolve(base, raw.stateDir ?? '.steward'),
+  return { ownerId, projects, maxRunMinutes, approvalsReviewer: raw.approvalsReviewer ?? 'user', defaultProject: raw.defaultProject, groupChats: raw.groupChats ?? false, stateDir: resolve(base, raw.stateDir ?? '.steward'),
     codexCommand: raw.codexCommand ?? 'codex' };
 }

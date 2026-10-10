@@ -43,7 +43,7 @@ async function main(): Promise<void> {
     if (!appId || !secret) { store.close(); release(); throw new Error('请在本地 .env 配置飞书应用身份。'); }
     feishu = new FeishuChannel(appId, secret, store, config); channel = feishu;
   }
-  const engine = new Engine(store, config, mode === 'demo' ? new DemoExecutor() : new WorkspaceExecutor(config, store, new CodexExecutor(config.codexCommand)), channel);
+  const engine = new Engine(store, config, mode === 'demo' ? new DemoExecutor() : new WorkspaceExecutor(config, store, new CodexExecutor(config.codexCommand, undefined, config.approvalsReviewer)), channel);
   let configRevision = '';
   const refreshProjects = () => {
     if (mode === 'demo') return;

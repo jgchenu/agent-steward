@@ -47,6 +47,11 @@ test('configuration fails closed for missing owner, unknown sandbox and invalid 
     delete process.env.STEWARD_OWNER_ID; assert.throws(() => loadConfig(path), /OWNER/);
     process.env.STEWARD_OWNER_ID = 'owner';
     assert.equal(loadConfig(path).projects.demo.sandbox, 'read-only');
+    assert.equal(loadConfig(path).approvalsReviewer, 'user');
+    writeFileSync(path, JSON.stringify({ approvalsReviewer: 'auto_review', projects: { demo: { path: dir } } }));
+    assert.equal(loadConfig(path).approvalsReviewer, 'auto_review');
+    writeFileSync(path, JSON.stringify({ approvalsReviewer: 'always', projects: { demo: { path: dir } } }));
+    assert.throws(() => loadConfig(path), /approvalsReviewer/);
     writeFileSync(path, JSON.stringify({ projects: { demo: { path: dir, sandbox: 'danger-full-access' } } }));
     assert.throws(() => loadConfig(path), /sandbox/);
   } finally {
