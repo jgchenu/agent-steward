@@ -18,6 +18,7 @@ export interface Attachment {
 export interface Task {
   id: string; chatId: string; project: string; prompt: string; status: Status;
   threadId: string | null; result: string | null; createdAt: string; updatedAt: string;
+  evidenceDirectory?: string;
   conversation?: Conversation; contextSnapshot?: ContextSnapshot; codeVersion?: { ref: string; baseSha: string; headSha: string };
   mode?: 'read-only' | 'workspace-write'; nextAction?: 'execute' | 'publish' | 'baseline'; baselineRef?: string | null; routingContext?: string;
 }
@@ -34,7 +35,11 @@ export interface Project {
 export interface Workspace {
   taskId: string; source: string; path: string; branch: string; baseSha: string; baseRef: string; configBaseRef?: string;
 }
+export interface EvidenceImage {
+  id: string; taskId: string; path: string; sha256: string; caption: string; scope: 'local-preview' | 'deployed'; capturedAt: string;
+}
 export interface DeliveryReport {
+  evidenceIds?: string[]; evidenceWarning?: string;
   workspace: Workspace; mode: 'read-only' | 'workspace-write'; capturedAt: string;
   files: string[]; diffStat: string; fingerprint: string; headSha: string;
   checks: Array<{ name: string; status: 'running' | 'passed' | 'failed'; log: string; exitCode?: number }>;
@@ -61,7 +66,7 @@ export interface RunHooks {
 export interface Executor {
   run(task: Task, project: Project, hooks: RunHooks, signal: AbortSignal): Promise<string>;
 }
-export type View = ({ kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string; fromTaskId?: string; revision?: string } | { kind: 'list'; page?: number }
+export type View = ({ kind: 'evidence'; taskId: string; evidenceIds: string[] } | { kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string; fromTaskId?: string; revision?: string } | { kind: 'list'; page?: number }
   | { kind: 'reply' | 'task' | 'followup' | 'result' | 'delivery' | 'publication' | 'baseline' | 'source'; taskId: string; page?: number })
   & { targetMessageId?: string; fresh?: boolean; conversation?: Conversation; draft?: string };
 export interface CardAction {

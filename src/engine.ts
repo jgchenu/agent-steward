@@ -69,7 +69,8 @@ export class Engine {
       const match = /^(\/\S+)(?:\s+([\s\S]*))?$/.exec(text);
       let command = match?.[1] ?? '/new';
       let args = match?.[2]?.trim() ?? '';
-      const navigation = ['首页', '工作台', '帮助'].includes(text);
+      let navigation = ['首页', '工作台', '帮助'].includes(text);
+      if (!match && bound && /^(创建|提交|交付|准备)(草稿\s*)?\s*PR$/i.test(text)) { command = '/publish'; args = bound.id; navigation = true; }
       if (!match && bound && /^(代码来源|查看代码来源|当前代码版本)$/.test(text)) {
         reply(codeSourceDetails(this.store.delivery(bound.id), this.config.projects[bound.project], true), { kind: 'source', taskId: bound.id, fresh: true }); return;
       }
@@ -374,6 +375,8 @@ export class Engine {
       if (task.conversation) this.store.enqueue(task.chatId, result + (report && task.mode === 'workspace-write' ? evidence : ''), { kind: 'reply', taskId: task.id });
       else this.store.enqueue(task.chatId, `任务 ${task.id} 已产出结果，等待你验收（执行器报告，尚非独立验证）。\n${result}${evidence}\n`
         + `验收：/done ${task.id}\n继续：/continue ${task.id} <要求>`, { kind: 'task', taskId: task.id });
+      if (task.nextAction !== 'publish' && report?.evidenceIds?.length) this.store.enqueue(task.chatId, '验收截图（执行 Agent 提供）', { kind:'evidence', taskId:task.id, evidenceIds:report.evidenceIds });
+      if (report?.evidenceWarning) this.store.enqueue(task.chatId, report.evidenceWarning, {kind:'reply', taskId:task.id});
     } catch (error) {
       const state = this.store.get(task.id)?.status;
       if (state !== 'cancelled') {

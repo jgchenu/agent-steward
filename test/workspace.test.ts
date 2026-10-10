@@ -82,6 +82,9 @@ test('publication commits exact validated files, reuses PR, and only pushes the 
     await f.executor.run(f.task, f.project, hooks, signal());
     const report = f.store.delivery(f.task.id)!;
     f.store.saveDelivery(f.task.id, { ...report, authorizedKey: publicationKey(f.task, f.project, report) });
+    const evidenceDir = join(report.workspace.path, '.steward-delivery');
+    mkdirSync(evidenceDir, {recursive:true});
+    writeFileSync(join(evidenceDir, 'private.png'), 'not code');
     const calls: string[][] = []; let creates = 0, edits = 0;
     const repoGit: typeof git = async (cwd, args, sig) => {
       calls.push(args);
@@ -100,6 +103,7 @@ test('publication commits exact validated files, reuses PR, and only pushes the 
     await publish(f.store, f.config, f.task, f.project, signal(), gh, repoGit);
     await publish(f.store, f.config, f.task, f.project, signal(), gh, repoGit);
     assert.equal(creates, 1); assert.equal(edits, 1);
+    assert.equal(await git(report.workspace.path, ['ls-files', '--', '.steward-delivery'], signal()), '');
     assert.equal(f.store.delivery(f.task.id)!.prUrl, 'https://github.com/test/repo/pull/1');
     assert.equal(f.g('rev-parse', 'origin/main'), report.workspace.baseSha);
     assert.ok(calls.filter(a => a[0] === 'push').every(a => a.join(' ') === `push origin HEAD:refs/heads/${report.workspace.branch}`));
@@ -287,4 +291,20 @@ test('code source receipt follows verified preparation and precedes inference, i
     await assert.rejects(ex.run(f.task, { ...f.project, path: join(f.root, 'missing') }, { ...hooks, prepared: () => { prepared++; } }, signal()));
     assert.equal(prepared, 0, 'failed preparation must not claim a code version');
   } finally { f.close(); }
+});
+
+test('UI screenshot outputs are collected separately and never enter the code inventory', async () => {
+  const f = fixture();
+  try {
+    const ex = new WorkspaceExecutor(f.config,f.store,{run:async(t,p)=>{
+      assert.ok(t.evidenceDirectory?.startsWith(p.path));
+      writeFileSync(join(p.path,'README.md'),'changed\n');
+      writeFileSync(join(t.evidenceDirectory!,'screen.png'),Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6H1kAAAAASUVORK5CYII=','base64'));
+      writeFileSync(join(t.evidenceDirectory!,'images.json'),JSON.stringify([{file:'screen.png',caption:'本地模拟',scope:'local-preview'}]));
+      return 'done';
+    }});
+    await ex.run(f.task,f.project,hooks,signal());
+    const r=f.store.delivery(f.task.id)!;assert.deepEqual(r.files,['README.md']);assert.equal(r.evidenceIds?.length,1);assert.equal(r.ready,true);
+    assert.ok(!r.diffStat.includes('.steward-delivery'));assert.equal(f.store.evidence(r.evidenceIds![0],f.task.id)?.scope,'local-preview');
+  }finally{f.close();}
 });
