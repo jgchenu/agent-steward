@@ -104,7 +104,7 @@ Keep the process and machine awake. Closing the service interrupts active work; 
 | `/new <project> <task>` | Create a read-only task |
 | `/edit <project> <task>` | Modify an allowlisted project in an isolated Git worktree |
 | `/publish <task>` | Open the Feishu PR preview; publication needs the card confirmation |
-| Plain text | Create a task when exactly one project is configured |
+| Plain text | Use the named authorized project, default workspace or sole project; ask only when ambiguous |
 | `/list`, `/status <task>` | View status, latest recorded progress, result and outstanding request IDs |
 | `/cancel <task>` | Stop execution; existing changes are retained |
 | `/continue <task> <instructions>` | Queue another turn using the saved Codex thread |
@@ -114,13 +114,13 @@ Keep the process and machine awake. Closing the service interrupts active work; 
 
 Git project tasks retain their own worktree and continuation session. Modification tasks run locally configured checks after Codex finishes; delivery cards show actual changed files and check exit results. Passing checks enables an explicit draft PR preview and confirmation. Validation binds to file contents and check configuration; target-branch movement stops publication. The publisher reuses an existing open PR and never merges it.
 
-Feishu uses interactive cards: send `工作台` or `/help` to open a project selector and task form. Task cards offer progress refresh, stop, result pagination, acceptance and follow-up forms; permission requests have explicit one-shot buttons. Commands remain available in Feishu and the terminal. A generic “yes” never grants permission. Each instance runs one task at a time.
+In Feishu, directly @mention the bot with your request. Configure [workspace grants and the default analysis space](docs/workspaces.md) with `npm run workspaces`. The optional `工作台` or `/help` entry opens the manual task form. Group answers and clarifying questions are ordinary threaded posts with Markdown and complete long-answer splitting; reply naturally to continue. Explicit permission requests and on-demand task management retain their cards. Commands remain available in Feishu and the terminal. A generic “yes” never grants permission. Each instance runs one task at a time.
 
 Enable `card.action.trigger` under the application’s **callback configuration**, using the existing long connection. An existing installation must verify this separately. Ordinary progress refreshes update a card in place; requests for input, results and failures produce a fresh notification so they are not silently hidden in an old message. Forms accept up to 1,000 characters; longer tasks can still be sent as text.
 
 ## Group conversations
 
-With group mode enabled, owner @mentions start tasks or open a prefilled project form. Replies within a bound topic continue the same task and Codex session. Cards retain their originating topic, and results are posted as thread replies. Steward reads bounded text/rich-text/card context from that group or topic before inference; missing permissions stop execution explicitly. Other members cannot control tasks. Group results and human requests are visible to group participants.
+With group mode enabled, owner @mentions directly start tasks using an explicitly named authorized project or the default workspace. Ambiguous requests get a one-click project choice without retyping. An OnIt reaction acknowledges execution before inference; results and human questions reply in the thread. Replies within a bound topic continue the same task and Codex session. Cards retain their originating topic, and results are posted as thread replies. Steward reads bounded text/rich-text/card context from that group or topic before inference; missing permissions stop execution explicitly. Other members cannot control tasks. Group results and human requests are visible to group participants.
 
 ## What survives a restart
 

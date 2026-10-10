@@ -2,7 +2,8 @@
   "stateDir": ".steward",
   "codexCommand": "codex",
   "maxRunMinutes": 60,
+  "defaultProject": "sandbox",
   "projects": {
-    "sandbox": { "path": "./playground", "sandbox": "read-only" }
+    "sandbox": { "path": "./playground", "label": "通用分析", "description": "讨论分析、归纳和内容草稿", "sandbox": "read-only" }
   }
 }

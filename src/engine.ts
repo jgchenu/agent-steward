@@ -1,3 +1,4 @@
+import { projectChoices } from './routing.js';
 import { Store } from './store.js';
 import { canPublish, publicationKey } from './workspace.js';
 import type { CardAction, Channel, Config, Executor, HumanRequest, Incoming, Status, Task, View } from './types.js';
@@ -13,7 +14,7 @@ const HELP = `Agent Steward · 个人数字员工（预览版）
 /approve <请求ID> 或 /deny <请求ID> — 回答一次权限请求
 /answer <请求ID> <回答> — 回答问题；多问题使用 JSON {"问题ID":"答案"}
 /done <任务ID> — 确认验收
-普通文本可派给唯一配置的项目；多个项目时请用 /new。`;
+直接说需求即可开始；使用默认项目或唯一配置的项目，工作台是可选入口。`;
 
 export class Engine {
   private active?: { task: Task; abort: AbortController; done: Promise<void> };
@@ -24,6 +25,14 @@ export class Engine {
   constructor(readonly store: Store, readonly config: Config, private executor: Executor,
     private channel: Channel) {}
 
+  updateProjects(next: Pick<Config, 'projects' | 'defaultProject'>): void {
+    const previous = this.config.projects;
+    this.config.projects = next.projects; this.config.defaultProject = next.defaultProject;
+    if (this.active) {
+      const t = this.active.task, p = next.projects[t.project];
+      if (!p || p.path !== previous[t.project]?.path || (t.mode === 'workspace-write' && p.sandbox !== 'workspace-write')) this.active.abort.abort(new Error('项目授权已撤销或降为只读，执行已停止。'));
+    }
+  }
   start(): void {
     this.store.recover();
     this.timer = setInterval(() => { this.tick(); void this.flush(); }, 500);
@@ -46,9 +55,10 @@ export class Engine {
         message.conversation ? { ...(view ?? { kind: 'notice' }), conversation: message.conversation,
           ...(!view || ['home', 'list'].includes(view.kind) ? { fresh: true } : {}) }
           : view && ['home', 'list'].includes(view.kind) ? { ...view, fresh: true } : view);
-      let text = message.text.trim();
-      if (!text && message.botMentioned) text = '工作台';
-      if (!text || text.length > 16_000) { reply('任务文本应为 1–16000 字符。'); return; }
+      const text = message.text.trim();
+      if (!text && message.botMentioned) { reply('我在。直接告诉我想做什么，例如“分析上面的讨论，给出建议”。'); return; }
+      const formPrompt = actionId ? /^\/(?:new|edit)\s+\S+\s+([\s\S]*)$/.exec(text)?.[1] : undefined;
+      if (!text || (formPrompt ?? text).length > 16_000) { reply('任务文本应为 1–16000 字符。'); return; }
       const match = /^(\/\S+)(?:\s+([\s\S]*))?$/.exec(text);
       let command = match?.[1] ?? '/new';
       let args = match?.[2]?.trim() ?? '';
@@ -57,7 +67,7 @@ export class Engine {
         const pending = this.store.requests(bound.id);
         if (pending.length === 1 && pending[0].kind === 'input') { command = '/answer'; args = `${pending[0].id} ${text}`; }
         else if (['queued', 'running', 'waiting_input', 'waiting_approval'].includes(bound.status)) {
-          reply('当前任务仍在执行或等待确认，请使用任务卡片处理；本条消息没有授权任何操作。', { kind: 'task', taskId: bound.id }); return;
+          reply(bound.status === 'waiting_approval' ? '这一步需要你确认具体操作，我在等你的决定。' : '我还在处理前面的内容，完成后会在这里回复你。', { kind: bound.status === 'waiting_approval' ? 'task' : 'reply', taskId: bound.id }); return;
         } else { command = '/continue'; args = `${bound.id} ${text}`; }
       }
       if (command === '/help' || (!match && ['首页', '工作台', '帮助'].includes(text))) { reply(HELP, { kind: 'home' }); return; }
@@ -68,25 +78,23 @@ export class Engine {
         if (message.conversation && this.store.conversationTask(message.chatId, message.conversation)) {
           reply('此话题已绑定任务。直接在话题回复可继续；新任务请在群里另起消息 @我。', { kind: 'task', taskId: bound!.id }); return;
         }
-        const names = Object.keys(this.config.projects);
         let project: string, prompt: string;
-        if (!match && names.length === 1) { project = names[0]; prompt = text; }
+        if (!match) {
+          const choices = projectChoices(this.config, text);
+          if (choices.length !== 1) { reply('这次处理哪个项目？', { kind: 'choose-project', draft: text, choices, selectionKey: message.id }); return; }
+          project = choices[0]; prompt = text;
+        }
         else {
           const parts = /^(\S+)\s+([\s\S]+)$/.exec(args);
-          if (!parts) {
-            if (message.conversation && !match && text.length <= 1000) reply('请选择项目后开始任务。', { kind: 'home', draft: text });
-            else if (message.conversation && !match) reply('任务超过表单 1000 字上限，请使用 /new <项目> <完整任务要求> 派活。');
-            else reply('用法：/new <项目> <任务要求>，项目列表：/projects');
-            return;
-          }
+          if (!parts) { reply('用法：/new <项目> <任务要求>，项目列表：/projects'); return; }
           [, project, prompt] = parts;
         }
         if (!Object.hasOwn(this.config.projects, project)) { reply('未配置该项目，请用 /projects 查询。'); return; }
-        const mode = command === '/edit' ? 'workspace-write' : 'read-only';
+        const mode = command === '/edit' ? 'workspace-write' : !match ? this.config.projects[project].naturalMode ?? 'read-only' : 'read-only';
         const p = this.config.projects[project];
         if (mode === 'workspace-write' && (p.sandbox !== mode || !p.worktree)) { reply('该项目仅支持只读分析。'); return; }
         const task = this.store.create(message.chatId, project, prompt, mode, message.conversation);
-        reply(`已接单 ${task.id} · ${project}\n任务已排队。查询：/status ${task.id}`, { kind: 'task', taskId: task.id }); return;
+        if (!message.conversation || !this.channel.acknowledge) reply(`已接单 ${task.id} · ${project}\n任务已排队。查询：/status ${task.id}`, { kind: 'task', taskId: task.id }); return;
       }
       if (command === '/list' || (command === '/status' && !args)) {
         reply(this.store.list(message.chatId).map(t => `${t.id} · ${t.project} · ${t.status}`).join('\n') || '暂无任务。', { kind: 'list' }); return;
@@ -112,7 +120,7 @@ export class Engine {
         this.store.event(task.id, 'human_response', `${id}: ${answer}`);
         this.updateWaiting(task.id);
         effects.push(() => { this.pending.delete(id); runtime.resolve(answer); });
-        reply(`请求 ${id} 已回答。`, { kind: 'task', taskId: task.id }); return;
+        reply(message.conversation && req.kind === 'input' ? '收到，我继续。' : `请求 ${id} 已回答。`, { kind: message.conversation && req.kind === 'input' ? 'reply' : 'task', taskId: task.id }); return;
       }
       const task = this.store.get(id);
       if (!task || task.chatId !== message.chatId || (message.conversation && task.conversation?.anchorId !== message.conversation.anchorId)) { reply('任务不存在，请重新选择。', { kind: 'home' }); return; }
@@ -136,7 +144,7 @@ export class Engine {
         if (!body) { reply(`用法：/continue ${id} <后续要求>`); return; }
         this.store.resume(id, body);
         if (message.conversation) this.store.saveConversation(id, message.conversation);
-        reply(`任务 ${id} 已重新排队。`, { kind: 'task', taskId: id }); return;
+        if (!message.conversation || !this.channel.acknowledge) reply(`任务 ${id} 已重新排队。`, { kind: 'task', taskId: id }); return;
       }
       if (command === '/done' && task.status === 'review') {
         this.store.set(id, 'completed'); reply(`任务 ${id} 已由你确认验收。`, { kind: 'task', taskId: id }); return;
@@ -158,6 +166,15 @@ export class Engine {
     if (i.conversation && !this.config.groupChats) return fail('群聊功能已关闭。');
     if (i.op === 'new' && i.conversation && this.store.conversationTask(action.chatId, i.conversation)) return fail('此话题已绑定任务，请继续原任务；新任务请另起话题。');
     if (i.taskId && (!task || task.chatId !== action.chatId)) return fail('任务不属于当前会话。');
+    if (i.op === 'dispatch') {
+      const p = i.project && this.config.projects[i.project];
+      if (!p || !i.prompt || !i.selectionKey || i.prompt.length > 16000) return fail('该项目已撤销授权，请重新派活。');
+      if (i.conversation && this.store.conversationTask(action.chatId, i.conversation)) return fail('此话题已绑定任务，请在话题继续。');
+      this.receive({ id: 'choice:' + i.selectionKey, senderId: action.senderId, senderType: 'user', chatId: action.chatId,
+        chatType: i.conversation ? 'group' : 'p2p', botMentioned: !!i.conversation, conversation: i.conversation,
+        text: `${p.naturalMode === 'workspace-write' ? '/edit' : '/new'} ${i.project} ${i.prompt}` }, action.actionId);
+      return { toast: { type: 'success', content: '收到，开始处理。' } };
+    }
     const mutating = ['new', 'continue', 'done', 'cancel', 'approve', 'deny', 'answer', 'publish'].includes(i.op);
     if (mutating && task && i.revision !== task.updatedAt) return fail('任务状态已变化，请刷新后再操作。');
     const body = typeof action.fields.body === 'string' ? action.fields.body.trim() : '';
@@ -232,7 +249,7 @@ export class Engine {
     if (!task) return;
     const abort = new AbortController();
     this.store.set(task.id, 'running');
-    this.store.enqueue(task.chatId, `开始执行 ${task.id} · ${task.project}`, { kind: 'task', taskId: task.id });
+    if (!task.conversation || !this.channel.acknowledge) this.store.enqueue(task.chatId, `开始执行 ${task.id} · ${task.project}`, { kind: 'task', taskId: task.id });
     // Defer execution so synchronous adapters cannot race active-run registration.
     const done = Promise.resolve().then(() => this.run(task, abort));
     this.active = { task, abort, done };
@@ -242,6 +259,15 @@ export class Engine {
     try {
       const project = this.config.projects[task.project];
       if (!project) throw new Error('项目配置已移除。');
+      if (task.conversation && task.nextAction !== 'publish' && this.channel.acknowledge) {
+        try { await this.channel.acknowledge(task, abort.signal); }
+        catch {
+          abort.signal.throwIfAborted();
+          this.store.event(task.id, 'acknowledgement_failed', '表情回复不可用，已改用话题文字回执。');
+          this.store.enqueue(task.chatId, '收到，正在处理。', { kind: 'notice', conversation: task.conversation, fresh: true });
+        }
+      }
+      abort.signal.throwIfAborted();
       let executionTask = task;
       if (task.conversation && task.nextAction !== 'publish') {
         if (!this.config.groupChats || !this.channel.context) throw new Error('群上下文读取未启用，任务未执行。');
@@ -258,7 +284,8 @@ export class Engine {
           if (abort.signal.aborted) throw new Error('任务已停止');
           const id = this.store.request(task.id, req.kind, req.description);
           this.pending.set(id, req); this.updateWaiting(task.id);
-          this.store.enqueue(task.chatId, `任务 ${task.id} 需要你处理 · 请求 ${id}\n${req.description}\n`
+          if (task.conversation && req.kind === 'input') this.store.enqueue(task.chatId, req.description, { kind: 'reply', taskId: task.id });
+          else this.store.enqueue(task.chatId, `任务 ${task.id} 需要你处理 · 请求 ${id}\n${req.description}\n`
             + (req.kind === 'approval' ? `/approve ${id} 或 /deny ${id}` : `/answer ${id} <回答>`), { kind: 'task', taskId: task.id });
           return id;
         },
@@ -272,14 +299,16 @@ export class Engine {
       this.store.set(task.id, 'review', result);
       const report = this.store.delivery(task.id);
       const evidence = report ? `\n实际改动：${report.files.length} 个文件\n验证：${report.checks.map(c => `${c.name}: ${c.status}`).join('；') || '未运行'}\n${report.prUrl ?? ''}` : '';
-      this.store.enqueue(task.chatId, `任务 ${task.id} 已产出结果，等待你验收（执行器报告，尚非独立验证）。\n${result}${evidence}\n`
+      if (task.conversation) this.store.enqueue(task.chatId, result + (report && task.mode === 'workspace-write' ? evidence : ''), { kind: 'reply', taskId: task.id });
+      else this.store.enqueue(task.chatId, `任务 ${task.id} 已产出结果，等待你验收（执行器报告，尚非独立验证）。\n${result}${evidence}\n`
         + `验收：/done ${task.id}\n继续：/continue ${task.id} <要求>`, { kind: 'task', taskId: task.id });
     } catch (error) {
       const state = this.store.get(task.id)?.status;
       if (state !== 'cancelled') {
         const reason = error instanceof Error ? error.message : '执行失败';
         this.store.set(task.id, this.stopped ? 'interrupted' : 'failed', reason);
-        this.store.enqueue(task.chatId, `任务 ${task.id} ${this.stopped ? '已中断' : '失败'}：${reason}\n`
+        if (task.conversation) this.store.enqueue(task.chatId, `这次没能完成：${reason}\n你可以直接回复补充要求，我会接着处理。`, { kind: 'reply', taskId: task.id });
+        else this.store.enqueue(task.chatId, `任务 ${task.id} ${this.stopped ? '已中断' : '失败'}：${reason}\n`
           + `不会自动重试已发生的操作。检查后用 /continue ${task.id} <要求> 继续。`, { kind: 'task', taskId: task.id });
       }
     } finally {

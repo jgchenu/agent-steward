@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -44,16 +44,28 @@ async function main(): Promise<void> {
     feishu = new FeishuChannel(appId, secret, store, config); channel = feishu;
   }
   const engine = new Engine(store, config, mode === 'demo' ? new DemoExecutor() : new WorkspaceExecutor(config, store, new CodexExecutor(config.codexCommand)), channel);
+  let configRevision = '';
+  const refreshProjects = () => {
+    if (mode === 'demo') return;
+    try {
+      const file = process.env.STEWARD_CONFIG ?? 'steward.config.json', stat = statSync(file);
+      const revision = `${stat.mtimeMs}:${stat.size}`;
+      if (revision === configRevision) return;
+      const next = loadConfig(file); engine.updateProjects(next); configRevision = revision;
+    } catch { console.warn('Project configuration invalid; retaining last valid grants.'); }
+  };
+  refreshProjects();
+  const configTimer = setInterval(refreshProjects, 1000);
   let closing = false;
   const shutdown = async () => {
     if (closing) return; closing = true;
-    feishu?.close();
+    clearInterval(configTimer); feishu?.close();
     await engine.stop(); store.close(); release(); process.exit(0);
   };
   process.on('SIGINT', () => void shutdown()); process.on('SIGTERM', () => void shutdown());
   engine.start();
   if (feishu) {
-    await feishu.connect(message => engine.receive(message), action => engine.handleAction(action));
+    await feishu.connect(message => { refreshProjects(); engine.receive(message); }, action => { refreshProjects(); return engine.handleAction(action); });
     console.log('Agent Steward started. Owner-only Feishu tasks. Use /help; group mode follows local configuration.');
   } else {
     console.log(mode === 'demo' ? 'DEMO · 模拟执行器，不调用模型。输入任务或 /help。'

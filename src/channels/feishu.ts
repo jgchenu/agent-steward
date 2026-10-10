@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as lark from '@larksuiteoapi/node-sdk';
 import type { CardAction, Channel, Config, Incoming, Task, View } from '../types.js';
 import { messageText, readContext } from './context.js';
@@ -76,12 +77,43 @@ export class FeishuChannel implements Channel {
       },
     }) });
   }
+  async acknowledge(task: Task, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    const source = task.conversation?.sourceId; if (!source) return;
+    const key = `reaction:OnIt:${source}`;
+    if (this.store.cardMessage(task.chatId, key)) return;
+    const result = await this.client.request({ method: 'POST', url: `/open-apis/im/v1/messages/${encodeURIComponent(source)}/reactions`,
+      data: { reaction_type: { emoji_type: 'OnIt' } }, timeout: 3000 });
+    if (result.code !== 0 || !result.data?.reaction_id) throw new Error('Reaction unavailable');
+    this.store.saveCardMessage(task.chatId, key, result.data.reaction_id);
+    signal.throwIfAborted();
+  }
   async context(task: Task, signal: AbortSignal) {
     return readContext(this.client.im.message, task, signal, [this.appId, this.botId ?? '']);
   }
   async send(chatId: string, text: string, deliveryId: string, view?: View): Promise<void> {
     const scopedTask = view && 'taskId' in view ? this.store.get(view.taskId) : undefined;
     if (view && scopedTask?.conversation) view = { ...view, conversation: scopedTask.conversation };
+    if (view?.kind === 'reply' || (view?.kind === 'notice' && view.conversation)) {
+      const chunks = replyChunks(text);
+      for (let i = 0; i < chunks.length; i++) {
+        const key = `reply:${deliveryId}:${i}`;
+        if (this.store.cardMessage(chatId, key)) continue;
+        const content = JSON.stringify({ zh_cn: { content: [[{ tag: 'md', text: chunks[i] }]] } });
+        const uuid = createHash('sha256').update(`${deliveryId}:${i}`).digest('hex');
+        const result = view.conversation
+          ? await this.client.im.message.reply({ path: { message_id: view.conversation.anchorId },
+            data: { msg_type: 'post', content, uuid, reply_in_thread: true } })
+          : await this.client.im.message.create({ params: { receive_id_type: 'chat_id' }, data: { receive_id: chatId, msg_type: 'post', content, uuid } });
+        if (result.code !== 0 || !result.data?.message_id) throw new Error(`Feishu reply error ${result.code}`);
+        this.store.saveCardMessage(chatId, key, result.data.message_id);
+        if (scopedTask?.conversation) {
+          this.store.bindConversation(chatId, result.data.message_id, scopedTask.id);
+          if (result.data.thread_id) this.store.bindConversation(chatId, result.data.thread_id, scopedTask.id);
+        }
+      }
+      return;
+    }
     const content = JSON.stringify(buildCard(this.store, this.config, chatId, view, text));
     const key = view && viewKey(view);
     const existing = view?.targetMessageId ?? (view?.fresh
@@ -112,4 +144,19 @@ export class FeishuChannel implements Channel {
     if (alertKey && result.data?.message_id) this.store.saveCardMessage(chatId, alertKey, result.data.message_id);
   }
   close(): void { this.ws.close(); }
+}
+
+
+// Preserve the complete answer in bounded post messages. Escape HTML-like mention syntax;
+// remote images remain links, never automatically fetched or uploaded by this adapter.
+export function replyChunks(text: string): string[] {
+  const safe = text.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '[图片：$1]($2)');
+  const chunks: string[] = []; let chunk = '', bytes = 0;
+  for (const char of safe || '我处理完了，但没有收到可展示的正文。') {
+    const size = Buffer.byteLength(JSON.stringify(char)) - 2;
+    if (bytes + size > 12_000) { chunks.push(chunk); chunk = ''; bytes = 0; }
+    chunk += char; bytes += size;
+  }
+  if (chunk) chunks.push(chunk);
+  return chunks;
 }
