@@ -2,11 +2,11 @@
 
 **属于你的数字员工，使用你自己的编码代理订阅。**
 
-[English](README.md) · [架构](docs/architecture.md) · [飞书接入](docs/feishu-setup.md) · [路线图](docs/roadmap.md)
+[English](README.md) · [架构](docs/architecture.md) · [飞书接入](docs/feishu-setup.md) · [路线图](docs/roadmap.md) · [群聊与话题](docs/group-context.md)
 
 你在飞书派活，Steward 记录任务并调用本机 Codex；需要你决定时回来提问，结束后交付结果。每个人部署自己的实例，使用自己的订阅、项目和数据。
 
-当前为 **0.1 早期预览**：支持主人私聊、单任务串行执行。已实现的真实执行器只有 Codex；Claude Code、国产 Coding Plan、他人派活和跨实例协作尚未实现。
+当前为 **0.1 早期预览**：支持主人私聊、可选的群聊与话题派活、单任务串行执行。已实现的真实执行器只有 Codex；Claude Code、国产 Coding Plan、他人派活和跨实例协作尚未实现。
 
 ## 先体验流程，不需要账号
 
@@ -85,7 +85,7 @@ npm run local
 
 `review` 只代表执行器给出了结果，尚不代表独立验证通过。修改、测试、浏览器验收、PR、发布和人工接受是不同的完成条件。生产分支保护需要在 GitHub 等平台落实，发给模型的 Git 规则不等于强制执行控制。
 
-当前只接受主人的私聊，忽略群聊和机器人消息。机器必须在线、进程必须运行。会话等待你回答的时间也计入 `maxRunMinutes` 超时限制。首次运行请先在终端启动，常驻服务安装器后续再提供。
+默认仅主人私聊；配置 `groupChats: true` 并开通群消息权限后，可在群里 @机器人派活，并在原话题继续。其他成员消息仅作为参考，不能派活或授权；机器人消息不触发任务。详见[群聊配置与验收](docs/group-context.md)。机器必须在线、进程必须运行。会话等待你回答的时间也计入 `maxRunMinutes` 超时限制。首次运行请先在终端启动，常驻服务安装器后续再提供。
 
 ## 开发与分享
 

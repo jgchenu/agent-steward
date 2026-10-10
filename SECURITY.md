@@ -4,7 +4,7 @@ Agent Steward is an early personal-use preview for a trusted local machine. It i
 
 ## Current controls
 
-- Owner-only human direct-message admission and project aliases configured locally
+- Owner-only human direct-message and opt-in addressed group admission and project aliases configured locally
 - One-shot live approval/input request correlation, expiry on restart, unknown requests rejected
 - Read-only default task mode; explicit per-task writes require an isolated Git worktree
 - Program-recorded checks and content fingerprints before owner-confirmed draft PR publication
@@ -20,6 +20,8 @@ Git and publishing rules are sent as agent instructions. They cannot prevent eve
 Worktrees isolate project files, not OS permissions. Operator-configured validation commands run as the local user outside Codex sandboxing, with a minimal environment. Logs stay in private state; worktrees and logs have no automatic retention. The publisher rejects common secret filenames, but this is not a complete secret scanner; review the actual diff before confirming publication.
 
 Project contents and incoming model/tool output are untrusted. The owner gate does not prevent prompt injection in a repository or document. Review concrete permission requests and check the actual result.
+
+Group mode reads contextual messages only after an owner task is accepted. Group members cannot dispatch or approve, but can see results and human-request cards posted into that topic. Context is untrusted input, not authority, and prompt labeling cannot guarantee immunity to model prompt injection. Context snapshots are stored privately and sent to the task runtime.
 
 SQLite records task text, model reports, questions and your answers in plaintext on the local filesystem. Private Codex session history is stored separately by Codex. Protect both, include them only in private backups, and do not include either in shared deployment packages. Retention automation and encrypted application storage are not implemented.
 

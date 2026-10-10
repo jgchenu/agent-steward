@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import type { DeliveryReport, Intent, Status, Task, View, Workspace } from './types.js';
+import type { Conversation, ContextSnapshot, DeliveryReport, Intent, Status, Task, View, Workspace } from './types.js';
 
 export interface Outgoing { id: string; chatId: string; text: string; attempts: number; view: string | null }
 export class Store {
@@ -31,7 +31,11 @@ export class Store {
     if (!taskColumns.some(c => c.name === 'mode')) this.db.exec("ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'read-only'");
     if (!taskColumns.some(c => c.name === 'nextAction')) this.db.exec("ALTER TABLE tasks ADD COLUMN nextAction TEXT NOT NULL DEFAULT 'execute'");
     this.db.exec(`CREATE TABLE IF NOT EXISTS workspaces (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS deliveries (taskId TEXT PRIMARY KEY, data TEXT NOT NULL); PRAGMA user_version=3;`);
+      CREATE TABLE IF NOT EXISTS deliveries (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS task_conversations (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS context_snapshots (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS conversation_bindings (chatId TEXT NOT NULL, messageKey TEXT NOT NULL, taskId TEXT NOT NULL, PRIMARY KEY(chatId,messageKey));
+      PRAGMA user_version=4;`);
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -41,19 +45,51 @@ export class Store {
   consume(id: string): boolean {
     return this.db.prepare('INSERT OR IGNORE INTO inbox VALUES (?)').run(id).changes === 1;
   }
-  create(chatId: string, project: string, prompt: string, mode: Task['mode'] = 'read-only'): Task {
+  create(chatId: string, project: string, prompt: string, mode: Task['mode'] = 'read-only', conversation?: Conversation): Task {
     const id = randomUUID().slice(0, 8), now = new Date().toISOString();
     this.db.prepare('INSERT INTO tasks(id,chatId,project,prompt,status,createdAt,updatedAt,mode) VALUES (?,?,?,?,?,?,?,?)')
       .run(id, chatId, project, prompt, 'queued', now, now, mode);
+    if (conversation) this.saveConversation(id, conversation);
     this.event(id, 'created', prompt);
     return this.get(id)!;
   }
   get(id: string): Task | undefined {
-    return this.db.prepare('SELECT * FROM tasks WHERE id=?').get(id) as unknown as Task | undefined;
+    const task = this.db.prepare('SELECT * FROM tasks WHERE id=?').get(id) as unknown as Task | undefined;
+    return task && this.hydrate(task);
   }
   list(chatId?: string): Task[] {
-    return (chatId ? this.db.prepare('SELECT * FROM tasks WHERE chatId=? ORDER BY createdAt DESC LIMIT 20').all(chatId)
-      : this.db.prepare('SELECT * FROM tasks ORDER BY createdAt').all()) as unknown as Task[];
+    return ((chatId ? this.db.prepare('SELECT * FROM tasks WHERE chatId=? ORDER BY createdAt DESC LIMIT 20').all(chatId)
+      : this.db.prepare('SELECT * FROM tasks ORDER BY createdAt').all()) as unknown as Task[]).map(task => this.hydrate(task));
+  }
+  private hydrate(task: Task): Task {
+    const conversation = this.db.prepare('SELECT data FROM task_conversations WHERE taskId=?').get(task.id) as { data: string } | undefined;
+    return { ...task, ...(conversation ? { conversation: JSON.parse(conversation.data) } : {}) };
+  }
+  saveConversation(id: string, conversation: Conversation): void {
+    this.db.prepare('INSERT INTO task_conversations VALUES (?,?) ON CONFLICT(taskId) DO UPDATE SET data=excluded.data').run(id, JSON.stringify(conversation));
+    const task = this.get(id)!;
+    for (const key of [conversation.anchorId, conversation.sourceId, conversation.threadId]) if (key) this.bindConversation(task.chatId, key, id);
+  }
+  bindConversation(chatId: string, key: string, taskId: string): void {
+    // A thread is permanently assigned to one task; never silently redirect old replies.
+    this.db.prepare('INSERT OR IGNORE INTO conversation_bindings VALUES (?,?,?)').run(chatId, key, taskId);
+  }
+  conversationTask(chatId: string, conversation?: Conversation): Task | undefined {
+    if (!conversation) return;
+    const tasks = new Set<string>();
+    for (const key of [conversation.anchorId, conversation.threadId, conversation.parentId]) {
+      if (!key) continue;
+      const row = this.db.prepare('SELECT taskId FROM conversation_bindings WHERE chatId=? AND messageKey=?').get(chatId, key) as { taskId: string } | undefined;
+      if (row) tasks.add(row.taskId);
+    }
+    return tasks.size === 1 ? this.get([...tasks][0]) : undefined;
+  }
+  saveContext(id: string, snapshot: ContextSnapshot): void {
+    this.db.prepare('INSERT INTO context_snapshots VALUES (?,?) ON CONFLICT(taskId) DO UPDATE SET data=excluded.data').run(id, JSON.stringify(snapshot));
+  }
+  context(id: string): ContextSnapshot | undefined {
+    const row = this.db.prepare('SELECT data FROM context_snapshots WHERE taskId=?').get(id) as { data: string } | undefined;
+    return row && JSON.parse(row.data);
   }
   set(id: string, status: Status, result?: string): void {
     // Monotonic revisions prevent a stale button matching a different turn in the same millisecond.
@@ -64,6 +100,7 @@ export class Store {
     this.event(id, status, result ?? '');
   }
   resume(id: string, prompt: string): void {
+    this.db.prepare('DELETE FROM context_snapshots WHERE taskId=?').run(id);
     this.db.prepare("UPDATE tasks SET prompt=?, result=NULL, nextAction='execute' WHERE id=?").run(prompt, id);
     const report = this.delivery(id);
     if (report) this.saveDelivery(id, { ...report, ready: false });
@@ -131,6 +168,7 @@ export class Store {
     });
   }
   enqueue(chatId: string, text: string, view?: View): void {
+    if (view && 'taskId' in view && !view.conversation) view = { ...view, conversation: this.get(view.taskId)?.conversation };
     if (view) {
       this.db.prepare('INSERT INTO outbox(id,chatId,text,view) VALUES (?,?,?,?)')
         .run(randomUUID(), chatId, text, JSON.stringify(view));
