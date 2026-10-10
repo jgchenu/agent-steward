@@ -17,6 +17,7 @@ export interface Attachment {
 }
 export type PermissionMode = 'ask' | 'auto' | 'full-access';
 export interface Task {
+  modelSelection?: import('./models.js').ModelSelection;
   permissionMode?: PermissionMode;
   id: string; chatId: string; project: string; prompt: string; status: Status;
   threadId: string | null; result: string | null; createdAt: string; updatedAt: string;
@@ -49,6 +50,8 @@ export interface DeliveryReport {
   ready: boolean; validationKey?: string; authorizedKey?: string; prUrl?: string; publishedSha?: string; targetBefore?: string; error?: string;
 }
 export interface Config {
+  modelSelection?: import('./models.js').ModelSelection;
+  consoleUrl?: string;
   codexProjects?: import('./codex-projects.js').CodexProject[];
   permissionMode?: PermissionMode;
   approvalsReviewer?: 'user' | 'auto_review';

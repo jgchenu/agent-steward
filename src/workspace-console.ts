@@ -1,3 +1,4 @@
+import { listCodexModels, modelSelection, validateSelection, type CodexModel, type ModelSelection } from './models.js';
 import { listCodexProjects, projectBindings, type CodexProject } from './codex-projects.js';
 import { permissionMode, PERMISSION_MODES } from './permissions.js';
 import { readPermissionRuntime } from './permission-runtime.js';
@@ -35,11 +36,13 @@ export class WorkspaceRegistry {
       return { id, codexProjectId: codex.id, label: codex.name, path, roots: codex.roots, available, gitRepository,
         aliases, mode: project?.sandbox ?? 'none', baseRef: project?.worktree?.baseRef };
     });
-    return { revision: digest(text + JSON.stringify(catalog)), projects, permissionMode: permissionMode(raw),
+    return { modelSelection:modelSelection(raw.modelSelection), revision: digest(text + JSON.stringify(catalog)), projects, permissionMode: permissionMode(raw),
       runtime: readPermissionRuntime(resolve(dirname(this.file), raw.stateDir ?? '.steward')) };
   }
-  apply(input: { revision: string; grants: Array<{id: string; mode: string; aliases?: string[]}>; permissionMode?: PermissionMode; confirmFullAccess?: boolean }) {
+  apply(input: { revision: string; grants: Array<{id: string; mode: string; aliases?: string[]}>; permissionMode?: PermissionMode; confirmFullAccess?: boolean; modelSelection?: ModelSelection }, models: CodexModel[] = []) {
     const state = this.state();
+    const selected = modelSelection(input.modelSelection);
+    if (selected && JSON.stringify(selected) !== JSON.stringify(state.modelSelection)) validateSelection(selected, models);
     if (input.revision !== state.revision) throw Error('Codex 项目或配置已变化，请刷新后再保存。');
     if (!Array.isArray(input.grants) || input.grants.length !== state.projects.length) throw Error('项目清单不完整，请刷新。');
     if (input.permissionMode !== undefined && !PERMISSION_MODES.includes(input.permissionMode)) throw Error('审批模式无效。');
@@ -61,7 +64,7 @@ export class WorkspaceRegistry {
       }
       projects[grant.id] = p;
     }
-    const next = {...raw, ...(input.permissionMode ? {permissionMode:input.permissionMode} : {}), projects, projectPreferences:preferences};
+    const next = {...raw, ...(selected ? {modelSelection:selected} : {}), ...(input.permissionMode ? {permissionMode:input.permissionMode} : {}), projects, projectPreferences:preferences};
     delete next.defaultProject;
     const temp = this.file + '.' + randomUUID() + '.tmp';
     try {
@@ -72,7 +75,7 @@ export class WorkspaceRegistry {
     return this.state();
   }
 }
-export async function startWorkspaceConsole(file: string, port = 0, discover?: () => Promise<CodexProject[]>) {
+export async function startWorkspaceConsole(file: string, port = 0, discover?: () => Promise<CodexProject[]>, discoverModels?: () => Promise<CodexModel[]>) {
   const command = JSON.parse(readFileSync(file,'utf8')).codexCommand ?? 'codex';
   const read = discover ?? (() => listCodexProjects(command, dirname(resolve(file))));
   let catalog: CodexProject[] = [], updatedAt = 0, inflight: Promise<void> | undefined;
@@ -95,11 +98,14 @@ export async function startWorkspaceConsole(file: string, port = 0, discover?: (
     }
     if (req.headers['x-steward-console'] !== token || (req.method !== 'GET' && req.headers.origin !== origin)) { send(403, {error: '请从本机授权页面操作。'}); return; }
     try {
+      if (req.method === 'GET' && req.url === '/api/models') { send(200, await (discoverModels ?? (() => listCodexModels(command, dirname(resolve(file)))))()); return; }
       if (req.method === 'GET' && req.url === '/api/state') { await refresh(); send(200, registry.state()); return; }
       if (req.method !== 'POST' || req.headers['content-type'] !== 'application/json') { send(405, {error:'不支持的请求。'}); return; }
       let body = ''; for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 64_000) throw Error('请求过大。'); }
       const data = JSON.parse(body);
-      if (req.url === '/api/grants') { await refresh(true); send(200, registry.apply(data)); }
+      if (req.url === '/api/grants') { await refresh(true); const changed = data.modelSelection && JSON.stringify(data.modelSelection) !== JSON.stringify(registry.state().modelSelection);
+        const models = changed ? await (discoverModels ?? (() => listCodexModels(command,dirname(resolve(file)))))() : [];
+        send(200, registry.apply(data,models)); }
       else send(404, {error:'未找到。'});
     } catch (e) { send(400, {error:e instanceof Error ? e.message : '保存失败。'}); }
   });

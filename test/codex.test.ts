@@ -13,7 +13,7 @@ class FakeRpc implements RpcPort {
   onTurn: () => void = () => {};
   async initialize() { this.calls.push('initialize'); }
   async subscription() { this.calls.push('subscription'); }
-  async request(method: string, params: unknown) {
+  async request(method: string, params: unknown): Promise<any> {
     this.calls.push(method); this.params[method] = params;
     if (method === 'thread/start' || method === 'thread/resume') return { thread: { id: 'thread' } };
     if (method === 'turn/start') queueMicrotask(this.onTurn);
@@ -208,4 +208,15 @@ test('conversation execution cannot inherit full access and new code threads kee
  assert.equal(rpc.params['thread/start'].sandbox,'read-only');assert.equal(rpc.params['thread/start'].approvalPolicy,'never');assert.equal(rpc.params['thread/start'].projectId,null);
  assert.match(rpc.params['thread/start'].developerInstructions,/conversation without a code project/);
  const code=new FakeRpc(),cs=setup(code);code.onTurn=()=>code.finish();await cs.executor.run(task,{path:'.',sandbox:'read-only',codexProjectId:'codex-project'},cs.hooks,AbortSignal.timeout(5000));assert.equal(code.params['thread/start'].projectId,'codex-project');
+});
+
+test('explicit model and effort are applied to new and resumed turns; unavailable combinations stop before inference',async()=>{
+ for(const threadId of [null,'thread']){
+  const rpc=new FakeRpc(),request=rpc.request.bind(rpc);
+  rpc.request=async(method,params)=>method==='model/list'?{data:[{model:'model-a',displayName:'A',defaultReasoningEffort:'low',supportedReasoningEfforts:[{reasoningEffort:'low'},{reasoningEffort:'high'}]}]}:request(method,params);
+  rpc.onTurn=()=>rpc.finish();await setup(rpc).run({...task,threadId,modelSelection:{model:'model-a',effort:'high'}});
+  assert.equal(rpc.params[threadId?'thread/resume':'thread/start'].model,'model-a');assert.equal(rpc.params['turn/start'].model,'model-a');assert.equal(rpc.params['turn/start'].effort,'high');
+ }
+ const rpc=new FakeRpc();rpc.request=async()=>({data:[]});
+ await assert.rejects(setup(rpc).run({...task,modelSelection:{model:'gone',effort:'high'}}),/不可用/);assert.ok(!rpc.calls.includes('turn/start'));
 });

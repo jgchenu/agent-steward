@@ -1,3 +1,5 @@
+import { startWorkspaceConsole } from './workspace-console.js';
+import { CONSOLE_PORT } from './console-entry.js';
 import { listCodexProjects, pinCodexGrants, type CodexProject } from './codex-projects.js';
 import { conversationProject } from './conversation.js';
 import { writePermissionRuntime, clearPermissionRuntime } from './permission-runtime.js';
@@ -48,6 +50,8 @@ async function main(): Promise<void> {
       config = loadConfig(undefined,catalog);
     } catch (error) { release(); throw error; }
   }
+  const consoleApp = mode === 'feishu' ? await startWorkspaceConsole(process.env.STEWARD_CONFIG ?? 'steward.config.json',CONSOLE_PORT).catch(error => { release(); throw error; }) : undefined;
+  if (consoleApp) {config.consoleUrl=consoleApp.url;console.log(`分身控制台：${consoleApp.url}（可收藏；仅本机可用）`);}
   const store = new Store(join(config.stateDir, 'steward.sqlite'));
   let feishu: FeishuChannel | undefined;
   let channel: Channel = { send: async (_chatId, text) => { console.log(`\n${text}\n`); } };
@@ -81,7 +85,7 @@ async function main(): Promise<void> {
   }, 10_000);
   const shutdown = async () => {
     if (closing) return; closing = true;
-    clearInterval(configTimer); clearInterval(catalogTimer); feishu?.close();
+    clearInterval(configTimer); clearInterval(catalogTimer); feishu?.close(); consoleApp?.server.close();
     await engine.stop(); clearPermissionRuntime(config.stateDir); store.close(); release(); process.exit(0);
   };
   process.on('SIGINT', () => void shutdown()); process.on('SIGTERM', () => void shutdown());
