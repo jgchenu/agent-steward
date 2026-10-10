@@ -64,11 +64,11 @@ test('ordinary questions and answers use thread prose while permission decisions
 });
 
 test('complete Markdown answers become bounded thread posts and partial delivery retries do not duplicate earlier chunks',async()=>{
- const store=new Store(':memory:'),config=cfg(),channel=new FeishuChannel('fake','fake',store,config);const sent:any[]=[];let failed=false;
- (channel as any).client={im:{message:{reply:async(p:any)=>{if(sent.length===1&&!failed){failed=true;throw Error('network')}sent.push(p);return{code:0,data:{message_id:'post'+sent.length,thread_id:'topic'}}},patch:async()=>{throw Error('post must not patch card')}}}};
+ const store=new Store(':memory:'),config=cfg(),channel=new FeishuChannel('fake','fake',store,config);const sent:any[]=[];const attempts:any[]=[];let failed=false;
+ (channel as any).client={im:{message:{reply:async(p:any)=>{assert.ok(p.data.uuid.length<=50,'Feishu uuid max length is 50');attempts.push(p);if(sent.length===1&&!failed){failed=true;throw Error('network')}sent.push(p);return{code:0,data:{message_id:'post'+sent.length,thread_id:'topic'}}},patch:async()=>{throw Error('post must not patch card')}}}};
  try{const m=incoming('分析一下'),task=store.create('group','general','分析一下','read-only',m.conversation);const text='**完整回答**\n'+ '这是完整内容，不需要点击查看全文。😀'.repeat(2000)+'\n<at user_id="all">全体</at>';
  const view:View={kind:'reply',taskId:task.id};await assert.rejects(channel.send('group',text,'delivery',view),/network/);await channel.send('group',text,'delivery',view);
- assert.ok(sent.length>1);assert.equal(new Set(sent.map(p=>p.data.uuid)).size,sent.length);
+ assert.equal(attempts[1].data.uuid,attempts[2].data.uuid);assert.ok(sent.length>1);assert.equal(new Set(sent.map(p=>p.data.uuid)).size,sent.length);
  const all=sent.map(p=>{assert.equal(p.data.msg_type,'post');assert.equal(p.data.reply_in_thread,true);assert.equal(p.path.message_id,m.conversation!.anchorId);assert.ok(Buffer.byteLength(p.data.content)<12500);return JSON.parse(p.data.content).zh_cn.content[0][0].text}).join('');
  assert.equal(all,text.replace(/</g,'&lt;').replace(/>/g,'&gt;'));assert.equal(store.conversationTask('group',{...m.conversation!,anchorId:'unknown',parentId:'post1'})!.id,task.id);
  }finally{channel.close();store.close()}
