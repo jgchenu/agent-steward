@@ -1,12 +1,14 @@
+import { baselinePreview, restartAtBaseline, validBaseRef } from './baseline.js';
 import { namedProjects, projectChoices } from './routing.js';
 import { Store } from './store.js';
 import { canPublish, publicationKey } from './workspace.js';
-import type { CardAction, Channel, Config, ContextSnapshot, Executor, HumanRequest, Incoming, Status, Task, View } from './types.js';
+import type { CardAction, Channel, Config, ContextSnapshot, Executor, HumanRequest, Incoming, RunHooks, Status, Task, View } from './types.js';
 
 const HELP = `Agent Steward · 个人 Agent 分身（预览版）
 /projects — 可用项目
 /new <项目> <任务要求> — 只读分析
 /edit <项目> <任务要求> — 在独立目录修改并验证
+/baseline <任务ID> — 选择代码版本并从新副本继续
 /publish <任务ID> — 预览草稿 PR 交付
 /list 或 /status <任务ID> — 查进度
 /cancel <任务ID> — 取消执行（不会回滚已有改动）
@@ -43,7 +45,7 @@ export class Engine {
     if (this.stopped || message.senderId !== this.config.ownerId || message.senderType !== 'user') return;
     const bound = message.chatType === 'group' ? this.store.conversationTask(message.chatId, message.conversation) : undefined;
     const pendingInput = bound && this.store.requests(bound.id);
-    const answering = pendingInput?.length === 1 && pendingInput[0].kind === 'input';
+    const answering = pendingInput?.length === 1 && pendingInput[0].kind === 'input' && !this.pending.get(pendingInput[0].id)?.explicit;
     const replying = bound && this.store.isOwnMessage(message.chatId, message.conversation?.parentId);
     if (message.chatType === 'group' && (!this.config.groupChats || !message.conversation
       || (!message.botMentioned && (message.mentionsOthers || (!replying && !answering))))) return;
@@ -66,11 +68,14 @@ export class Engine {
       let command = match?.[1] ?? '/new';
       let args = match?.[2]?.trim() ?? '';
       const navigation = ['首页', '工作台', '帮助'].includes(text);
+      if (!match && bound && /^(更新代码版本|更换代码版本|更新任务基线)$/.test(text)) {
+        reply('选择从哪个代码版本继续。原副本会保留。', { kind: 'baseline', taskId: bound.id, fresh: true }); return;
+      }
       if (!match && !navigation && bound) {
         const pending = this.store.requests(bound.id);
-        if (pending.length === 1 && pending[0].kind === 'input') { command = '/answer'; args = `${pending[0].id} ${text}`; }
+        if (pending.length === 1 && pending[0].kind === 'input' && !this.pending.get(pending[0].id)?.explicit) { command = '/answer'; args = `${pending[0].id} ${text}`; }
         else if (['queued', 'running', 'waiting_input', 'waiting_approval'].includes(bound.status)) {
-          reply(bound.status === 'waiting_approval' ? '这一步需要你确认具体操作，我在等你的决定。' : '我还在处理前面的内容，完成后会在这里回复你。', { kind: bound.status === 'waiting_approval' ? 'task' : 'reply', taskId: bound.id }); return;
+          reply(bound.status === 'waiting_approval' ? '这一步需要你确认具体操作，我在等你的决定。' : bound.status === 'waiting_input' ? '这一步需要你通过卡片明确提交回答，普通聊天不会回答工具权限请求。' : '我还在处理前面的内容，完成后会在这里回复你。', { kind: ['waiting_approval','waiting_input'].includes(bound.status) ? 'task' : 'reply', taskId: bound.id }); return;
         } else {
           const choices = namedProjects(this.config, text);
           if (choices.length > 1) {
@@ -145,6 +150,15 @@ export class Engine {
       const task = this.store.get(id);
       if (!task || task.chatId !== message.chatId || (message.conversation && task.conversation?.anchorId !== message.conversation.anchorId)) { reply('任务不存在，请重新选择。', { kind: 'home' }); return; }
       if (bound && bound.id !== task.id && !['/status'].includes(command)) { reply('这个话题已转到另一个项目，请直接在话题里说明当前需求。'); return; }
+      if (command === '/baseline' || command === '/restart') {
+        if (this.active?.task.id === id || !['review','completed','failed','cancelled','interrupted'].includes(task.status)) { reply('请等任务结束或停止后再更换版本。'); return; }
+        if (!this.store.workspace(id) || !this.config.projects[task.project]?.worktree) { reply('这个任务没有 Git 工作副本。'); return; }
+        if (command === '/baseline') { reply('选择从哪个代码版本继续。', { kind: 'baseline', taskId: id, fresh: true }); return; }
+        if (!validBaseRef(body)) { reply('请填写明确的 Git 分支或提交 SHA。'); return; }
+        this.store.queueBaseline(id, body);
+        if (message.conversation) this.store.saveConversation(id, message.conversation);
+        return;
+      }
       if (command === '/publish') { reply('请先查看交付预览，再明确创建草稿 PR。', { kind: 'publication', taskId: id, fresh: true }); return; }
       if (command === '/status') {
         const requests = this.store.requests(id).map(r => `待处理请求：${r.id} · ${r.kind}`).join('\n');
@@ -188,7 +202,7 @@ export class Engine {
     if (i.op === 'new' && i.conversation && this.store.conversationTask(action.chatId, i.conversation)) return fail('此话题已绑定任务，请继续原任务；新任务请另起话题。');
     if (i.taskId && (!task || task.chatId !== action.chatId)) return fail('任务不属于当前会话。');
     const current = i.conversation && this.store.conversationTask(action.chatId, i.conversation);
-    if (task && current && task.id !== current.id && ['dispatch','continue','done','cancel','approve','deny','answer','publish'].includes(i.op)) return fail('话题已转到另一个项目，旧操作已失效。');
+    if (task && current && task.id !== current.id && ['dispatch','continue','done','cancel','approve','deny','answer','publish','restart'].includes(i.op)) return fail('话题已转到另一个项目，旧操作已失效。');
     if (i.op === 'dispatch') {
       const p = i.project && this.config.projects[i.project];
       if (!p || !i.prompt || !i.selectionKey || i.prompt.length > 16000) return fail('该项目已撤销授权，请重新派活。');
@@ -200,10 +214,10 @@ export class Engine {
         text: `${p.naturalMode === 'workspace-write' ? '/edit' : '/new'} ${i.project} ${i.prompt}` }, action.actionId);
       return { toast: { type: 'success', content: '收到，开始处理。' } };
     }
-    const mutating = ['new', 'continue', 'done', 'cancel', 'approve', 'deny', 'answer', 'publish'].includes(i.op);
+    const mutating = ['new', 'continue', 'done', 'cancel', 'approve', 'deny', 'answer', 'publish', 'restart'].includes(i.op);
     if (mutating && task && i.revision !== task.updatedAt) return fail('任务状态已变化，请刷新后再操作。');
     const body = typeof action.fields.body === 'string' ? action.fields.body.trim() : '';
-    if (['new', 'continue', 'answer'].includes(i.op) && (!body || body.length > 1000)) return fail('请填写 1–1000 字的内容。');
+    if (['new', 'continue', 'answer', 'restart'].includes(i.op) && (!body || body.length > 1000)) return fail('请填写 1–1000 字的内容。');
     if (i.op === 'new' && (typeof action.fields.project !== 'string' || !Object.hasOwn(this.config.projects, action.fields.project))) {
       return fail('请选择已配置的项目。');
     }
@@ -228,7 +242,7 @@ export class Engine {
       return { toast: { type: 'success', content: '已排队准备草稿 PR，不会自动合并。' } };
     }
     if (i.op === 'done' && task?.status !== 'review') return fail('该任务当前不需要验收。');
-    if (['continue', 'followup'].includes(i.op) && (this.active?.task.id === task?.id ||
+    if (['continue', 'followup', 'baseline', 'restart'].includes(i.op) && (this.active?.task.id === task?.id ||
       !['review', 'completed', 'failed', 'cancelled', 'interrupted'].includes(task?.status ?? ''))) return fail('请等当前执行结束后继续。');
     if (i.op === 'cancel' && !['queued', 'running', 'waiting_input', 'waiting_approval'].includes(task?.status ?? '')) return fail('任务已经停止。');
     if (['approve', 'deny', 'answer'].includes(i.op)) {
@@ -242,6 +256,7 @@ export class Engine {
       home: { kind: 'home' }, list: { kind: 'list', page: i.page },
       status: { kind: 'task', taskId: i.taskId! }, result: { kind: 'result', taskId: i.taskId!, page: i.page },
       followup: { kind: 'followup', taskId: i.taskId! },
+      baseline: { kind: 'baseline', taskId: i.taskId! },
       delivery: { kind: 'delivery', taskId: i.taskId! }, publication: { kind: 'publication', taskId: i.taskId! },
     };
     const view = views[i.op];
@@ -285,6 +300,41 @@ export class Engine {
     try {
       const project = this.config.projects[task.project];
       if (!project) throw new Error('项目配置已移除。');
+      const hooks: RunHooks = {
+        thread: id => this.store.thread(task.id, id),
+        progress: text => this.store.event(task.id, 'progress', text.slice(0, 8000)),
+        request: req => {
+          if (abort.signal.aborted) throw new Error('任务已停止');
+          const id = this.store.request(task.id, req.kind, req.description);
+          this.pending.set(id, req); this.updateWaiting(task.id);
+          if (task.conversation && req.kind === 'input' && !req.explicit) this.store.enqueue(task.chatId, req.description, { kind: 'reply', taskId: task.id });
+          else this.store.enqueue(task.chatId, `任务 ${task.id} 需要你处理 · 请求 ${id}\n${req.description}\n`
+            + (req.kind === 'approval' ? `/approve ${id} 或 /deny ${id}` : `/answer ${id} <回答>`), { kind: 'task', taskId: task.id });
+          return id;
+        },
+        resolved: id => {
+          if (!this.pending.has(id)) return;
+          this.pending.delete(id); this.store.resolveRequest(id, 'expired');
+          if (!abort.signal.aborted) this.updateWaiting(task.id);
+        },
+      };
+      if (task.nextAction === 'baseline') {
+        const preview = await baselinePreview(this.store, task, project, task.baselineRef ?? '', abort.signal);
+        const accepted = await new Promise<boolean>((resolve, reject) => {
+          const cancelled = () => reject(abort.signal.reason ?? Error('已取消'));
+          abort.signal.addEventListener('abort', cancelled, { once: true });
+          hooks.request({ kind: 'approval', description: preview.description, resolve: answer => {
+            abort.signal.removeEventListener('abort', cancelled); resolve(answer === 'accept');
+          } });
+        });
+        abort.signal.throwIfAborted();
+        if (accepted) await restartAtBaseline(this.store, this.config, task, preview, abort.signal);
+        else {
+          this.store.set(task.id, 'review');
+          this.store.enqueue(task.chatId, '未更换代码版本，原任务和文件保持原样。', { kind: task.conversation ? 'reply' : 'task', taskId: task.id });
+        }
+        return;
+      }
       if (task.conversation && task.nextAction !== 'publish' && this.channel.acknowledge) {
         try { await this.channel.acknowledge(task, abort.signal); }
         catch {
@@ -305,24 +355,7 @@ export class Engine {
       }
       executionTask = { ...executionTask, routingContext: JSON.stringify({ currentProject: project.label ?? task.project,
         availableProjects: Object.entries(this.config.projects).map(([id,p]) => ({ name:p.label ?? id, aliases:p.aliases ?? [], capability:p.sandbox })) }) };
-      const result = await this.executor.run(executionTask, project, {
-        thread: id => this.store.thread(task.id, id),
-        progress: text => this.store.event(task.id, 'progress', text.slice(0, 8000)),
-        request: req => {
-          if (abort.signal.aborted) throw new Error('任务已停止');
-          const id = this.store.request(task.id, req.kind, req.description);
-          this.pending.set(id, req); this.updateWaiting(task.id);
-          if (task.conversation && req.kind === 'input') this.store.enqueue(task.chatId, req.description, { kind: 'reply', taskId: task.id });
-          else this.store.enqueue(task.chatId, `任务 ${task.id} 需要你处理 · 请求 ${id}\n${req.description}\n`
-            + (req.kind === 'approval' ? `/approve ${id} 或 /deny ${id}` : `/answer ${id} <回答>`), { kind: 'task', taskId: task.id });
-          return id;
-        },
-        resolved: id => {
-          if (!this.pending.has(id)) return;
-          this.pending.delete(id); this.store.resolveRequest(id, 'expired');
-          if (!abort.signal.aborted) this.updateWaiting(task.id);
-        },
-      }, abort.signal);
+      const result = await this.executor.run(executionTask, project, hooks, abort.signal);
       if (abort.signal.aborted) throw abort.signal.reason;
       this.store.set(task.id, 'review', result);
       const report = this.store.delivery(task.id);

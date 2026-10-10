@@ -141,6 +141,16 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
       ...(actions.length ? [row(...actions)] : []), row(...nav),
     ]);
   }
+  if (view.kind === 'baseline') {
+    const workspace = store.workspace(task.id);
+    if (!workspace) return card('没有 Git 工作副本', projectLabel(task.project), 'grey', [button('返回任务', intent('status'))]);
+    return card('从哪个代码版本继续？', projectLabel(task.project), 'blue', [
+      text(`当前代码：${workspace.baseRef} @ ${workspace.baseSha.slice(0,12)}`),
+      text('填写明确的分支或提交 SHA。下一步会展示完整提交和旧副本改动数量，由你确认后创建新副本；旧文件保留，不自动复制。'),
+      form('查看版本并确认', intent('restart'), [input('分支或提交 SHA', '例如 origin/main，或指定的提交 SHA')]),
+      button('返回任务', intent('status')),
+    ]);
+  }
   if (view.kind === 'followup') return card('继续这项任务', `${projectLabel(task.project)} · ${task.id}`, 'blue', [box(task.prompt),
     form('提交后续要求', intent('continue'), [input('希望调整什么', '说明需要补充、修改或继续的内容')]),
     button('返回任务', intent('status'))]);
@@ -164,7 +174,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : label, `${projectLabel(task.project)} · ${modeLabel}`, color, [stateBox(task.prompt, task.status), detail,
       ...(req.kind === 'approval' ? [row(...(fits ? [button('允许本次', action('approve'), true,
         '仅允许上方展示的本次操作，不授予后续操作权限。')] : []), button('拒绝', action('deny')))]
-        : [form('提交回答', action('answer'), [input('你的回答', '填写回答；多个问题请按问题 ID 填写 JSON')])]),
+        : [form('提交回答', action('answer'), [input('你的回答', '填写回答；多个问题请按问题 ID 填写 JSON')]), button('停止任务', intent('cancel'))]),
       caption('操作仅对当前请求有效。处理后会显示下一步。'),
     ]);
   }
@@ -173,6 +183,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   if (['queued', 'running', 'waiting_input', 'waiting_approval'].includes(task.status)) {
     actions.push(button('刷新进度', intent('status'), true), button('停止执行', intent('cancel'), false, '停止后会保留已有改动，不会自动回滚。'));
   } else actions.push(button('继续修改', intent('followup'), actions.length === 0));
+  if (store.workspace(task.id) && ['review','completed','failed','cancelled','interrupted'].includes(task.status)) actions.push(button('更换代码版本', intent('baseline')));
   actions.push(button('查看全文', intent('result')));
   return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : label, `${projectLabel(task.project)} · ${modeLabel}`, color, [stateBox(task.prompt, task.status),
     text((task.result ?? store.latestProgress(task.id)) || (task.status === 'queued' ? '正在排队，轮到后自动开始。' : '任务已开始，结果会更新在这里。'), 4),

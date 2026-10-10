@@ -30,12 +30,13 @@ export class Store {
     const taskColumns = this.db.prepare('PRAGMA table_info(tasks)').all() as Array<{ name: string }>;
     if (!taskColumns.some(c => c.name === 'mode')) this.db.exec("ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'read-only'");
     if (!taskColumns.some(c => c.name === 'nextAction')) this.db.exec("ALTER TABLE tasks ADD COLUMN nextAction TEXT NOT NULL DEFAULT 'execute'");
+    if (!taskColumns.some(c => c.name === 'baselineRef')) this.db.exec('ALTER TABLE tasks ADD COLUMN baselineRef TEXT');
     this.db.exec(`CREATE TABLE IF NOT EXISTS workspaces (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS deliveries (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS task_conversations (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS context_snapshots (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS conversation_bindings (chatId TEXT NOT NULL, messageKey TEXT NOT NULL, taskId TEXT NOT NULL, PRIMARY KEY(chatId,messageKey));
-      PRAGMA user_version=4;`);
+      PRAGMA user_version=5;`);
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -124,6 +125,10 @@ export class Store {
     if (report) this.saveDelivery(id, { ...report, ready: false });
     this.set(id, 'queued');
     this.event(id, 'followup', prompt);
+  }
+  queueBaseline(id: string, ref: string): void {
+    this.db.prepare("UPDATE tasks SET nextAction='baseline', baselineRef=? WHERE id=?").run(ref, id);
+    this.set(id, 'queued');
   }
   queuePublication(id: string): void {
     this.db.prepare("UPDATE tasks SET nextAction='publish' WHERE id=?").run(id);

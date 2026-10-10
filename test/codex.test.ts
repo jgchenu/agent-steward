@@ -122,3 +122,40 @@ test('PDF pages and sampled video frames keep source/time labels in model input;
   assert.equal(input.length,5);assert.match(input[1].text,/pdf.*第 2 页/);assert.equal(input[2].path,'/private/page.png');
   assert.match(input[3].text,/video.*1.00 秒/);assert.equal(input[4].type,'localImage');assert.match(input[0].text,/speech/);assert.ok(!input[0].text.includes('/private/'));
 });
+
+test('MCP browser confirmation waits for owner, responds once and never persists approval', async () => {
+  const rpc = new FakeRpc(), requests: HumanRequest[] = [], s = setup(rpc, requests);
+  rpc.onTurn = () => {
+    rpc.emit('mcpServer/elicitation/request', { serverName: 'browser', mode: 'form', message: 'Read https://example.test in connected Chrome?',
+      requestedSchema: { type: 'object', properties: {} }, _meta: { persist: ['session','always'] } }, 51);
+    assert.equal(requests[0].kind, 'approval'); assert.equal(rpc.writes.length, 0);
+    assert.match(requests[0].description, /example.test/);
+    requests[0].resolve('accept'); requests[0].resolve('accept'); rpc.finish();
+  };
+  await s.run(); assert.deepEqual(rpc.writes, [{ id: 51, result: { action: 'accept', content: {}, _meta: null } }]);
+});
+test('MCP denial and server expiry do not become acceptance; unknown URL or sensitive schemas cancel', async () => {
+  const rpc = new FakeRpc(), requests: HumanRequest[] = [], s = setup(rpc, requests);
+  const form = { serverName: 'browser', mode: 'form', message: 'Allow access?', requestedSchema: { type: 'object', properties: {} } };
+  rpc.onTurn = () => {
+    rpc.emit('mcpServer/elicitation/request', form, 1); requests[0].resolve('decline');
+    rpc.emit('mcpServer/elicitation/request', form, 2);
+    rpc.emit('serverRequest/resolved', { requestId: 2 }); requests[1].resolve('accept');
+    rpc.emit('mcpServer/elicitation/request', { ...form, mode: 'url', url: 'https://example.test/oauth' }, 3);
+    rpc.emit('mcpServer/elicitation/request', { ...form, requestedSchema: { type: 'object', properties: { password: { type: 'string' } } } }, 4);
+    rpc.finish();
+  };
+  await s.run(); assert.equal(requests.length, 2); assert.deepEqual(rpc.writes.map(w=>w.result.action), ['decline','cancel','cancel']);
+});
+test('structured MCP forms require explicit validated JSON and do not inherit default answers', async () => {
+  const rpc = new FakeRpc(), requests: HumanRequest[] = [], s = setup(rpc, requests);
+  rpc.onTurn = () => {
+    rpc.emit('mcpServer/elicitation/request', { serverName: 'test', mode: 'form', message: 'Select access', requestedSchema: {
+      type: 'object', properties: { scope: { type: 'string', enum: ['once','deny'] } }, required: ['scope'] } }, 9);
+    assert.equal(requests[0].explicit, true);
+    assert.throws(()=>requests[0].validate!('yes')); assert.throws(()=>requests[0].validate!('{"scope":"always"}'));
+    assert.throws(()=>requests[0].validate!('{"scope":"once","extra":true}'));
+    requests[0].validate!('{"scope":"once"}'); requests[0].resolve('{"scope":"once"}'); rpc.finish();
+  };
+  await s.run(); assert.deepEqual(rpc.writes[0].result,{action:'accept',content:{scope:'once'},_meta:null});
+});

@@ -29,7 +29,7 @@ export async function prepareWorkspace(store: Store, stateDir: string, task: Tas
   const path = join(realpathSync(root), task.id), branch = `steward/${task.id}`;
   if (workspace) {
     if (workspace.source !== source || workspace.path !== path || workspace.branch !== branch
-      || workspace.baseRef !== project.worktree.baseRef) throw new Error('任务项目配置已变化；请恢复原配置或创建新任务。');
+      || (workspace.configBaseRef ?? workspace.baseRef) !== project.worktree.baseRef) throw new Error('任务项目配置已变化；请恢复原配置或创建新任务。');
     if (existsSync(path)) { await verifyWorkspace(workspace, signal); return workspace; }
     if (task.threadId) throw new Error('已有会话的工作目录丢失，不会重建空目录后继续。');
   } else {
@@ -86,6 +86,7 @@ export function publicationText(task: Task, report: DeliveryReport): { title: st
 export const validationKey = (project: Project) => createHash('sha256').update(JSON.stringify(project.worktree?.checks ?? [])).digest('hex');
 export function canPublish(task: Task, project: Project | undefined, report: DeliveryReport | undefined): boolean {
   return task.mode === 'workspace-write' && project?.sandbox === 'workspace-write' && !!project.worktree?.github && !!report?.ready
+    && report.workspace.baseRef === `origin/${project.worktree!.github!.baseBranch}`
     && report.validationKey === validationKey(project!) && report.files.length > 0 && report.checks.length > 0 && report.checks.every(c => c.status === 'passed');
 }
 
@@ -168,7 +169,7 @@ export class WorkspaceExecutor implements Executor {
       ...(previous?.prUrl ? { prUrl: previous.prUrl, publishedSha: previous.publishedSha } : {}) };
     this.store.saveDelivery(task.id, report);
     try {
-      const result = await this.inner.run(task, { ...project, path: workspace.path, sandbox: mode }, hooks, signal);
+      const result = await this.inner.run({ ...task, codeVersion: { ref: workspace.baseRef, baseSha: workspace.baseSha, headSha: initial.headSha } }, { ...project, path: workspace.path, sandbox: mode }, hooks, signal);
       signal.throwIfAborted();
       report = { ...report, ...await inventory(workspace, signal), capturedAt: new Date().toISOString() };
       this.store.saveDelivery(task.id, report);
