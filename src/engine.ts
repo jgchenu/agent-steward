@@ -3,7 +3,7 @@ import { CONVERSATION, conversationProject } from './conversation.js';
 import { permissionMode, permissionRank } from './permissions.js';
 import { codeSourceReceipt, codeSourceDetails, codeSourceChanged, deliveryFooter } from './code-source.js';
 import { baselinePreview, restartAtBaseline, validBaseRef } from './baseline.js';
-import { namedProjects, projectChoices, requiresProject, ungrantedNames } from './routing.js';
+import { namedProjects, projectChoices, requiresProject, ungrantedNames, projectAnswer, projectGrantKey } from './routing.js';
 import { Store } from './store.js';
 import { canPublish, publicationKey } from './workspace.js';
 import { mergeIntent, mergePullRequest } from './merge.js';
@@ -36,6 +36,10 @@ export class Engine {
 
   updateProjects(next: Pick<Config, 'projects' | 'defaultProject' | 'codexProjects'> & Partial<Pick<Config, 'permissionMode' | 'approvalsReviewer' | 'modelSelection'>>): void {
     const previous = this.config.projects;
+    for (const task of this.store.list()) {
+      const selection = this.store.projectSelection(task.id);
+      if (selection && (!next.projects[selection.project] || projectGrantKey(next.projects[selection.project]) !== selection.grantKey)) this.store.clearProjectSelection(task.id);
+    }
     if ('modelSelection' in next) this.config.modelSelection = next.modelSelection;
     if ('permissionMode' in next || 'approvalsReviewer' in next) {
       const mode = permissionMode(next);
@@ -63,10 +67,12 @@ export class Engine {
     if (this.stopped || message.senderId !== this.config.ownerId || message.senderType !== 'user') return;
     const bound = message.chatType === 'group' ? this.store.conversationTask(message.chatId, message.conversation) : undefined;
     const pendingInput = bound && this.store.requests(bound.id);
+    const projectSelection = bound && this.store.projectSelection(bound.id);
+    const answeringProject = !!projectSelection && !!projectAnswer(message.text);
     const answering = pendingInput?.length === 1 && pendingInput[0].kind === 'input' && !this.pending.get(pendingInput[0].id)?.explicit;
     const replying = bound && this.store.isOwnMessage(message.chatId, message.conversation?.parentId);
     if (message.chatType === 'group' && (!this.config.groupChats || !message.conversation
-      || (!message.botMentioned && (message.mentionsOthers || (!replying && !answering))))) return;
+      || (!message.botMentioned && (message.mentionsOthers || (!replying && !answering && !answeringProject))))) return;
     if (bound?.conversation && message.conversation) message = { ...message, conversation: {
       ...message.conversation, anchorId: bound.conversation.anchorId, scope: 'thread',
     } };
@@ -99,6 +105,22 @@ export class Engine {
         reply('选择从哪个代码版本继续。原副本会保留。', { kind: 'baseline', taskId: bound.id, fresh: true }); return;
       }
       if (!match && !navigation && ungrantedNames(this.config, text).length) { reply('这个 Codex 项目还未授权给分身，请先在本机控制台授权：' + ungrantedNames(this.config, text).join('、')); return; }
+      if (!match && !navigation && bound && projectSelection && projectAnswer(text)) {
+        if (this.active?.task.id === bound.id || bound.status !== 'review' || bound.project !== CONVERSATION
+          || this.store.requests(bound.id).length) { reply('当前执行尚未结束，请稍后回答项目选择。'); return; }
+        this.store.clearProjectSelection(bound.id);
+        if (projectAnswer(text) === 'no') { reply('已取消这次项目选择。请告诉我应使用哪个项目，或补充需求。'); return; }
+        const selected = this.config.projects[projectSelection.project];
+        if (projectSelection.revision !== bound.updatedAt || !selected || projectGrantKey(selected) !== projectSelection.grantKey) {
+          reply('项目授权或任务已变化，旧项目选择已失效。请明确要使用的项目。'); return;
+        }
+        const mode = selected.naturalMode ?? 'read-only';
+        if (mode === 'workspace-write' && (selected.sandbox !== mode || !selected.worktree)) { reply('该项目当前没有可用的修改工作区，请在控制台检查授权。'); return; }
+        const prompt = `本话题的需求与补充：\n${this.store.ownerRequirements(bound.id)}\n\n主人已确认项目：${selected.label ?? projectSelection.project}\n主人本次回答：${text}`;
+        const next = this.store.handoff(bound, projectSelection.project, prompt, mode, message.conversation!);
+        this.store.event(next.id, 'project_confirmed', JSON.stringify({fromTaskId:bound.id,project:projectSelection.project,messageId:message.id}));
+        reply(`已确认 ${selected.label ?? projectSelection.project}，正在分配工作区并继续处理。`, {kind:'reply',taskId:next.id}); return;
+      }
       if (!match && !navigation && bound) {
         const pending = this.store.requests(bound.id);
         if (pending.length === 1 && pending[0].kind === 'input' && !this.pending.get(pending[0].id)?.explicit) { command = '/answer'; args = `${pending[0].id} ${text}`; }
@@ -144,7 +166,7 @@ export class Engine {
         }
         if (bound && (bound.project === CONVERSATION || bound.project === this.config.defaultProject) && !this.store.workspace(bound.id)) {
           // Recover a request previously misrouted to general discussion, using owner input only.
-          prompt = `本话题最初的需求：\n${this.store.originalPrompt(bound.id)}\n\n主人本次补充：\n${prompt}`;
+          prompt = `本话题最初的需求与补充：\n${this.store.ownerRequirements(bound.id)}\n\n主人本次补充：\n${prompt}`;
         }
         const task = bound && message.conversation
           ? this.store.handoff(bound, project, prompt, mode, message.conversation)
@@ -354,7 +376,14 @@ export class Engine {
       const project = task.project === CONVERSATION ? conversationProject(this.config) : this.config.projects[task.project];
       if (!project) throw new Error('项目配置已移除。');
       const previousReport = this.store.delivery(task.id);
+      let proposed: {project: string; grantKey: string} | undefined;
       const hooks: RunHooks = {
+        ...(task.project === CONVERSATION && task.conversation ? { proposeProject: (id: string) => {
+          abort.signal.throwIfAborted();
+          const candidate = this.config.projects[id];
+          if (!candidate) throw new Error('提议的项目不在已授权列表中。');
+          proposed = {project:id,grantKey:projectGrantKey(candidate)};
+        } } : {}),
         prepared: report => {
           abort.signal.throwIfAborted();
           if (!codeSourceChanged(previousReport, report)) return;
@@ -421,15 +450,24 @@ export class Engine {
         this.store.saveContext(task.id, snapshot); this.store.event(task.id, 'context_loaded', snapshot.summary);
         executionTask = { ...task, contextSnapshot: snapshot };
       }
-      executionTask = { ...executionTask, routingContext: JSON.stringify({ currentProject: task.project === CONVERSATION ? null : project.label ?? task.project,
-        availableProjects: Object.entries(this.config.projects).map(([id,p]) => ({ name:p.label ?? id, aliases:p.aliases ?? [], capability:p.sandbox })) }) };
-      const result = await this.executor.run(executionTask, project, hooks, abort.signal);
+      executionTask = { ...executionTask, projectCandidates: hooks.proposeProject ? Object.keys(this.config.projects) : undefined,
+        routingContext: JSON.stringify({ currentProject: task.project === CONVERSATION ? null : project.label ?? task.project,
+        availableProjects: Object.entries(this.config.projects).map(([id,p]) => ({ id, name:p.label ?? id, aliases:p.aliases ?? [], capability:p.sandbox })) }) };
+      let result = await this.executor.run(executionTask, project, hooks, abort.signal);
       if (abort.signal.aborted) throw abort.signal.reason;
-      this.store.set(task.id, 'review', result);
+      if (proposed) {
+        const candidate = this.config.projects[proposed.project];
+        if (!candidate || projectGrantKey(candidate) !== proposed.grantKey) throw new Error('项目授权已变化，请重新选择项目。');
+        result = `${result}\n\n这次使用 ${candidate.label ?? proposed.project} 项目处理，对吗？回复“对的”即可分配工作区并继续，也可以直接告诉我其他项目名称。`;
+      }
       const report = this.store.delivery(task.id);
       const evidence = report ? `\n\n${deliveryFooter(report, project)}` : '';
-      if (task.conversation) this.store.enqueue(task.chatId, result + (report && task.mode === 'workspace-write' ? evidence : ''), { kind: 'reply', taskId: task.id });
-      else this.store.enqueue(task.chatId, `任务 ${task.id} 已产出结果，等待你验收（执行器报告，尚非独立验证）。\n${result}${evidence}\n`
+      this.store.transaction(() => {
+        this.store.set(task.id, 'review', result);
+        if (proposed) this.store.saveProjectSelection(task.id, proposed.project, proposed.grantKey);
+        if (task.conversation) this.store.enqueue(task.chatId, result + (report && task.mode === 'workspace-write' ? evidence : ''), {kind:'reply',taskId:task.id});
+      });
+      if (!task.conversation) this.store.enqueue(task.chatId, `任务 ${task.id} 已产出结果，等待你验收（执行器报告，尚非独立验证）。\n${result}${evidence}\n`
         + `验收：/done ${task.id}\n继续：/continue ${task.id} <要求>`, { kind: 'task', taskId: task.id });
       if (task.nextAction !== 'publish' && report?.evidenceIds?.length) this.store.enqueue(task.chatId, '验收截图（执行 Agent 提供）', { kind:'evidence', taskId:task.id, evidenceIds:report.evidenceIds });
       if (report?.evidenceWarning) this.store.enqueue(task.chatId, report.evidenceWarning, {kind:'reply', taskId:task.id});

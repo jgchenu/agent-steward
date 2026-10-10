@@ -245,3 +245,25 @@ test('sandbox automation preserves MCP confirmation on new and resumed turns wit
   assert.deepEqual(rpc.writes[0].result,{action:'accept',content:{},_meta:null});
  }
 });
+
+
+test('projectless final schema produces a proposal separately from user-facing prose on start and resume', async () => {
+ for(const threadId of [null,'thread']){
+  const rpc=new FakeRpc(),s=setup(rpc),proposals:string[]=[];s.hooks.proposeProject=id=>proposals.push(id);
+  rpc.onTurn=()=>{rpc.emit('item/completed',{item:{type:'agentMessage',text:JSON.stringify({message:'已理解页面需求',projectId:'code'}),phase:'final_answer'}});rpc.finish()};
+  const result=await s.run({...task,threadId,project:'__conversation__',projectCandidates:['code','other']});
+  assert.equal(result,'已理解页面需求');assert.deepEqual(proposals,['code']);
+  assert.deepEqual(rpc.params['turn/start'].outputSchema.properties.projectId.enum,['','code','other']);
+  assert.equal(rpc.params['turn/start'].sandboxPolicy.type,'readOnly');
+ }
+});
+test('invalid structured routing cannot turn arbitrary model prose, unknown projects or failed turns into a proposal',async()=>{
+ for(const value of ['是 ExampleProduct 对吗？',JSON.stringify({message:'hi',projectId:'ungranted'}),JSON.stringify({message:'hi',projectId:'code',approve:true})]){
+  const rpc=new FakeRpc(),s=setup(rpc),proposals:string[]=[];s.hooks.proposeProject=id=>proposals.push(id);
+  rpc.onTurn=()=>{rpc.emit('item/completed',{item:{type:'agentMessage',text:value}});rpc.finish()};
+  await assert.rejects(s.run({...task,project:'__conversation__',projectCandidates:['code']}),/路由响应/);assert.deepEqual(proposals,[]);
+ }
+ const rpc=new FakeRpc(),s=setup(rpc),proposals:string[]=[];s.hooks.proposeProject=id=>proposals.push(id);
+ rpc.onTurn=()=>{rpc.emit('item/completed',{item:{type:'agentMessage',text:JSON.stringify({message:'普通回答',projectId:''})}});rpc.finish()};
+ assert.equal(await s.run({...task,project:'__conversation__',projectCandidates:['code']}),'普通回答');assert.deepEqual(proposals,[]);
+});

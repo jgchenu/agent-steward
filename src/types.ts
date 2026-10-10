@@ -17,6 +17,7 @@ export interface Attachment {
 }
 export type PermissionMode = 'ask' | 'auto' | 'sandbox-auto' | 'full-access';
 export interface Task {
+  projectCandidates?: string[];
   modelSelection?: import('./models.js').ModelSelection;
   permissionMode?: PermissionMode;
   id: string; chatId: string; project: string; prompt: string; status: Status;
@@ -65,6 +66,7 @@ export interface HumanRequest {
   resolve: (answer: string) => void;
 }
 export interface RunHooks {
+  proposeProject?: (projectId: string) => void;
   prepared?: (report: DeliveryReport) => void;
   thread: (id: string) => void;
   progress: (text: string) => void;
