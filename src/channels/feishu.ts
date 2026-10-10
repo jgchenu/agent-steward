@@ -4,6 +4,7 @@ import type { CardAction, Channel, Config, Incoming, Task, View } from '../types
 import { messageText, readContext } from './context.js';
 import { Store } from '../store.js';
 import { buildCard, viewKey } from './cards.js';
+import { readableFileReferences } from './file-references.js';
 
 export function parseCardAction(data: any): CardAction | undefined {
   const value = data?.action?.value;
@@ -95,7 +96,10 @@ export class FeishuChannel implements Channel {
     const scopedTask = view && 'taskId' in view ? this.store.get(view.taskId) : undefined;
     if (view && scopedTask?.conversation) view = { ...view, conversation: scopedTask.conversation };
     if (view?.kind === 'reply' || (view?.kind === 'notice' && view.conversation)) {
-      const chunks = replyChunks(text);
+      const workspace = scopedTask && this.store.workspace(scopedTask.id);
+      const roots = [workspace?.path, workspace?.source, scopedTask && this.config.projects[scopedTask.project]?.path]
+        .filter((path): path is string => typeof path === 'string');
+      const chunks = replyChunks(readableFileReferences(text, roots));
       for (let i = 0; i < chunks.length; i++) {
         const key = `reply:${deliveryId}:${i}`;
         if (this.store.cardMessage(chatId, key)) continue;
