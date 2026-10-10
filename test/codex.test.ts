@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { CodexExecutor, inputAnswers, type RpcPort } from '../src/adapters/codex.js';
 import type { RpcMessage } from '../src/adapters/rpc.js';
 import type { HumanRequest, RunHooks, Task } from '../src/types.js';
+import { executionOnlyApprovals } from '../src/permissions.js';
 
 const task: Task = { id: 'task', chatId: 'dm', project: 'p', prompt: 'do work', status: 'running',
   threadId: null, result: null, createdAt: '', updatedAt: '' };
@@ -195,7 +196,7 @@ test('console modes map explicitly on new and resumed threads; full access canno
     await s.executor.run({...task,permissionMode,threadId}, {path:'.',sandbox},s.hooks,AbortSignal.timeout(5000));
     const common=rpc.params[threadId?'thread/resume':'thread/start'];
     assert.equal(common.sandbox,permissionMode==='full-access'&&sandbox==='workspace-write'?'danger-full-access':sandbox);
-    assert.equal(common.approvalPolicy,['full-access','sandbox-auto'].includes(permissionMode)?'never':'on-request');
+    assert.deepEqual(common.approvalPolicy,['full-access','sandbox-auto'].includes(permissionMode)?executionOnlyApprovals():'on-request');
     assert.equal(common.approvalsReviewer,permissionMode==='auto'?'auto_review':'user');
     assert.equal(rpc.params['turn/start'].approvalPolicy,common.approvalPolicy);
     const policy=rpc.params['turn/start'].sandboxPolicy;
@@ -226,7 +227,21 @@ test('explicit model and effort are applied to new and resumed turns; unavailabl
 });
 
 
-test('never-approval modes reject unexpected escalation without creating a human request',async()=>{
+test('execution-only approval modes reject unexpected escalation without creating a human request',async()=>{
  const rpc=new FakeRpc(),requests:HumanRequest[]=[];rpc.onTurn=()=>{rpc.emit('item/commandExecution/requestApproval',{command:'outside operation'},77);rpc.finish()};
  await setup(rpc,requests).run({...task,permissionMode:'sandbox-auto'});assert.equal(requests.length,0);assert.deepEqual(rpc.writes.find(m=>m.id===77).result,{decision:'decline'});
+});
+
+test('sandbox automation preserves MCP confirmation on new and resumed turns without enabling escalation',async()=>{
+ for(const mode of ['sandbox-auto','full-access'] as const)for(const threadId of [null,'thread']){
+  const rpc=new FakeRpc(),requests:HumanRequest[]=[];
+  rpc.onTurn=()=>{
+   assert.deepEqual(rpc.params['turn/start'].approvalPolicy,{granular:{sandbox_approval:false,rules:false,skill_approval:false,request_permissions:false,mcp_elicitations:true}});
+   rpc.emit('mcpServer/elicitation/request',{serverName:'browser',mode:'form',message:'Allow this browser origin?',requestedSchema:{type:'object',properties:{}}},33);
+   assert.equal(requests.length,1);assert.equal(rpc.writes.length,0);
+   requests[0].resolve('accept');rpc.finish();
+  };
+  await setup(rpc,requests).run({...task,permissionMode:mode,threadId});
+  assert.deepEqual(rpc.writes[0].result,{action:'accept',content:{},_meta:null});
+ }
 });

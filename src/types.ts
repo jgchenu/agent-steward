@@ -23,7 +23,7 @@ export interface Task {
   threadId: string | null; result: string | null; createdAt: string; updatedAt: string;
   evidenceDirectory?: string;
   conversation?: Conversation; contextSnapshot?: ContextSnapshot; codeVersion?: { ref: string; baseSha: string; headSha: string };
-  mode?: 'read-only' | 'workspace-write'; nextAction?: 'execute' | 'publish' | 'baseline'; baselineRef?: string | null; routingContext?: string;
+  mode?: 'read-only' | 'workspace-write'; nextAction?: 'execute' | 'publish' | 'baseline' | 'merge'; mergeUrl?: string | null; baselineRef?: string | null; routingContext?: string;
 }
 export interface Incoming {
   id: string; senderId: string; chatId: string; text: string;

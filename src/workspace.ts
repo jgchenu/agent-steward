@@ -105,7 +105,7 @@ export function publicationKey(task: Task, project: Project, report: DeliveryRep
 }
 
 export type Gh = (cwd: string, args: string[], signal: AbortSignal) => Promise<string>;
-const ghCommand: Gh = async (cwd, args, signal) => {
+export const ghCommand: Gh = async (cwd, args, signal) => {
   const r = await runCommand('gh', args, cwd, signal);
   if (r.code !== 0 || r.truncated) throw new Error('GitHub 操作未完成；请检查本机 gh 登录与仓库权限。');
   return r.stdout.trim();

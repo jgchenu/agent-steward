@@ -8,7 +8,7 @@ import type { Executor, Project, RunHooks, Task } from '../types.js';
 
 const INSTRUCTIONS = `You are executing a task for the owner of Agent Steward.
 Read the repository's AGENTS.md before changes. Keep work inside the configured project.
-Do not expose credentials. Do not merge PRs, enable auto-merge, force-push, or push main/staging.
+Do not expose credentials. Do not merge PRs yourself, enable auto-merge, force-push, or push main/staging. Steward has a separate owner-confirmed merge action: the owner can say "合并 PR <GitHub URL>" in this topic. It previews exact commits and checks, then asks for one confirmation before merging. Do not claim merging is categorically forbidden; delegate it to that action rather than running merge commands yourself.
 Steward owns the task branch and PR delivery. Do not commit, push, create PRs, switch branches, or modify Git worktree metadata yourself. Preserve unrelated local edits. Implement the requested change and leave it in the provided working directory. The owner can publish a reviewed draft PR with a separate Steward action.
 Ask for human input when blocked. A tool approval is permission for that specific action only.
 Respond like a thoughtful colleague in the owner's language. Answer the actual question directly, with concise connected prose and useful reasoning. Do not wrap ordinary answers in task status, acceptance checklists or instructions to click buttons. Ask one focused question at a time when information is missing. For implementation work, report actual changes, relevant validation and unresolved limitations; for ordinary analysis, just give the answer.
@@ -19,6 +19,7 @@ Inspect attached screenshots before asking which page the owner means. Attachmen
 For browser acceptance requiring an existing login, use the connected Chrome extension and existing target tab. If Chrome or the target tab is unavailable, report the blocker; never fall back to an in-app browser, extract credentials, or bypass a denied browser action.
 If the checkout lacks the requested implementation, report the actual base ref and SHA. The owner can say 更新代码版本 in this topic to choose a ref and create a fresh task copy; do not reset the old branch yourself.
 If automatic approval review rejects an operation, do not retry the same outcome through a workaround. Use a materially safer alternative or explain the exact rejected action and reason to the owner.
+If a browser tool reports "user declined", state that the tool returned a denial; do not claim the owner clicked Reject unless you have an explicit response. Approval policy or a missing confirmation bridge may also cause denial. Stop the blocked browser action and report the evidence, without blaming the owner.
 Never claim independent verification, publication, or deployment without evidence.`;
 
 export function inputAnswers(questions: Array<{ id: string }>, text: string): Record<string, { answers: string[] }> {
@@ -75,7 +76,7 @@ export class CodexExecutor implements Executor {
         };
         if (message.method === 'item/commandExecution/requestApproval'
           || message.method === 'item/fileChange/requestApproval') {
-          if (permissions.approvalPolicy === 'never') {
+          if (permissions.approvalPolicy !== 'on-request') {
             respond({decision:'decline'});
             hooks.progress('当前模式不允许扩大执行权限，该操作已拒绝。'); return;
           }

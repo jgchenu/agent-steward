@@ -5,6 +5,7 @@ import { baselinePreview, restartAtBaseline, validBaseRef } from './baseline.js'
 import { namedProjects, projectChoices, requiresProject, ungrantedNames } from './routing.js';
 import { Store } from './store.js';
 import { canPublish, publicationKey } from './workspace.js';
+import { mergeIntent, mergePullRequest } from './merge.js';
 import type { CardAction, Channel, Config, ContextSnapshot, Executor, HumanRequest, Incoming, RunHooks, Status, Task, View } from './types.js';
 
 const HELP = `Agent Steward · 个人 Agent 分身（预览版）
@@ -14,6 +15,7 @@ const HELP = `Agent Steward · 个人 Agent 分身（预览版）
 /source <任务ID> — 查看实际代码来源
 /baseline <任务ID> — 选择代码版本并从新副本继续
 /publish <任务ID> — 预览草稿 PR 交付
+/merge <任务ID> <PR链接> — 检查 PR，确认后代为合并
 /list 或 /status <任务ID> — 查进度
 /cancel <任务ID> — 取消执行（不会回滚已有改动）
 /continue <任务ID> <后续要求> — 继续已结束或中断的任务
@@ -29,7 +31,7 @@ export class Engine {
   private flushPromise?: Promise<void>;
   private stopped = false;
   constructor(readonly store: Store, readonly config: Config, private executor: Executor,
-    private channel: Channel) {}
+    private channel: Channel, private mergeRunner = mergePullRequest) {}
 
   updateProjects(next: Pick<Config, 'projects' | 'defaultProject' | 'codexProjects'> & Partial<Pick<Config, 'permissionMode' | 'approvalsReviewer' | 'modelSelection'>>): void {
     const previous = this.config.projects;
@@ -87,6 +89,8 @@ export class Engine {
       }
       let navigation = ['首页', '工作台', '帮助'].includes(text);
       if (!match && bound && /^(创建|提交|交付|准备)(草稿\s*)?\s*PR$/i.test(text)) { command = '/publish'; args = bound.id; navigation = true; }
+      const mergeTarget = !match && bound ? mergeIntent(text) : undefined;
+      if (mergeTarget !== undefined) { command='/merge'; args=`${bound!.id} ${mergeTarget}`.trim(); navigation=true; }
       if (!match && bound && /^(代码来源|查看代码来源|当前代码版本)$/.test(text)) {
         reply(codeSourceDetails(this.store.delivery(bound.id), this.config.projects[bound.project], true), { kind: 'source', taskId: bound.id, fresh: true }); return;
       }
@@ -185,6 +189,16 @@ export class Engine {
         return;
       }
       if (command === '/source') { reply(codeSourceDetails(this.store.delivery(id), this.config.projects[task.project], !!message.conversation), { kind: 'source', taskId: id, fresh: true }); return; }
+      if (command === '/merge') {
+        if (this.active?.task.id===id || !['review','completed','failed','cancelled','interrupted'].includes(task.status)) {reply('请等当前执行结束后再合并。');return;}
+        const project=this.config.projects[task.project];
+        if(task.mode!=='workspace-write'||project?.sandbox!=='workspace-write'){reply('该任务没有修改项目的授权。');return;}
+        const url=body||this.store.delivery(id)?.prUrl;
+        if(!url || !/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9]\d*$/.test(url)){reply('请提供要合并的 PR 链接，例如“合并 PR https://github.com/组织/仓库/pull/123”。我会先核对版本和检查结果，再请你确认。');return;}
+        this.store.queueMerge(id,url);
+        if(message.conversation)this.store.saveConversation(id,message.conversation);
+        reply('我先核对 PR 的提交、目标分支和检查结果，确认后再代你合并。',{kind:'reply',taskId:id});return;
+      }
       if (command === '/publish') { reply('请先查看交付预览，再明确创建草稿 PR。', { kind: 'publication', taskId: id, fresh: true }); return; }
       if (command === '/status') {
         const requests = this.store.requests(id).map(r => `待处理请求：${r.id} · ${r.kind}`).join('\n');
@@ -354,6 +368,11 @@ export class Engine {
           if (!abort.signal.aborted) this.updateWaiting(task.id);
         },
       };
+      if (task.nextAction === 'merge') {
+        const result=await this.mergeRunner(this.store,this.config,task,project,hooks,abort.signal);
+        abort.signal.throwIfAborted();this.store.set(task.id,'review',result);
+        this.store.enqueue(task.chatId,result,{kind:'reply',taskId:task.id});return;
+      }
       if (task.nextAction === 'baseline') {
         const preview = await baselinePreview(this.store, task, project, task.baselineRef ?? '', abort.signal);
         const accepted = await new Promise<boolean>((resolve, reject) => {
