@@ -1,5 +1,21 @@
 import { CodexRpc } from './adapters/rpc.js';
 export interface ModelSelection { model: string; effort: string }
+export interface RuntimeModel { model: string | null; effort: string | null }
+export function runtimeModel(response: any, selected?: ModelSelection): RuntimeModel {
+  const model = selected?.model ?? response?.model, effort = selected?.effort ?? response?.reasoningEffort;
+  return {model: typeof model === 'string' && /^[\w.-]{1,100}$/.test(model) ? model : null,
+    effort: typeof effort === 'string' && /^[\w-]{1,40}$/.test(effort) ? effort : null};
+}
+// Only standalone read-only self-status questions bypass the execution queue.
+export function asksModelStatus(text: string): boolean {
+  return text.length <= 160 && !/[\n。；;]|切换|修改|更换|设置|改成|修复|实现|帮我|然后|并且/.test(text)
+    && /模型|思考强度|推理强度/.test(text)
+    && /你|当前|现在|本轮|这轮/.test(text) && /哪|什么|多少|告诉我|查看/.test(text);
+}
+export function modelStatusText(current: RuntimeModel | undefined, selected: ModelSelection | undefined, scope: string): string {
+  return `${scope}：模型 ${current?.model ?? '尚未获取'}；思考强度 ${current?.effort ?? '尚未获取'}。\n`
+    + `后续轮次设置：${selected ? `${selected.model} · ${selected.effort}` : '沿用 Codex 本机或会话设置'}。设置变化不会改变已开始的执行；未获取的参数不会猜测。`;
+}
 export interface CodexModel { model: string; name: string; defaultEffort: string; efforts: string[] }
 export function modelSelection(value: unknown): ModelSelection | undefined {
   if (value === undefined) return;

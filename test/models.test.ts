@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,writeFileSync,readFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {readModels,modelSelection,validateSelection} from '../src/models.js';
+import {readModels,modelSelection,validateSelection,asksModelStatus,runtimeModel} from '../src/models.js';
 import {WorkspaceRegistry} from '../src/workspace-console.js';
 import {loadConfig} from '../src/config.js';
 import {Store} from '../src/store.js';
@@ -54,4 +54,71 @@ test('model API uses console authentication and model outage does not prevent pe
   const state:any=await(await fetch(app.url+'api/state',{headers})).json();available=false;
   const response=await fetch(app.url+'api/grants',{method:'POST',headers,body:JSON.stringify({revision:state.revision,grants:[],permissionMode:'ask'})});assert.equal(response.status,200);assert.equal(loadConfig(file).permissionMode,'ask');
  }finally{await new Promise<void>(r=>app.server.close(()=>r()));if(owner===undefined)delete process.env.STEWARD_OWNER_ID;else process.env.STEWARD_OWNER_ID=owner;rmSync(dir,{recursive:true,force:true})}
+});
+
+test('model questions answer active runtime facts without losing work or changing approvals',async()=>{
+ const store=new Store(':memory:'),config:Config={ownerId:'owner',groupChats:true,stateDir:'.',codexCommand:'unused',maxRunMinutes:1,projects:{}};
+ let release:()=>void=()=>{},runs=0;
+ const messages:string[]=[];
+ const engine=new Engine(store,config,{run:async(_t,_p,h)=>{
+  runs++;h.modelResolved?.({model:'runtime-a',effort:'high'});
+  return new Promise<string>(r=>{release=()=>r('done')});
+ }},{send:async(_,text)=>{messages.push(text)},context:async()=>({summary:'',capturedAt:'',truncated:false,messages:[]})});
+ const conversation={anchorId:'topic',sourceId:'root',scope:'thread' as const};
+ const send=(id:string,text:string,senderId='owner',anchorId='topic')=>engine.receive({id,text,senderId,chatId:'group',chatType:'group',senderType:'user',botMentioned:true,conversation:{...conversation,anchorId,sourceId:id}});
+ try{
+  engine.start();
+  send('start','你好');await until(()=>runs===1);
+  const task=store.list()[0],revision=task.updatedAt;
+  engine.updateProjects({...config,modelSelection:{model:'next-b',effort:'low'}});
+  send('query','你当前基于工作的模型跟强度是哪个');send('query','你当前基于工作的模型跟强度是哪个');
+  await until(()=>messages.some(x=>x.includes('模型 runtime-a')));
+  assert.equal(messages.filter(x=>x.includes('模型 runtime-a')).length,1);
+  assert.match(messages.find(x=>x.includes('模型 runtime-a'))!,/high.*\n.*next-b · low/);
+  assert.equal(store.get(task.id)!.updatedAt,revision);assert.equal(runs,1);
+  assert.deepEqual(store.pendingFollowups(task.id),[]);
+  const count=messages.length;send('foreign','/model '+task.id,'owner','other');send('stranger','/model '+task.id,'stranger');
+  await until(()=>messages.length>count);assert.ok(!messages.slice(count).some(x=>x.includes('runtime-a')));
+  send('note','请保留已有筛选器');send('note','请保留已有筛选器');assert.deepEqual(store.pendingFollowups(task.id),['请保留已有筛选器']);
+  release();await until(()=>store.get(task.id)!.status==='review');
+  assert.deepEqual(store.runtimeModel(task.id),{model:'runtime-a',effort:'high'});
+  await engine.stop();
+  store.resume(task.id,'继续');assert.match(store.get(task.id)!.prompt,/请保留已有筛选器/);assert.deepEqual(store.pendingFollowups(task.id),[]);
+ }finally{release();await engine.stop();store.close()}
+});
+test('model status recognizes self questions, never steals edits, and unknown defaults remain unknown',()=>{
+ for(const text of ['你现在用什么模型？','你当前基于工作的模型跟强度是哪个','告诉我当前推理强度'])assert.ok(asksModelStatus(text));
+ for(const text of ['帮我实现模型设置页面','你当前是什么模型，然后修改代码','你现在切换模型到 model-b','分析模型价格'])assert.equal(asksModelStatus(text),false);
+ assert.deepEqual(runtimeModel({}),{model:null,effort:null});
+ assert.deepEqual(runtimeModel({model:'a',reasoningEffort:null}),{model:'a',effort:null});
+ assert.deepEqual(runtimeModel({model:'a',reasoningEffort:'low'},{model:'b',effort:'high'}),{model:'b',effort:'high'});
+});
+test('pending followups and runtime facts survive restart, and handoff retains pending notes',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'steward-pending-')),file=join(dir,'state.sqlite');let store=new Store(file);
+ try{
+  const c={anchorId:'root',sourceId:'root',scope:'thread' as const};
+  const task=store.create('group','p','work','read-only',c);
+  store.event(task.id,'runtime_model',JSON.stringify({model:'a',effort:'high'}));store.event(task.id,'followup_pending','keep filter');
+  store.close();store=new Store(file);store.recover();
+  assert.equal(store.runtimeModel(task.id)?.model,'a');assert.deepEqual(store.pendingFollowups(task.id),['keep filter']);
+  store.set(task.id,'review');const next=store.handoff(store.get(task.id)!,'p','new work','read-only',c);
+  assert.deepEqual(store.pendingFollowups(next.id),['keep filter']);assert.deepEqual(store.pendingFollowups(task.id),[]);
+ }finally{store.close();rmSync(dir,{recursive:true,force:true})}
+});
+
+test('model query while waiting for permission leaves the one-shot decision pending',async()=>{
+ const store=new Store(':memory:'),config:Config={ownerId:'owner',groupChats:true,stateDir:'.',codexCommand:'unused',maxRunMinutes:1,projects:{}};
+ let request='',decisions=0;const messages:string[]=[];
+ const engine=new Engine(store,config,{run:async(_t,_p,h,signal)=>new Promise<string>((resolve,reject)=>{
+  h.modelResolved?.({model:'actual',effort:'high'});
+  signal.addEventListener('abort',()=>reject(signal.reason),{once:true});
+  request=h.request({kind:'approval',description:'specific operation',resolve:a=>{decisions++;resolve(a)}});
+ })},{send:async(_,text)=>{messages.push(text)},context:async()=>({summary:'',capturedAt:'',truncated:false,messages:[]})});
+ const send=(id:string,text:string)=>engine.receive({id,text,senderId:'owner',senderType:'user',chatType:'group',chatId:'group',botMentioned:true,conversation:{anchorId:'topic',sourceId:id,scope:'thread'}});
+ try{
+  engine.start();send('start','你好');await until(()=>!!request);send('query','你现在用什么模型？');
+  await until(()=>messages.some(x=>x.includes('模型 actual')));
+  assert.equal(decisions,0);assert.equal(store.getRequest(request)!.status,'pending');assert.equal(store.list()[0].status,'waiting_approval');
+  send('deny','/deny '+request);await until(()=>store.list()[0].status==='review');assert.equal(decisions,1);
+ }finally{await engine.stop();store.close()}
 });

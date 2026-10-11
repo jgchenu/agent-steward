@@ -90,6 +90,13 @@ export class Store {
     const rows = this.db.prepare("SELECT body FROM events WHERE taskId=? AND kind IN ('created','followup') ORDER BY seq").all(id) as Array<{body: string}>;
     return rows.map(row => row.body).join('\n\n主人补充：\n');
   }
+  runtimeModel(id: string): import('./models.js').RuntimeModel | undefined {
+    const row = this.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='runtime_model' ORDER BY seq DESC LIMIT 1").get(id) as {body:string} | undefined;
+    return row ? JSON.parse(row.body) : undefined;
+  }
+  pendingFollowups(id: string): string[] {
+    return (this.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='followup_pending' AND seq > COALESCE((SELECT MAX(seq) FROM events WHERE taskId=? AND kind='followups_consumed'),0) ORDER BY seq").all(id,id) as Array<{body:string}>).map(r=>r.body);
+  }
   saveProjectSelection(taskId: string, project: string, grantKey: string): void {
     this.db.prepare('INSERT OR REPLACE INTO project_selections VALUES (?,?,?,?)').run(taskId, project, grantKey, this.get(taskId)!.updatedAt);
   }
@@ -107,6 +114,9 @@ export class Store {
     this.expire(from.id);
     this.set(from.id, from.status); // Invalidate controls issued before the handoff.
     this.event(from.id, 'handoff_to', next.id); this.event(next.id, 'handoff_from', from.id);
+    const pending = this.pendingFollowups(from.id);
+    for (const text of pending) this.event(next.id,'followup_pending',text);
+    if (pending.length) this.event(from.id,'followups_consumed',`Transferred to ${next.id}`);
     return next;
   }
   conversationTask(chatId: string, conversation?: Conversation): Task | undefined {
@@ -138,6 +148,11 @@ export class Store {
     this.event(id, status, result ?? '');
   }
   resume(id: string, prompt: string): void {
+    const pending = this.pendingFollowups(id);
+    if (pending.length) {
+      prompt = `此前执行期间主人留下的待处理补充（不构成权限批准）：\n${pending.join('\n\n')}\n\n主人本次要求：\n${prompt}`;
+      this.event(id, 'followups_consumed', 'Explicit continuation');
+    }
     this.clearProjectSelection(id);
     this.db.prepare('DELETE FROM context_snapshots WHERE taskId=?').run(id);
     this.db.prepare("UPDATE tasks SET prompt=?, result=NULL, nextAction='execute', baselineOptions=NULL WHERE id=?").run(prompt, id);

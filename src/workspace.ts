@@ -85,6 +85,11 @@ export function publicationText(task: Task, report: DeliveryReport): { title: st
   ].join('\n') };
 }
 export const validationKey = (project: Project) => createHash('sha256').update(JSON.stringify(project.worktree?.checks ?? [])).digest('hex');
+export class TargetBranchMoved extends Error {
+  constructor(readonly ref: string, readonly before: string, readonly after: string) {
+    super(`PR 发布暂缓：目标分支已更新（${ref}：${before.slice(0,12)} → ${after.slice(0,12)}）。原基准上的检查通过不代表新基准上的兼容性。`);
+  }
+}
 export function publicationBlocker(task: Task, project: Project | undefined, report: DeliveryReport | undefined, requested?: PublicationTarget): string | undefined {
   if (task.mode !== 'workspace-write' || project?.sandbox !== 'workspace-write') return '本次为只读分析，没有可发布的修改权限。';
   if (!project.worktree?.github) return '项目尚未配置 GitHub 仓库和 PR 目标分支，需要先在本机配置交付目标。';
@@ -93,6 +98,7 @@ export function publicationBlocker(task: Task, project: Project | undefined, rep
     return `请求交付到 ${requested.repository} → ${requested.baseBranch}，但项目当前配置为 ${target.repository} → ${target.baseBranch}。未替换目标或发起发布，请先在本机配置正确的交付目标，并按对应基准准备和验证改动。`;
   }
   if (!report) return '尚无代码改动与验证记录，请先完成执行。';
+  if (report.targetBefore && report.targetBefore !== report.workspace.baseSha) return 'PR 发布暂缓：目标分支已更新。已有代码、检查记录和截图保留，需迁移现有改动并重新验证。';
   if (report.workspace.baseRef !== `origin/${project.worktree.github.baseBranch}`) return '任务基准与 PR 目标不同，需先在正确基准的新副本准备改动；原副本保留。';
   if (!report.files.length) return '没有文件改动，无需创建 PR。';
   if (!project.worktree.checks.length) return '项目未配置 Steward 独立检查，需要先配置并运行项目验证；模型自报通过不能替代检查记录。';
@@ -130,7 +136,10 @@ export async function publish(store: Store, config: Config, task: Task, project:
   await repoGit(w.path, ['fetch', 'origin', `refs/heads/${target.baseBranch}:refs/remotes/origin/${target.baseBranch}`], signal);
   report.targetBefore = await repoGit(w.path, ['rev-parse', `origin/${target.baseBranch}`], signal);
   store.saveDelivery(task.id, report);
-  if (report.targetBefore !== w.baseSha) throw new Error('目标分支已更新。请基于最新版本创建新任务；不会自动合并、重置或改写当前工作。');
+  if (report.targetBefore !== w.baseSha) {
+    report.authorizedKey = undefined; store.saveDelivery(task.id,report);
+    throw new TargetBranchMoved(`origin/${target.baseBranch}`,w.baseSha,report.targetBefore);
+  }
   const list = async () => JSON.parse(await gh(w.path, ['pr', 'list', '--repo', target.repository, '--head', w.branch,
     '--state', 'all', '--json', 'number,url,state,baseRefName,headRefName'], signal)) as Array<{ number: number; url: string; state: string; baseRefName: string; headRefName: string }>;
   let prs = await list();

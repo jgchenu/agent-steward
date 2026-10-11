@@ -352,3 +352,17 @@ test('baseline response validation rejects missing fields and concurrent old-cop
     await assert.rejects(s.executor.run({...task,mode:'workspace-write'},{path:'.',sandbox:'workspace-write',worktree:{baseRef:'old',checks:[]}},s.hooks,AbortSignal.timeout(5000)));
   }
 });
+
+test('resolved thread model and effort are recorded for defaults and resumes and supplied as execution facts',async()=>{
+ for(const threadId of [null,'thread']){
+  const rpc=new FakeRpc(),request=rpc.request.bind(rpc),s=setup(rpc);let observed:unknown;
+  rpc.request=async(method,params)=>{
+   const response=await request(method,params);
+   return method==='thread/start'||method==='thread/resume'?{...response,model:'actual-model',reasoningEffort:'high'}:response;
+  };
+  s.hooks.modelResolved=value=>{observed=value};rpc.onTurn=()=>rpc.finish();
+  await s.run({...task,threadId});assert.deepEqual(observed,{model:'actual-model',effort:'high'});
+  assert.match(rpc.params['turn/start'].input[0].text,/"model":"actual-model","effort":"high"/);
+  assert.equal(rpc.params['turn/start'].model,undefined);
+ }
+});

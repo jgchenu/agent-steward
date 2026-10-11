@@ -1,4 +1,4 @@
-import { readModels, validateSelection } from '../models.js';
+import { readModels, validateSelection, runtimeModel } from '../models.js';
 import { CONVERSATION } from '../conversation.js';
 import { runtimePermissions } from '../permissions.js';
 import { elicitation } from './elicitation.js';
@@ -170,12 +170,14 @@ If migration is needed, propose it before doing more implementation on the obsol
       threadId = response?.thread?.id;
       if (typeof threadId !== 'string') throw new Error('Codex 未返回会话 ID');
       hooks.thread(threadId);
+      const executionModel = runtimeModel(response, task.modelSelection);
+      hooks.modelResolved?.(executionModel);
       signal.throwIfAborted();
       const images = (task.contextSnapshot?.attachments ?? []).flatMap(a => a.status === 'unread' ? [] : [
         ...(a.kind === 'image' && a.status === 'attached' && a.path ? [{ type: 'localImage', path: a.path }] : []),
         ...(a.visuals ?? []).flatMap(v => [{ type: 'text', text: `消息 ${a.messageId}：${v.label}`, text_elements: [] }, { type: 'localImage', path: v.path }]),
       ]);
-      await rpc.request('turn/start', { threadId, ...(task.modelSelection ?? {}), input: [{ type: 'text', text: taskInput(task), text_elements: [] }, ...images],
+      await rpc.request('turn/start', { threadId, ...(task.modelSelection ?? {}), input: [{ type: 'text', text: taskInput(task) + `\n\nSteward 本轮执行参数（线程返回值及本轮显式覆盖）：${JSON.stringify(executionModel)}。null 表示未获取，不要猜测模型或思考强度。`, text_elements: [] }, ...images],
         ...(structuredRouting ? { outputSchema: {type:'object',properties:{message:{type:'string'},projectId:{type:'string',enum:['',...candidates]}},required:['message','projectId'],additionalProperties:false} } : {}),
         ...(structuredOperations ? {outputSchema:{type:'object',properties:{message:{type:'string'},publication:publicationSchema,
           ...(structuredBaseline ? {baseline:baselineProposalSchema} : {})},
