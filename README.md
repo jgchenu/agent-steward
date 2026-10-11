@@ -108,6 +108,7 @@ Keep the process and machine awake. Closing the service interrupts active work; 
 | `/merge <task> <PR URL>` | Inspect remote commits and checks, then request one explicit merge confirmation |
 | Plain text | Use a named authorized Codex project for code; ordinary conversation needs no project; ask when the code target is missing |
 | `/list`, `/status <task>` | View status, latest recorded progress, result and outstanding request IDs |
+| `/model [task]` | Read the current or most recent execution model/effort and next-turn settings without starting or interrupting work |
 | `/cancel <task>` | Stop execution; existing changes are retained |
 | `/continue <task> <instructions>` | Queue another turn using the saved Codex thread |
 | `/approve <request>`, `/deny <request>` | Answer one live permission request |

@@ -374,3 +374,40 @@ test('UI screenshot outputs are collected separately and never enter the code in
     assert.ok(!r.diffStat.includes('.steward-delivery'));assert.equal(f.store.evidence(r.evidenceIds![0],f.task.id)?.scope,'local-preview');
   }finally{f.close();}
 });
+
+for (const accept of [false,true]) test(`target movement preserves checked work and prepares migration; accept=${accept}`,async()=>{
+ const f=fixture(),messages:string[]=[];let gitWrites=0,ghCalls=0;
+ const transport:typeof git=async(cwd,args,sig)=>{
+  if(args[0]==='remote')return 'https://github.com/test/repo.git';
+  if(['add','commit','push'].includes(args[0]))gitWrites++;
+  return git(cwd,args,sig);
+ };
+ const engine=new Engine(f.store,f.config,{run:async t=>t.nextAction==='publish' ? publish(f.store,f.config,t,f.project,signal(),async()=>{ghCalls++;return '[]'},transport) : 'adaptation scheduled'},
+  {send:async(_,text)=>{messages.push(text)}});
+ const wait=async(check:()=>boolean)=>{for(let i=0;i<300&&!check();i++)await delay(10);assert.ok(check())};
+ try{
+  await f.executor.run(f.task,f.project,hooks,signal());f.store.set(f.task.id,'review','UI implemented and checked');
+  const report=f.store.delivery(f.task.id)!;
+  f.store.saveDelivery(f.task.id,{...report,authorizedKey:publicationKey(f.task,f.project,report)});
+  f.g('commit','--allow-empty','-m','upstream advanced');f.g('push','origin','main');
+  f.store.queuePublication(f.task.id);engine.start();
+  await wait(()=>f.store.get(f.task.id)?.status==='waiting_approval');
+  assert.equal(f.store.get(f.task.id)!.result,'UI implemented and checked');
+  assert.deepEqual(f.store.get(f.task.id)!.baselineOptions,{migrateChanges:true,delivery:null});
+  assert.equal(f.store.delivery(f.task.id)!.ready,true);assert.equal(f.store.delivery(f.task.id)!.authorizedKey,undefined);
+  assert.equal(canPublish(f.store.get(f.task.id)!,f.project,f.store.delivery(f.task.id)),false);
+  assert.equal(f.store.list().length,1);assert.equal(gitWrites,0);assert.equal(ghCalls,0);
+  assert.match(f.store.getRequest(f.store.requests(f.task.id)[0].id)!.description,/只读快照/);
+  assert.equal(readFileSync(join(report.workspace.path,'README.md'),'utf8'),'changed\n');
+  engine.receive({id:'decision',senderId:'owner',senderType:'user',chatId:'dm',chatType:'p2p',text:(accept?'/approve ':'/deny ')+f.store.requests(f.task.id)[0].id});
+  await wait(()=>f.store.get(f.task.id)?.status==='review');assert.equal(f.store.list().length,accept?2:1);
+  if(accept){
+    const next=f.store.list().find(t=>t.id!==f.task.id)!;
+    assert.match(next.prompt,/主人同时确认迁移旧改动/);assert.match(next.prompt,/migration-/);
+    assert.equal(f.store.workspace(next.id)!.baseSha,f.g('rev-parse','main'));
+    assert.equal(readFileSync(join(report.workspace.path,'README.md'),'utf8'),'changed\n');
+  }
+  assert.equal(f.store.get(f.task.id)!.result,'UI implemented and checked');
+  assert.ok(messages.some(m=>m.includes('PR 发布暂缓')));assert.ok(!messages.some(m=>m.includes('这次没能完成')));
+ }finally{await engine.stop();f.close()}
+});

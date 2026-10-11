@@ -1,12 +1,13 @@
 import { viewKey } from './channels/cards.js';
 import { CONVERSATION, conversationProject } from './conversation.js';
 import { permissionMode, permissionRank } from './permissions.js';
+import { asksModelStatus, modelStatusText } from './models.js';
 import { codeSourceReceipt, codeSourceDetails, codeSourceChanged, deliveryFooter } from './code-source.js';
 import { baselinePreview, restartAtBaseline, validBaseRef } from './baseline.js';
 import { parseBaselineProposal } from './delivery-preparation.js';
 import { namedProjects, projectChoices, requiresProject, ungrantedNames, projectAnswer, projectGrantKey } from './routing.js';
 import { Store } from './store.js';
-import { canPublish, publicationBlocker, publicationKey } from './workspace.js';
+import { canPublish, publicationBlocker, publicationKey, TargetBranchMoved } from './workspace.js';
 import { mergeIntent, mergePullRequest } from './merge.js';
 import type { BaselineProposal, CardAction, Channel, Config, ContextSnapshot, Executor, HumanRequest, Incoming, PublicationTarget, RunHooks, Status, Task, View } from './types.js';
 
@@ -15,6 +16,7 @@ const HELP = `Agent Steward · 个人 Agent 分身（预览版）
 /new <项目> <任务要求> — 只读分析
 /edit <项目> <任务要求> — 在独立目录修改并验证
 /source <任务ID> — 查看实际代码来源
+/model [任务ID] — 查看本轮或最近一轮的模型与思考强度
 /baseline <任务ID> — 选择代码版本并从新副本继续
 /publish <任务ID> — 预览草稿 PR 交付
 /merge <任务ID> <PR链接> — 检查 PR，确认后代为合并
@@ -92,6 +94,15 @@ export class Engine {
       const match = /^(\/\S+)(?:\s+([\s\S]*))?$/.exec(text);
       let command = match?.[1] ?? '/new';
       let args = match?.[2]?.trim() ?? '';
+      if (command === '/model' || (!match && asksModelStatus(text))) {
+        const target = args ? this.store.get(args) : bound ?? (message.chatType === 'p2p' ? this.store.list(message.chatId)[0] : undefined);
+        if (args && (!target || target.chatId !== message.chatId || (message.conversation && target.conversation?.anchorId !== message.conversation.anchorId))) {
+          reply('任务不存在，请在对应话题查询。'); return;
+        }
+        const current = target && this.store.runtimeModel(target.id);
+        const scope = target ? (this.active?.task.id === target.id && (!target.nextAction || target.nextAction === 'execute') ? '当前执行参数' : '该任务最近一轮模型执行参数') : '当前没有可查询的模型执行';
+        reply(modelStatusText(current, this.config.modelSelection, scope), target ? {kind:'reply',taskId:target.id} : undefined); return;
+      }
       if (['控制台','打开控制台','设置','/console'].includes(text)) {
         reply(this.config.consoleUrl ? `在运行分身的电脑上打开：[分身控制台](${this.config.consoleUrl})。可以收藏此地址，设置权限、模型和项目。手机或其他电脑暂不支持访问这个本机地址。` : '控制台尚未启动，请在运行分身的电脑上启动新版服务。'); return;
       }
@@ -126,7 +137,13 @@ export class Engine {
         const pending = this.store.requests(bound.id);
         if (pending.length === 1 && pending[0].kind === 'input' && !this.pending.get(pending[0].id)?.explicit) { command = '/answer'; args = `${pending[0].id} ${text}`; }
         else if (['queued', 'running', 'waiting_input', 'waiting_approval'].includes(bound.status)) {
-          reply(bound.status === 'waiting_approval' ? '这一步需要你确认具体操作，我在等你的决定。' : bound.status === 'waiting_input' ? '这一步需要你通过卡片明确提交回答，普通聊天不会回答工具权限请求。' : '我还在处理前面的内容，完成后会在这里回复你。', { kind: ['waiting_approval','waiting_input'].includes(bound.status) ? 'task' : 'reply', taskId: bound.id }); return;
+          if (['queued','running'].includes(bound.status)) {
+            const pending = this.store.pendingFollowups(bound.id);
+            if (pending.join('').length + text.length > 32_000) { reply('待处理补充已达容量，本条尚未保存。请等当前执行结束后再发送。'); return; }
+            this.store.event(bound.id, 'followup_pending', text);
+            reply('已保存这条文字补充；当前执行继续。结束后我会提醒你处理，继续任务时会一并带入；这不代表批准任何操作。', {kind:'reply',taskId:bound.id}); return;
+          }
+          reply(bound.status === 'waiting_approval' ? '这一步需要你确认具体操作，我在等你的决定。' : '这一步需要你通过卡片明确提交回答，普通聊天不会回答工具权限请求。', { kind:'task', taskId: bound.id }); return;
         } else {
           const choices = namedProjects(this.config, text);
           if (choices.length > 1) {
@@ -374,6 +391,7 @@ export class Engine {
       abort.signal.throwIfAborted();
       this.store.event(task.id, 'permission_mode', task.permissionMode ?? 'ask');
       if (task.modelSelection) this.store.event(task.id, 'model_selection', JSON.stringify(task.modelSelection));
+      if (!task.nextAction || task.nextAction === 'execute') this.store.event(task.id,'runtime_model',JSON.stringify({model:null,effort:null}));
       const project = task.project === CONVERSATION ? conversationProject(this.config) : this.config.projects[task.project];
       if (!project) throw new Error('项目配置已移除。');
       const previousReport = this.store.delivery(task.id);
@@ -382,6 +400,10 @@ export class Engine {
       let baseline: BaselineProposal | undefined;
       const grantKey = projectGrantKey(project);
       const hooks: RunHooks = {
+        modelResolved: model => {
+          abort.signal.throwIfAborted();
+          this.store.event(task.id,'runtime_model',JSON.stringify(model));
+        },
         ...(task.project !== CONVERSATION && task.mode === 'workspace-write' && project.sandbox === 'workspace-write' && project.worktree
           && (!task.nextAction || task.nextAction === 'execute') ? {proposeBaseline:(request:BaselineProposal)=>{
             abort.signal.throwIfAborted();baseline=parseBaselineProposal(request);
@@ -501,16 +523,30 @@ export class Engine {
       if (report?.evidenceWarning) this.store.enqueue(task.chatId, report.evidenceWarning, {kind:'reply', taskId:task.id});
     } catch (error) {
       const state = this.store.get(task.id)?.status;
+      if (state !== 'cancelled' && !abort.signal.aborted && task.nextAction === 'publish' && error instanceof TargetBranchMoved) {
+        // No Git mutation has occurred. Preserve the implementation result and checks,
+        // and prepare a migration proposal; a fresh owner decision is still required.
+        this.store.transaction(() => {
+          this.store.event(task.id,'publication_blocked',error.message);
+          this.store.set(task.id,'review');
+          this.store.enqueue(task.chatId, `${error.message}\n代码改动、检查记录和截图保留；本次尚未提交或推送。接下来会展示迁移现有改动到最新基准的确认预览，确认后才建立新副本并重新验证。`, {kind:'reply',taskId:task.id});
+          this.store.queueBaseline(task.id,error.ref,{migrateChanges:true,delivery:null});
+        });
+        return;
+      }
       if (state !== 'cancelled') {
         const reason = error instanceof Error ? error.message : '执行失败';
-        this.store.set(task.id, this.stopped ? 'interrupted' : 'failed', reason);
+        this.store.set(task.id, this.stopped ? 'interrupted' : 'failed', task.nextAction === 'publish' ? undefined : reason);
+        if(task.nextAction === 'publish')this.store.event(task.id,'publication_failed',reason);
         if (task.nextAction === 'merge') this.refreshTaskCard(task);
-        if (task.conversation) this.store.enqueue(task.chatId, `这次没能完成：${reason}\n你可以引用回复这条消息，或 @我补充要求，我会接着处理。`, { kind: 'reply', taskId: task.id });
+        if (task.conversation) this.store.enqueue(task.chatId, `${task.nextAction === 'publish' ? 'PR 发布未完成，已有代码结果保留' : '这次没能完成'}：${reason}\n你可以引用回复这条消息，或 @我补充要求，我会接着处理。`, { kind: 'reply', taskId: task.id });
         else this.store.enqueue(task.chatId, `任务 ${task.id} ${this.stopped ? '已中断' : '失败'}：${reason}\n`
           + `不会自动重试已发生的操作。检查后用 /continue ${task.id} <要求> 继续。`, { kind: 'task', taskId: task.id });
       }
     } finally {
       clearTimeout(timeout);
+      const pendingFollowups = this.store.pendingFollowups(task.id);
+      if (pendingFollowups.length) this.store.enqueue(task.chatId, `还有 ${pendingFollowups.length} 条执行期间收到的补充尚未处理，已保存。继续任务时会一并带入；操作确认卡不会代为处理这些补充。`, {kind:'reply',taskId:task.id});
       if (snapshot && this.channel.releaseContext) {
         try { await this.channel.releaseContext(snapshot); }
         catch { this.store.event(task.id, 'media_cleanup_failed', '本次附件临时目录未能清理。'); }
