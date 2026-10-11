@@ -105,7 +105,7 @@ Keep the process and machine awake. Closing the service interrupts active work; 
 | `/new <project> <task>` | Create a read-only task |
 | `/edit <project> <task>` | Modify an allowlisted project in an isolated Git worktree |
 | `/publish <task>` | Open the Feishu PR preview; publication needs the card confirmation |
-| `/merge <task> <PR URL>` | Inspect remote commits and checks, then request one explicit merge confirmation |
+| `/merge <task> <PR URL>` | Authorize that PR once; inspect commits, wait for running checks, then merge |
 | Plain text | Use a named authorized Codex project for code; ordinary conversation needs no project; ask when the code target is missing |
 | `/list`, `/status <task>` | View status, latest recorded progress, result and outstanding request IDs |
 | `/model [task]` | Read the current or most recent execution model/effort and next-turn settings without starting or interrupting work |
@@ -115,7 +115,7 @@ Keep the process and machine awake. Closing the service interrupts active work; 
 | `/answer <request> <answer>` | Answer a question; multiple questions require JSON keyed by question ID |
 | `/done <task>` | Record the owner's acceptance of a result in `review` |
 
-Git project tasks retain their own worktree and continuation session. Modification tasks run locally configured checks after Codex finishes; delivery cards show actual changed files and check exit results. Passing checks enables an explicit draft PR preview and confirmation. Validation binds to file contents and check configuration; target-branch movement stops publication. The publisher reuses an existing open PR. A separate owner-confirmed merge flow checks the remote head, base, CI and review state; say “合并 PR <URL>” in the bound topic. In an existing topic, address the agent with “创建 PR” to open the same preview. UI tasks can return bounded native screenshot images to the original thread; see [screenshot delivery](docs/project-delivery.md#截图交付) for the manifest and evidence boundary.
+Git project tasks retain their own worktree and continuation session. Modification tasks run locally configured checks after Codex finishes; delivery cards show actual changed files and check exit results. Passing checks enables an explicit draft PR preview and confirmation. Validation binds to file contents and check configuration; target-branch movement stops publication. The publisher reuses an existing open PR. A separate owner-authorized merge flow checks the remote head, base, CI and review state; say “合并 PR <URL>” in the bound topic. In an existing topic, address the agent with “创建 PR” to open the same preview. UI tasks can return bounded native screenshot images to the original thread; see [screenshot delivery](docs/project-delivery.md#截图交付) for the manifest and evidence boundary.
 
 In an existing modification topic, natural requests such as “可以的，提交代码创建 PR 到 main” or “修好后提 PR” also hand off to Steward's PR preview after configured checks. The executor returns a structured proposal; it does not publish by itself. Requested repository/base mismatches produce a specific blocker, and the preview still requires the owner's confirmation.
 

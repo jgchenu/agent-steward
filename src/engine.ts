@@ -8,7 +8,7 @@ import { parseBaselineProposal } from './delivery-preparation.js';
 import { namedProjects, projectChoices, requiresProject, ungrantedNames, projectAnswer, projectGrantKey } from './routing.js';
 import { Store } from './store.js';
 import { canPublish, publicationBlocker, publicationKey, TargetBranchMoved } from './workspace.js';
-import { mergeIntent, mergePullRequest } from './merge.js';
+import { mergeIntent, mergePullRequest, MergeBlocked } from './merge.js';
 import type { BaselineProposal, CardAction, Channel, Config, ContextSnapshot, Executor, HumanRequest, Incoming, PublicationTarget, RunHooks, Status, Task, View } from './types.js';
 
 const HELP = `Agent Steward · 个人 Agent 分身（预览版）
@@ -19,7 +19,7 @@ const HELP = `Agent Steward · 个人 Agent 分身（预览版）
 /model [任务ID] — 查看本轮或最近一轮的模型与思考强度
 /baseline <任务ID> — 选择代码版本并从新副本继续
 /publish <任务ID> — 预览草稿 PR 交付
-/merge <任务ID> <PR链接> — 检查 PR，确认后代为合并
+/merge <任务ID> <PR链接> — 授权合并该 PR，等待检查并核对后执行
 /list 或 /status <任务ID> — 查进度
 /cancel <任务ID> — 取消执行（不会回滚已有改动）
 /continue <任务ID> <后续要求> — 继续已结束或中断的任务
@@ -31,6 +31,7 @@ const HELP = `Agent Steward · 个人 Agent 分身（预览版）
 export class Engine {
   private active?: { task: Task; abort: AbortController; done: Promise<void> };
   private pending = new Map<string, HumanRequest>();
+  private mergeAuthorizations = new Map<string, NonNullable<Task['mergeAuthorization']>>();
   private timer?: ReturnType<typeof setInterval>;
   private flushPromise?: Promise<void>;
   private stopped = false;
@@ -235,10 +236,12 @@ export class Engine {
         const project=this.config.projects[task.project];
         if(task.mode!=='workspace-write'||project?.sandbox!=='workspace-write'){reply('该任务没有修改项目的授权。');return;}
         const url=body||this.store.delivery(id)?.prUrl;
-        if(!url || !/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9]\d*$/.test(url)){reply('请提供要合并的 PR 链接，例如“合并 PR https://github.com/组织/仓库/pull/123”。我会先核对版本和检查结果，再请你确认。');return;}
+        if(!url || !/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9]\d*$/.test(url)){reply('请提供要合并的 PR 链接，例如“合并 PR https://github.com/组织/仓库/pull/123”。');return;}
         this.store.queueMerge(id,url);
+        this.store.event(id,'merge_requested',JSON.stringify({url,messageId:message.id}));
+        effects.push(()=>this.mergeAuthorizations.set(id,{url,messageId:message.id,projectKey:JSON.stringify(project)}));
         if(message.conversation)this.store.saveConversation(id,message.conversation);
-        reply('我先核对 PR 的提交、目标分支和检查结果，确认后再代你合并。',{kind:'reply',taskId:id});return;
+        reply(`已收到合并授权：${url}。我会核对当前提交和仓库要求；检查运行中会等待，通过后执行 squash 合并，必要时转为待审阅，不再重复确认。提交变化或真实阻塞会明确说明。`,{kind:'reply',taskId:id});return;
       }
       if (command === '/publish') { reply('请先查看交付预览，再明确创建草稿 PR。', { kind: 'publication', taskId: id, fresh: true }); return; }
       if (command === '/status') {
@@ -250,7 +253,7 @@ export class Engine {
           reply('任务当前未在执行。'); return;
         }
         this.store.set(id, 'cancelled'); this.store.expire(id);
-        effects.push(() => { if (this.active?.task.id === id) this.active.abort.abort(); });
+        effects.push(() => { this.mergeAuthorizations.delete(id); if (this.active?.task.id === id) this.active.abort.abort(); });
         reply(`任务 ${id} 已取消；已有文件修改保留。`, { kind: 'task', taskId: id }); return;
       }
       if (command === '/continue') {
@@ -376,7 +379,9 @@ export class Engine {
     if (this.stopped || this.active) return;
     const queued = this.store.list().find(t => t.status === 'queued');
     if (!queued) return;
-    const task = { ...queued, permissionMode: permissionMode(this.config), modelSelection: this.config.modelSelection ? {...this.config.modelSelection} : undefined };
+    const task = { ...queued, permissionMode: permissionMode(this.config), modelSelection: this.config.modelSelection ? {...this.config.modelSelection} : undefined,
+      ...(queued.nextAction === 'merge' ? {mergeAuthorization:this.mergeAuthorizations.get(queued.id)} : {}) };
+    this.mergeAuthorizations.delete(queued.id);
     const abort = new AbortController();
     this.store.set(task.id, 'running');
     if (!task.conversation || !this.channel.acknowledge) this.store.enqueue(task.chatId, `开始执行 ${task.id} · ${task.project === CONVERSATION ? '对话' : task.project}`, { kind: 'task', taskId: task.id });
@@ -523,6 +528,11 @@ export class Engine {
       if (report?.evidenceWarning) this.store.enqueue(task.chatId, report.evidenceWarning, {kind:'reply', taskId:task.id});
     } catch (error) {
       const state = this.store.get(task.id)?.status;
+      if (state !== 'cancelled' && !abort.signal.aborted && task.nextAction === 'merge' && error instanceof MergeBlocked) {
+        const reason = `PR 尚未合并：${error.message}`;
+        this.store.set(task.id,'review',reason);this.store.event(task.id,'merge_blocked',error.message);
+        this.refreshTaskCard(task);this.store.enqueue(task.chatId,reason,{kind:'reply',taskId:task.id});return;
+      }
       if (state !== 'cancelled' && !abort.signal.aborted && task.nextAction === 'publish' && error instanceof TargetBranchMoved) {
         // No Git mutation has occurred. Preserve the implementation result and checks,
         // and prepare a migration proposal; a fresh owner decision is still required.
@@ -572,6 +582,7 @@ export class Engine {
   }
   async stop(): Promise<void> {
     this.stopped = true; clearInterval(this.timer);
+    this.mergeAuthorizations.clear();
     this.active?.abort.abort(new Error('服务停止'));
     await this.active?.done;
     await this.flush();

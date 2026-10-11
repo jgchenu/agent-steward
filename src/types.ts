@@ -17,6 +17,8 @@ export interface Attachment {
 }
 export type PermissionMode = 'ask' | 'auto' | 'sandbox-auto' | 'full-access';
 export interface Task {
+  // Runtime-only capability from an authenticated, explicit owner merge command.
+  mergeAuthorization?: { url: string; messageId: string; projectKey: string };
   baselineOptions?: BaselineOptions | null;
   deliveryContext?: string;
   projectCandidates?: string[];

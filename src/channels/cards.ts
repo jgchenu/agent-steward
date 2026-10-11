@@ -209,7 +209,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   const actions: Element[] = [button('查看详情', intent('result'))];
   if (busy) actions.push(button('停止', intent('cancel'), false, '停止后会保留已有改动，不会自动回滚。'));
   else { const link = prButton(); if (link) actions.push(link); }
-  return card(task.nextAction === 'merge' && busy ? '正在处理合并' : task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : task.status === 'review' ? '处理结果' : label, projectLabel(task.project), color, [
+  return card(task.nextAction === 'merge' && busy ? '正在处理合并' : task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : task.status === 'review' ? (task.nextAction === 'merge' ? 'PR 尚未合并' : '处理结果') : label, projectLabel(task.project), color, [
     text((task.nextAction === 'merge' && busy ? '正在核对或执行本次 PR 合并，结果确认后会更新这里。' : task.result ?? store.latestProgress(task.id)) || (task.status === 'queued' ? '已排队，轮到后开始。' : '正在处理，结果会在这里回复。'), 6),
     ...(report ? [caption(`${codeSourceSummary(report)} · ${report.files.length} 个改动文件`)] : []),
     row(...actions),

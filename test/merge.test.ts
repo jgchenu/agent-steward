@@ -2,18 +2,18 @@ import {FeishuChannel} from '../src/channels/feishu.js';
 import {buildCard} from '../src/channels/cards.js';
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {Store} from '../src/store.js';import {Engine} from '../src/engine.js';
-import {mergeIntent,mergePullRequest,prSummary,mergeResultText} from '../src/merge.js';
+import {mergeIntent,mergePullRequest,prSummary,mergeResultText,mergeReadiness} from '../src/merge.js';
 import type {Config,RunHooks} from '../src/types.js';
 const head='a'.repeat(40),base='b'.repeat(40),commit='c'.repeat(40),url='https://github.com/test/repo/pull/139';
 function fixture(){
  const store=new Store(':memory:');const config:Config={ownerId:'owner',stateDir:'.',codexCommand:'unused',maxRunMinutes:1,groupChats:true,projects:{p:{path:'.',sandbox:'workspace-write'}}};
  const task=store.create('group','p','work','workspace-write',{anchorId:'root',sourceId:'root',scope:'thread'});store.set(task.id,'review');
  let pr:any={title:'按平台显示每日新增数量和占比',body:'每根柱子按平台分段，支持查看数量与占比。\n\nValidation:\nTest data',number:139,url,state:'OPEN',isDraft:true,headRefName:'feature',headRefOid:head,baseRefName:'main',baseRefOid:base,isCrossRepository:false,mergeable:'MERGEABLE',mergeStateStatus:'CLEAN',reviewDecision:'',statusCheckRollup:[{name:'CI',status:'COMPLETED',conclusion:'SUCCESS'}],changedFiles:6,additions:10,deletions:2};
- const calls:string[][]=[];let answer='accept',onConfirm=()=>{},onPut=()=>{};let asks=0;
- const gh=async(_cwd:string,args:string[])=>{calls.push(args);if(args[0]==='pr'&&args[1]==='view')return JSON.stringify(pr);if(args[1]==='ready'){pr.isDraft=false;return '';}
+ const calls:string[][]=[];let answer='accept',onConfirm=()=>{},onPut=()=>{};let asks=0;let onWait:()=>Promise<void>=async()=>{throw Error('still waiting')};
+ const gh=async(_cwd:string,args:string[])=>{calls.push(args);if(args[0]==='pr'&&args[1]==='view')return JSON.stringify(pr);if(args[1]==='ready'){pr.isDraft=false;if(pr.mergeStateStatus==='BLOCKED')pr.mergeStateStatus='CLEAN';return '';}
   if(args.includes('PUT')){onPut();pr={...pr,state:'MERGED',mergeCommit:{oid:commit}};return JSON.stringify({merged:true,sha:commit});}return JSON.stringify({allow_squash_merge:true});};
  const hooks:RunHooks={thread(){},progress(){},resolved(){},request:r=>{asks++;onConfirm();queueMicrotask(()=>r.resolve(answer));return 'request';}};
- return {store,config,task,calls,hooks,gh,get pr(){return pr},get asks(){return asks},setAnswer(v:string){answer=v},confirm(f:()=>void){onConfirm=f},put(f:()=>void){onPut=f},run:()=>mergePullRequest(store,config,{...task,mergeUrl:url},config.projects.p,hooks,AbortSignal.timeout(3000),gh,async()=> 'git@github.com:test/repo.git')};
+ return {store,config,task,calls,hooks,gh,get pr(){return pr},get asks(){return asks},setAnswer(v:string){answer=v},confirm(f:()=>void){onConfirm=f},put(f:()=>void){onPut=f},wait(f:()=>Promise<void>){onWait=f},run:(direct=false)=>mergePullRequest(store,config,{...task,mergeUrl:url,...(direct?{mergeAuthorization:{url,messageId:'owner-message',projectKey:JSON.stringify(config.projects.p)}}:{})},config.projects.p,hooks,AbortSignal.timeout(3000),gh,async()=> 'git@github.com:test/repo.git',onWait)};
 }
 test('merge previews exact remote commits, needs confirmation, converts draft and uses a head-bound squash PUT',async()=>{
  const f=fixture();try{const result=await f.run();assert.match(result,/已合并到 main/);assert.equal(f.asks,1);const put=f.calls.find(a=>a.includes('PUT'))!;assert.ok(put.includes('sha='+head));assert.ok(put.includes('merge_method=squash'));assert.equal(f.calls.filter(a=>a.includes('PUT')).length,1);assert.ok(f.calls.some(a=>a[1]==='ready'));assert.equal(f.store.db.prepare("SELECT count(*) n FROM events WHERE kind='merge_completed'").get()!.n,1);
@@ -28,7 +28,7 @@ test('decline, stale commits, draft changes and grant changes never merge',async
  }finally{f.store.close()}}
 });
 test('incomplete CI, review requirements, conflicts and unknown remote state block before confirmation',async()=>{
- for(const change of [{statusCheckRollup:[]},{statusCheckRollup:[{status:'IN_PROGRESS',conclusion:''}]},{statusCheckRollup:[{status:'COMPLETED',conclusion:'FAILURE'}]},{mergeable:'UNKNOWN'},{mergeStateStatus:'BLOCKED'},{reviewDecision:'CHANGES_REQUESTED'},{reviewDecision:'REVIEW_REQUIRED'},{isCrossRepository:true},{url:'https://github.com/other/repo/pull/139'}]){
+ for(const change of [{statusCheckRollup:[]},{statusCheckRollup:[{status:'IN_PROGRESS',conclusion:''}]},{statusCheckRollup:[{status:'COMPLETED',conclusion:'FAILURE'}]},{mergeable:'UNKNOWN'},{mergeStateStatus:'BLOCKED',isDraft:false},{reviewDecision:'CHANGES_REQUESTED'},{reviewDecision:'REVIEW_REQUIRED'},{isCrossRepository:true},{url:'https://github.com/other/repo/pull/139'}]){
   const f=fixture();try{Object.assign(f.pr,change);await assert.rejects(f.run());assert.equal(f.asks,0);assert.ok(!f.calls.some(a=>a.includes('PUT')));}finally{f.store.close()}
  }
 });
@@ -108,7 +108,7 @@ test('merge completion patches the existing approval card and sends a concise re
    patch:async(p:any)=>{patches.push(p);return {code:0}},
  }}};
  const engine=new Engine(f.store,f.config,{run:async()=>{throw Error('no model')}},channel,
-   (s,c,t,p,h,signal)=>mergePullRequest(s,c,t,p,h,signal,f.gh,async()=> 'git@github.com:test/repo.git'));
+   (s,c,t,p,h,signal)=>mergePullRequest(s,c,{...t,mergeAuthorization:undefined},p,h,signal,f.gh,async()=> 'git@github.com:test/repo.git'));
  const send=(id:string,text:string)=>engine.receive({id,text,senderId:'owner',senderType:'user',chatType:'group',chatId:'group',botMentioned:true,conversation:{anchorId:'root',sourceId:id,scope:'thread'}});
  const until=async(fn:()=>boolean)=>{for(let i=0;i<100;i++){if(fn()){await engine.flush();return;}await new Promise(r=>setTimeout(r,5))}assert.fail('timeout')};
  try {
@@ -127,7 +127,75 @@ test('merge completion patches the existing approval card and sends a concise re
    assert.equal(rendered.includes('PR 已合并'),outcome==='merged');
    if(outcome==='merged')assert.match(rendered,/数量和占比/);
    if(outcome==='declined')assert.match(rendered,/未合并/);
-   if(outcome==='failed')assert.match(rendered,/执行失败/);
+   if(outcome==='failed')assert.match(rendered,/PR 尚未合并/);
  } finally {await engine.stop();channel.close();f.store.close()}
  }
+});
+
+test('readiness distinguishes pending checks, unknown state, failed checks and actual conflicts',()=>{
+ const f=fixture();try{
+  assert.match(mergeReadiness({...f.pr,mergeStateStatus:'UNSTABLE',statusCheckRollup:[{name:'store-and-sql',status:'IN_PROGRESS'}]})!,/等待检查完成：store-and-sql/);
+  assert.match(mergeReadiness({...f.pr,mergeable:'UNKNOWN'})!,/UNKNOWN 不表示代码冲突/);
+  assert.match(mergeReadiness({...f.pr,mergeStateStatus:'UNSTABLE'})!,/UNSTABLE 不表示代码冲突/);
+  assert.throws(()=>mergeReadiness({...f.pr,statusCheckRollup:[{name:'unit',status:'COMPLETED',conclusion:'FAILURE'}]}),/unit \(FAILURE\)/);
+  assert.throws(()=>mergeReadiness({...f.pr,mergeable:'CONFLICTING'}),/已确认代码冲突/);
+  assert.throws(()=>mergeReadiness({...f.pr,isDraft:false,mergeStateStatus:'BLOCKED'}),/仓库合并要求尚未满足/);
+  assert.equal(mergeReadiness({...f.pr,mergeStateStatus:'BLOCKED'},true),undefined);
+  assert.equal(mergeIntent('可以，直接合并 PR '+url),url);assert.equal(mergeIntent('直接合并即可'),'');
+  assert.equal(mergeIntent('不要直接合并 PR '+url),undefined);assert.equal(mergeIntent('如何合并 PR '+url),undefined);
+ }finally{f.store.close()}
+});
+test('explicit owner authorization waits through CI and GitHub recomputation then merges once without another confirmation',async()=>{
+ const f=fixture();let waits=0;
+ try{
+  f.pr.mergeStateStatus='UNSTABLE';f.pr.statusCheckRollup=[{name:'CI',status:'IN_PROGRESS'}];
+  f.wait(async()=>{waits++;if(waits===1){f.pr.statusCheckRollup=[{name:'CI',status:'COMPLETED',conclusion:'SUCCESS'}];f.pr.mergeable='UNKNOWN';f.pr.mergeStateStatus='UNKNOWN'}else{f.pr.mergeable='MERGEABLE';f.pr.mergeStateStatus='BLOCKED'}});
+  assert.match(await f.run(true),/已合并到 main/);assert.equal(waits,2);assert.equal(f.asks,0);
+  assert.equal(f.calls.filter(a=>a.includes('PUT')).length,1);assert.ok(f.calls.find(a=>a.includes('PUT'))!.includes('sha='+head));
+  assert.equal(f.store.db.prepare("SELECT count(*) n FROM events WHERE kind='merge_waiting'").get()!.n,2);
+ }finally{f.store.close()}
+});
+test('CI failure or changed head/base while waiting stops the authorized merge without mutation',async()=>{
+ for(const change of ['failed','head','base','grant']){
+  const f=fixture();try{
+   f.pr.statusCheckRollup=[{name:'CI',status:'IN_PROGRESS'}];
+   f.wait(async()=>{f.pr.statusCheckRollup=[{name:'CI',status:'COMPLETED',conclusion:change==='failed'?'FAILURE':'SUCCESS'}];
+    if(change==='head')f.pr.headRefOid='d'.repeat(40);if(change==='base')f.pr.baseRefOid='e'.repeat(40);if(change==='grant')f.config.projects.p.sandbox='read-only';});
+   await assert.rejects(f.run(true),change==='failed'?/CI \(FAILURE\)/:/变化/);
+   assert.equal(f.asks,0);assert.ok(!f.calls.some(a=>a.includes('PUT')||a[1]==='ready'));
+  }finally{f.store.close()}
+ }
+});
+test('waiting stops on cancellation or bounded exhaustion; no implicit approval or GitHub auto-merge',async()=>{
+ const f=fixture();try{
+  f.pr.mergeable='UNKNOWN';let waits=0;f.wait(async()=>{waits++});
+  await assert.rejects(f.run(true),/15 分钟/);assert.equal(waits,90);assert.equal(f.asks,0);assert.ok(!f.calls.some(a=>a.includes('PUT')));
+  const abort=new AbortController();
+  await assert.rejects(mergePullRequest(f.store,f.config,{...f.task,mergeUrl:url,mergeAuthorization:{url,messageId:'owner',projectKey:JSON.stringify(f.config.projects.p)}},f.config.projects.p,f.hooks,abort.signal,f.gh,async()=> 'git@github.com:test/repo.git',async()=>{abort.abort(Error('owner cancelled'))}),/owner cancelled/);
+  assert.ok(!f.calls.some(a=>a.includes('PUT')||a.includes('--auto')));
+ }finally{f.store.close()}
+});
+test('an addressed owner command reaches the merger with one-shot authority, while duplicate delivery has no second effect',async()=>{
+ const f=fixture();let runs=0;const messages:string[]=[];
+ const engine=new Engine(f.store,f.config,{run:async()=>{throw Error('no model')}},{send:async(_,text)=>{messages.push(text)}},
+  (s,c,t,p,h,signal)=>{runs++;assert.equal(t.mergeAuthorization?.url,url);return mergePullRequest(s,c,t,p,h,signal,f.gh,async()=> 'git@github.com:test/repo.git')});
+ const message={id:'owner-command',text:'合并 PR '+url,senderId:'owner',senderType:'user' as const,chatId:'group',chatType:'group' as const,botMentioned:true,conversation:{anchorId:'root',sourceId:'owner-command',scope:'thread' as const}};
+ try{
+  engine.receive(message);engine.receive(message);
+  for(let i=0;i<100&&f.store.get(f.task.id)!.status!=='review';i++)await new Promise(r=>setTimeout(r,5));await engine.flush();
+  assert.equal(runs,1);assert.equal(f.calls.filter(a=>a.includes('PUT')).length,1);assert.equal(f.store.requests(f.task.id).length,0);
+  assert.ok(messages.some(x=>x.includes('不再重复确认')));assert.ok(messages.some(x=>x.includes('已合并到 main')));
+ }finally{await engine.stop();f.store.close()}
+});
+test('queued owner authority is process-bound and not revived from durable merge intent after restart',async()=>{
+ const f=fixture();const busy=f.store.create('dm','p','other work');let entered=false;
+ const first=new Engine(f.store,f.config,{run:async(_t,_p,_h,signal)=>new Promise<string>((_resolve,reject)=>{entered=true;signal.addEventListener('abort',()=>reject(signal.reason),{once:true})})},{send:async()=>{}});
+ try{
+  first.start();for(let i=0;i<100&&!entered;i++)await new Promise(r=>setTimeout(r,5));assert.ok(entered);
+  first.receive({id:'authorize',text:'合并 PR '+url,senderId:'owner',senderType:'user',chatType:'group',chatId:'group',botMentioned:true,conversation:{anchorId:'root',sourceId:'authorize',scope:'thread'}});
+  assert.equal(f.store.get(f.task.id)!.status,'queued');await first.stop();assert.equal(f.store.get(busy.id)!.status,'interrupted');
+  let restored=false;
+  const second=new Engine(f.store,f.config,{run:async()=>{throw Error('no model')}},{send:async()=>{}},async(_s,_c,t)=>{assert.equal(t.mergeAuthorization,undefined);restored=true;return 'needs fresh confirmation'});
+  try{second.start();for(let i=0;i<100&&!restored;i++)await new Promise(r=>setTimeout(r,5));assert.ok(restored)}finally{await second.stop()}
+ }finally{await first.stop();f.store.close()}
 });

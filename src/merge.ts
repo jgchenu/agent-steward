@@ -1,9 +1,10 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import type { Config, Project, RunHooks, Task, MergeReceipt } from './types.js';
 import type { Store } from './store.js';
 import { git, ghCommand, type Gh } from './workspace.js';
 
 export const mergeIntent = (text: string): string | undefined => {
-  const match = /^(?:请|帮我|请帮我|授权给你帮我|授权你|确认)?\s*合并\s*(?:这个|当前|刚才的)?\s*(?:PR)?\s*(https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9]\d*)?\s*[。！!]?$/i.exec(text.trim());
+  const match = /^(?:请|帮我|请帮我|授权给你帮我|授权你|授权|确认|可以[，,]?|好的[，,]?)?\s*(?:直接)?合并\s*(?:这个|当前|刚才的)?\s*(?:PR)?\s*(https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9]\d*)?\s*(?:即可|吧|就行)?[。！!]?$/i.exec(text.trim());
   return match ? match[1] ?? '' : undefined;
 };
 type Pull = { title?:string; body?:string; number:number; url:string; state:string; isDraft:boolean; headRefName:string; headRefOid:string;
@@ -12,13 +13,31 @@ type Pull = { title?:string; body?:string; number:number; url:string; state:stri
   changedFiles:number; additions:number; deletions:number; mergeCommit?:{oid:string}|null };
 const fields='title,body,number,url,state,isDraft,headRefName,headRefOid,baseRefName,baseRefOid,isCrossRepository,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,changedFiles,additions,deletions,mergeCommit';
 const sha=(v:string)=>/^[a-f0-9]{40}$/.test(v);
-function ready(p:Pull) {
-  if(p.baseRefName==='staging')throw Error('staging 按共享分支规则须由人工在 GitHub 审查并手动合并；分身只准备 PR。');
-  if(p.state!=='OPEN')throw Error('PR 已关闭或合并，请重新查看 GitHub 状态。');
-  if(p.isCrossRepository!==false || !sha(p.headRefOid) || !sha(p.baseRefOid))throw Error('不支持跨仓库或身份不完整的 PR 合并。');
-  if(p.mergeable!=='MERGEABLE'||p.mergeStateStatus!=='CLEAN')throw Error('PR 存在冲突、检查未定或仓库保护尚未满足；不会绕过保护或自动排队合并。');
-  if(!['','APPROVED'].includes(p.reviewDecision))throw Error('PR 仍需审查或有修改要求，请先完成审查。');
-  if(!Array.isArray(p.statusCheckRollup)||!p.statusCheckRollup.length||p.statusCheckRollup.some(c=>c.status ? c.status!=='COMPLETED'||c.conclusion!=='SUCCESS' : c.state!=='SUCCESS'))throw Error('当前 PR 提交的检查尚未全部成功；没有检查记录也不能代为合并。');
+export class MergeBlocked extends Error {}
+// A wait is not a conflict or a failed check. Return its concrete reason.
+export function mergeReadiness(p:Pull, allowDraft=false): string | undefined {
+  if(p.baseRefName==='staging')throw new MergeBlocked('staging 按共享分支规则须由人工在 GitHub 审查并手动合并；分身只准备 PR。');
+  if(p.state!=='OPEN')throw new MergeBlocked(`PR 当前状态为 ${p.state}，不执行合并。`);
+  if(p.isCrossRepository!==false || !sha(p.headRefOid) || !sha(p.baseRefOid))throw new MergeBlocked('不支持跨仓库或身份不完整的 PR 合并。');
+  if(p.mergeable==='CONFLICTING'||p.mergeStateStatus==='DIRTY')throw new MergeBlocked('GitHub 已确认代码冲突，需要先解决冲突并重新授权新的提交。');
+  if(!['','APPROVED'].includes(p.reviewDecision))throw new MergeBlocked(`PR 审查尚未满足：${p.reviewDecision}。请先完成审查。`);
+  if(!Array.isArray(p.statusCheckRollup)||!p.statusCheckRollup.length)throw new MergeBlocked('PR 尚无检查记录，无法确认当前提交已通过检查。');
+  const pending:string[]=[],failed:string[]=[];
+  for(const c of p.statusCheckRollup){
+    const name=(c.name||c.context||'未命名检查').slice(0,160);
+    if(c.status){
+      if(['QUEUED','IN_PROGRESS','WAITING','PENDING','REQUESTED'].includes(c.status))pending.push(name);
+      else if(c.status!=='COMPLETED'||c.conclusion!=='SUCCESS')failed.push(`${name} (${c.conclusion||c.status})`);
+    }else if(['PENDING','EXPECTED'].includes(c.state||''))pending.push(name);
+    else if(c.state!=='SUCCESS')failed.push(`${name} (${c.state||'UNKNOWN'})`);
+  }
+  if(failed.length)throw new MergeBlocked(`检查未成功：${failed.slice(0,20).join('、')}。需要处理检查结果，不代表代码冲突。`);
+  if(pending.length)return `等待检查完成：${pending.slice(0,20).join('、')}。尚未发现已确认的代码冲突。`;
+  if(p.mergeable==='UNKNOWN'||p.mergeStateStatus==='UNKNOWN')return '检查已成功，等待 GitHub 计算可合并状态；UNKNOWN 不表示代码冲突。';
+  if(p.mergeable!=='MERGEABLE')throw new MergeBlocked(`GitHub 可合并状态未识别：${p.mergeable}。`);
+  if(p.mergeStateStatus==='UNSTABLE')return '检查已成功，等待 GitHub 更新合并状态；UNSTABLE 不表示代码冲突。';
+  if(p.mergeStateStatus==='BEHIND')throw new MergeBlocked('目标分支已前进，仓库要求更新 PR 分支后再合并。');
+  if(p.mergeStateStatus!=='CLEAN' && !(allowDraft&&p.isDraft&&p.mergeStateStatus==='BLOCKED'))throw new MergeBlocked(`仓库合并要求尚未满足（${p.mergeStateStatus}）；当前没有代码冲突证据，请检查分支保护或合并队列要求。`);
 }
 // Remote PR text is display data only, never execution instructions. Keep the
 // opening description bounded and omit validation/release claims from the excerpt.
@@ -53,7 +72,7 @@ function recordMerge(store: Store, task: Task, pr: Pull): string {
   store.event(task.id,'merge_receipt',JSON.stringify(receipt));
   return mergeResultText(receipt);
 }
-export async function mergePullRequest(store:Store,config:Config,task:Task,project:Project,hooks:RunHooks,signal:AbortSignal,gh:Gh=ghCommand,repoGit:typeof git=git):Promise<string> {
+export async function mergePullRequest(store:Store,config:Config,task:Task,project:Project,hooks:RunHooks,signal:AbortSignal,gh:Gh=ghCommand,repoGit:typeof git=git, wait:(signal:AbortSignal)=>Promise<void>=signal=>delay(10_000,undefined,{signal})):Promise<string> {
   if(task.mode!=='workspace-write'||project.sandbox!=='workspace-write')throw Error('该任务没有修改项目的授权。');
   const match=/^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/([1-9]\d*)$/.exec(task.mergeUrl??'');
   if(!match)throw Error('请明确提供当前项目的 GitHub PR 链接。');
@@ -74,32 +93,53 @@ export async function mergePullRequest(store:Store,config:Config,task:Task,proje
   };
   const preview=await read();
   if(preview.state==='MERGED')return recordMerge(store,task,preview);
-  ready(preview);
-  const repo=JSON.parse(await gh(cwd,['api',`repos/${repository}`,'--jq','{allow_squash_merge}'],signal));
-  if(repo.allow_squash_merge!==true)throw Error('仓库未允许 squash 合并；请在 GitHub 按仓库要求处理。');
   const key=JSON.stringify([url,preview.headRefName,preview.headRefOid,preview.baseRefName,preview.baseRefOid]);
-  store.event(task.id,'merge_preview',key);
-  const description=`确认代你合并 [PR #${number}](${url})？\n来源：${preview.headRefName} @ ${preview.headRefOid}\n目标：${preview.baseRefName} @ ${preview.baseRefOid}\n范围：${preview.changedFiles} 个文件，+${preview.additions}/-${preview.deletions}；当前提交的 ${preview.statusCheckRollup.length} 项远端检查成功，GitHub 显示可合并。\n方式：squash${preview.isDraft?'，先将草稿转为待审阅':''}。只合并上述提交；分支或检查变化会停止。本地工作副本不会推送或重置，也不会删除分支。目标分支的现有 CI/CD 可能随合并触发。`;
-  const accepted=await new Promise<boolean>((resolve,reject)=>{
-    const abort=()=>reject(signal.reason??Error('合并已取消')); signal.addEventListener('abort',abort,{once:true});
-    if(signal.aborted){abort();return;}
-    try {hooks.request({kind:'approval',description,resolve:answer=>{signal.removeEventListener('abort',abort);resolve(answer==='accept');}});}
-    catch(e){signal.removeEventListener('abort',abort);reject(e);}
-  });
-  currentGrant();
-  if(!accepted)return '未合并，PR 保持原样。';
-  store.event(task.id,'merge_authorized',key);
-  const recheck=async()=>{
-    const p=await read();ready(p);
-    if(JSON.stringify([url,p.headRefName,p.headRefOid,p.baseRefName,p.baseRefOid])!==key || p.isDraft!==preview.isDraft)throw Error('确认后 PR 来源、目标或草稿状态发生变化，请重新预览并确认。');
-    return p;
+  const authorization=task.mergeAuthorization;
+  if(authorization && (authorization.url!==url || !authorization.messageId || authorization.projectKey!==projectKey))throw new MergeBlocked('本次合并授权与 PR 或项目配置不匹配，请重新指定 PR。');
+  const checkIdentity=(p:Pull)=>{
+    if(p.state==='MERGED'&&p.headRefOid===preview.headRefOid&&p.baseRefName===preview.baseRefName)return;
+    if(JSON.stringify([url,p.headRefName,p.headRefOid,p.baseRefName,p.baseRefOid])!==key || p.isDraft!==preview.isDraft)throw new MergeBlocked('授权后 PR 来源、目标提交或草稿状态发生变化，本次授权停止，请核对新版本后重新授权。');
   };
-  await recheck();
+  let lastWait='',polls=0,authorized=!!authorization;
+  const awaitReady=async(p:Pull,allowDraft:boolean):Promise<Pull>=>{
+    for(;;){
+      currentGrant();checkIdentity(p);
+      if(p.state==='MERGED')return p;
+      const reason=mergeReadiness(p,allowDraft);
+      if(!reason)return p;
+      if(reason!==lastWait){
+        lastWait=reason;store.event(task.id,'merge_waiting',reason);
+        store.enqueue(task.chatId,`${reason} ${authorized?'本次授权保留，状态满足后继续。':'状态满足后展示确认预览。'}可取消任务停止等待。`,{kind:'reply',taskId:task.id});
+      }
+      if(polls++>=90)throw new MergeBlocked('等待检查或 GitHub 状态超过 15 分钟，本次未合并；请查看检查结果后重新发送合并指令。');
+      await wait(signal);p=await read();
+    }
+  };
+  if(authorization)store.event(task.id,'merge_authorized',JSON.stringify({key,messageId:authorization.messageId,source:'owner-command'}));
+  let prepared=await awaitReady(preview,true);
+  if(prepared.state==='MERGED')return recordMerge(store,task,prepared);
+  const repo=JSON.parse(await gh(cwd,['api',`repos/${repository}`,'--jq','{allow_squash_merge}'],signal));
+  if(repo.allow_squash_merge!==true)throw new MergeBlocked('仓库未允许 squash 合并；请在 GitHub 按仓库要求处理。');
+  store.event(task.id,'merge_preview',key);
+  if(!authorization){
+    const description=`确认代你合并 [PR #${number}](${url})？\n来源：${preview.headRefName} @ ${preview.headRefOid}\n目标：${preview.baseRefName} @ ${preview.baseRefOid}\n范围：${preview.changedFiles} 个文件，+${preview.additions}/-${preview.deletions}；当前提交的 ${prepared.statusCheckRollup.length} 项远端检查成功。\n方式：squash${preview.isDraft?'，先将草稿转为待审阅':''}。只合并上述提交；版本变化会停止，现有 CI/CD 可能随合并触发。`;
+    const accepted=await new Promise<boolean>((resolve,reject)=>{
+      const abort=()=>reject(signal.reason??Error('合并已取消'));signal.addEventListener('abort',abort,{once:true});
+      if(signal.aborted){abort();return;}
+      try{hooks.request({kind:'approval',description,resolve:answer=>{signal.removeEventListener('abort',abort);resolve(answer==='accept');}});}
+      catch(e){signal.removeEventListener('abort',abort);reject(e);}
+    });
+    currentGrant();if(!accepted)return '未合并，PR 保持原样。';
+    authorized=true;store.event(task.id,'merge_authorized',key);
+  }
+  prepared=await awaitReady(await read(),true);
+  if(prepared.state==='MERGED')return recordMerge(store,task,prepared);
   if(preview.isDraft){
     await gh(cwd,['pr','ready',number,'--repo',repository],signal);
     preview.isDraft=false;
-    await recheck();
   }
+  prepared=await awaitReady(await read(),false);
+  if(prepared.state==='MERGED')return recordMerge(store,task,prepared);
   currentGrant();
   store.event(task.id,'merge_attempted',key);
   let response:any;
