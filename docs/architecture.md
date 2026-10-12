@@ -1,5 +1,7 @@
 # Architecture and invariants
 
+This document describes the implemented runtime. The accepted [LangGraph.js orchestration decision](decisions/langgraph-orchestration.md) defines a staged future migration and its validation gates; the current Engine remains in use.
+
 ## Scope
 
 One owner, one local instance, one active execution. The service is a task coordinator around official agent runtimes. It does not implement a model gateway. Transport, orchestration, persistence and execution have separate interfaces.

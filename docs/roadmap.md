@@ -1,5 +1,16 @@
 # Roadmap
 
+## Accepted orchestration direction
+
+Use TypeScript with embedded LangGraph.js, official executor adapters and local SQLite. Preserve Steward's ownership, authorization, evidence and delivery boundaries. See the [architecture decision and pilot gates](decisions/langgraph-orchestration.md).
+
+- [ ] Validate a persistent checkpointer and Codex session recovery in an isolated pilot
+- [ ] Implement one opt-in task flow with contextual intent, human correction and durable business waits
+- [ ] Verify crash reconciliation, cancellation, revoked authority and live channel continuation before expanding adoption
+- [ ] Introduce bounded local task delegation before cross-instance A2A collaboration
+
+This direction is accepted; framework integration and the capabilities above remain planned. Shared PostgreSQL and distributed scheduling require demonstrated deployment needs.
+
 ## 0.1 — Personal vertical slice
 
 - [x] Independent self-hosted repository with MIT license and reproducible npm lockfile
