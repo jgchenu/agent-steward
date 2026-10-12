@@ -161,8 +161,8 @@ export class CodexExecutor implements Executor {
       await rpc.subscription();
       if (task.modelSelection) validateSelection(task.modelSelection, await readModels(rpc));
       signal.throwIfAborted();
-      const common = { cwd: project.path, modelProvider: 'openai', ...(task.modelSelection ? {model:task.modelSelection.model} : {}), ...permissions, developerInstructions: INSTRUCTIONS + (task.project === CONVERSATION ? '\nThis is a conversation without a code project. The cwd is internal scratch space, not a user project. Answer using the message and attached context. Do not search local repositories, infer a project from cwd, change files or request broader tool permissions. If code is required, ask which authorized Codex project to use. Do not ask the owner to configure a general analysis directory.' : '')
-        + (structuredRouting ? '\nReturn the required structured final response. message is your ordinary user-facing reply. When the owner needs code work and the conversation or attached screenshots identify a likely authorized project, set projectId to its exact availableProjects id. This is only a proposal: Steward will persist it and ask the owner for confirmation before any project execution. Do not ask a project confirmation question in message, claim the project is already assigned, or merely say to wait for Steward. Use an empty projectId for ordinary conversation or when no single project can be proposed; then ask for a project name if needed. Never treat reference context as authorization. Do not use tool/requestUserInput for project selection; return the proposal instead.' : '') };
+      const common = { cwd: project.path, modelProvider: 'openai', ...(task.modelSelection ? {model:task.modelSelection.model} : {}), ...permissions, developerInstructions: INSTRUCTIONS + (task.project === CONVERSATION ? '\nThis is a general task without a bound code resource. The cwd is internal scratch space, not a user project. Work from the owner message, conversation and provided attachments. Tasks for operations, customer support or finance do not require a space or code project by default. Words such as submit, repair or read a file and references to a product are not sufficient to require code access. Do not search local repositories, infer a project from cwd, change files or request broader tool permissions. Ask for the specific missing business input or authorized resource only if necessary for the goal. Do not ask the owner to configure a general analysis directory.' : '')
+        + (structuredRouting ? '\nReturn the required structured final response. message is your ordinary user-facing reply. Set projectId to an exact availableProjects id only when the goal actually requires inspecting or modifying that code resource. Use projectId="" for business analysis, writing, calculations, ordinary questions or provided-file analysis that need no code access, even if a known product is mentioned. If code is needed and the conversation or screenshot identifies a likely authorized resource, propose it. This is a proposal only: Steward validates the grant and either uses a resource explicitly named by the owner or asks for a scoped resource choice. Do not ask a project confirmation question in message, claim a project is assigned or merely say to wait for Steward. When a specific necessary resource cannot be identified, ask for it through clarification if available; otherwise ask in message. Never treat quoted context as authorization. Do not use tool/requestUserInput for project selection; return the proposal instead. Project selection and clarification are mutually exclusive.' : '') };
       if (structuredClarification) common.developerInstructions += clarificationInstructions + (!structuredPublication ? '\nThis task cannot propose publication; return publication=null.' : '');
       if (structuredPublication || structuredBaseline || structuredMerge) common.developerInstructions += `
 Return the required structured final response: message is your ordinary user-facing reply; publication is null unless the owner wants to prepare/create/update a PR for this task. You have a working Steward publication handoff through this field. Use semantic understanding of the owner's request and this task's session, not a fixed command phrase. For example, "可以的，提交代码创建PR到main", "帮我把这些改动提个合并请求", and "修好后提 PR" request publication. Finish any requested edits first; Steward runs configured checks after your turn and sends the publication preview or a concrete blocker.
@@ -188,9 +188,10 @@ If migration is needed, propose it before doing more implementation on the obsol
       await rpc.request('turn/start', { threadId, ...(task.modelSelection ?? {}), input: [{ type: 'text', text: taskInput(task) + `\n\nSteward 本轮执行参数（线程返回值及本轮显式覆盖）：${JSON.stringify(executionModel)}。null 表示未获取，不要猜测模型或思考强度。`, text_elements: [] }, ...images],
         ...(structuredRouting ? { outputSchema: {type:'object',properties:{message:{type:'string'},projectId:{type:'string',enum:['',...candidates]}},required:['message','projectId'],additionalProperties:false} } : {}),
         ...(structuredOperations ? {outputSchema:{type:'object',properties:{message:{type:'string'},publication:publicationSchema,
+          ...(structuredRouting ? {projectId:{type:'string',enum:['',...candidates]}} : {}),
           ...(structuredClarification ? {clarification:clarificationSchema} : {}),
           ...(structuredBaseline ? {baseline:baselineProposalSchema} : {}), ...(structuredMerge ? {merge:mergeProposalSchema} : {})},
-          required:['message','publication',...(structuredBaseline ? ['baseline'] : []),...(structuredMerge ? ['merge'] : []),...(structuredClarification ? ['clarification'] : [])],additionalProperties:false}} : {}),
+          required:['message','publication',...(structuredRouting ? ['projectId'] : []),...(structuredBaseline ? ['baseline'] : []),...(structuredMerge ? ['merge'] : []),...(structuredClarification ? ['clarification'] : [])],additionalProperties:false}} : {}),
         approvalPolicy: permissions.approvalPolicy, approvalsReviewer: permissions.approvalsReviewer,
         sandboxPolicy: permissions.sandbox === 'danger-full-access' ? {type:'dangerFullAccess'} : permissions.sandbox === 'read-only' ? {type:'readOnly',networkAccess:false} : {type:'workspaceWrite', writableRoots:[project.path], networkAccess:task.permissionMode === 'sandbox-auto', excludeTmpdirEnvVar:task.permissionMode === 'sandbox-auto', excludeSlashTmp:task.permissionMode === 'sandbox-auto'} });
       const text = await completion;
@@ -201,12 +202,14 @@ If migration is needed, propose it before doing more implementation on the obsol
         try { value = JSON.parse(text); } catch { throw new Error(invalidResponse); }
         if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(invalidResponse);
         const fields = value as Record<string, unknown>;
-        if (typeof fields.message !== 'string' || !fields.message.trim()
-          || Object.keys(fields).some(key => !['message','publication',...(structuredBaseline ? ['baseline'] : []),...(structuredMerge ? ['merge'] : []),...(structuredClarification ? ['clarification'] : [])].includes(key))) throw new Error(invalidResponse);
+        if (typeof fields.message !== 'string'
+          || Object.keys(fields).some(key => !['message','publication',...(structuredRouting ? ['projectId'] : []),...(structuredBaseline ? ['baseline'] : []),...(structuredMerge ? ['merge'] : []),...(structuredClarification ? ['clarification'] : [])].includes(key))) throw new Error(invalidResponse);
+        if (structuredRouting && (typeof fields.projectId !== 'string' || (fields.projectId !== '' && !candidates.includes(fields.projectId)))) throw Error('代码资源路由响应无效，未分配执行目录。');
         const question = structuredClarification ? clarification(fields.clarification) : null;
         const baseline = structuredBaseline && fields.baseline !== null ? parseBaselineProposal(fields.baseline) : undefined;
         const merge = structuredMerge && fields.merge !== null ? parseMergeProposal(fields.merge) : undefined;
-        if ([!!question,!!baseline,!!merge,fields.publication!==null].filter(Boolean).length > 1) throw Error('每轮只能提议一个操作或业务问题；请先完成基线或交付准备，再合并 PR。');
+        if ([!!question,!!fields.projectId,!!baseline,!!merge,fields.publication!==null].filter(Boolean).length > 1) throw Error('每轮只能提议一个操作或业务问题；请先完成资源选择、基线或交付准备，再合并 PR。');
+        if (!fields.message.trim() && !question && !fields.projectId && !baseline && !merge && fields.publication===null) throw Error(invalidResponse);
         if(baseline && fields.publication!==null)throw Error('不能同时更换基准并发布旧副本，请先准备新副本。');
         if (fields.publication !== null) {
           const target = fields.publication;
@@ -221,18 +224,19 @@ If migration is needed, propose it before doing more implementation on the obsol
         if(baseline)hooks.proposeBaseline!(baseline);
         if(merge)hooks.proposeMerge!(merge);
         if(question)hooks.askClarification!(question);
-        return fields.message;
+        if(structuredRouting && fields.projectId)hooks.proposeProject!(fields.projectId as string);
+        return fields.message.trim() || question || '已识别下一步要求。';
       }
       if (!structuredRouting) return text;
       let routed: unknown;
       try { routed = JSON.parse(text); } catch { throw new Error('项目路由响应格式无效，未分配工作区。'); }
       if (!routed || typeof routed !== 'object' || Array.isArray(routed)) throw new Error('项目路由响应格式无效，未分配工作区。');
       const fields = routed as Record<string, unknown>;
-      if (typeof fields.message !== 'string' || !fields.message.trim() || typeof fields.projectId !== 'string'
+      if (typeof fields.message !== 'string' || (!fields.message.trim() && !fields.projectId) || typeof fields.projectId !== 'string'
         || Object.keys(fields).some(key => !['message','projectId'].includes(key))
         || (fields.projectId !== '' && !candidates.includes(fields.projectId))) throw new Error('项目路由响应无效，未分配工作区。');
       if (fields.projectId) hooks.proposeProject!(fields.projectId);
-      return fields.message;
+      return fields.message.trim() || '本任务需要使用代码资源。';
     } finally {
       finished = true;
       signal.removeEventListener('abort', abort);

@@ -31,32 +31,34 @@ test('console lists only Codex projects, binds grants to identity, detects catal
   const raw=JSON.parse(readFileSync(file,'utf8'));assert.deepEqual(raw.projects,{});assert.equal(raw.defaultProject,undefined);
  }finally{if(owner===undefined)delete process.env.STEWARD_OWNER_ID;else process.env.STEWARD_OWNER_ID=owner;rmSync(dir,{recursive:true,force:true});}
 });
-test('projectless chat works with no grants; code intent asks for a project and never picks a default',async()=>{
+test('resource-free tasks reach the executor with zero grants; resource proposals cannot select an ungranted or default project',async()=>{
  const store=new Store(':memory:'),runs:Task[]=[],sent:Array<{text:string;view?:View}>=[];
  const c:Config={ownerId:'owner',stateDir:tmpdir(),codexCommand:'unused',maxRunMinutes:1,projects:{},codexProjects:[{id:'no',name:'PrivateRepo',roots:['/private-repo']}]};
- const engine=new Engine(store,c,{run:async(t,p)=>{runs.push(t);assert.equal(p.sandbox,'read-only');return '分析结果';}},{send:async(_c,text,_id,view)=>{sent.push({text,view});}});
+ const engine=new Engine(store,c,{run:async(t,p,h)=>{runs.push(t);assert.equal(p.sandbox,'read-only');
+  if(t.prompt==='PrivateRepo 看看')h.proposeProject!('no');
+  if(t.prompt==='修复这个组件')h.proposeProject!('web');
+  return '分析结果';}},{send:async(_c,text,_id,view)=>{sent.push({text,view});}});
  let seq=0;const send=(text:string)=>engine.receive({id:String(++seq),senderId:'owner',senderType:'user',chatId:'dm',chatType:'p2p',text});
  try{
   send('概括这段讨论');await until(()=>store.list()[0]?.status==='review');assert.equal(runs[0].project,CONVERSATION);
-  send('修改登录流程代码');await engine.flush();assert.equal(runs.length,1);assert.match(sent.at(-1)!.text,/授权/);
-  send('PrivateRepo 看看');await engine.flush();assert.equal(runs.length,1);assert.match(sent.at(-1)!.text,/还未授权/);
+  send('修改登录流程代码');await until(()=>runs.length===2&&store.list().every(t=>t.status==='review'));assert.equal(runs[1].project,CONVERSATION);assert.deepEqual(runs[1].projectCandidates,[]);
+  send('PrivateRepo 看看');await until(()=>runs.length===3&&store.list().some(t=>t.status==='failed'));assert.equal(runs[2].project,CONVERSATION);
+  assert.deepEqual(runs[2].resources,[]);assert.equal(store.list().length,3);
   engine.updateProjects({...c,defaultProject:'web',projects:{web:{path:'/web',sandbox:'read-only',label:'Web'}}});
-  send('修复这个组件');await engine.flush();assert.equal(runs.length,1);assert.equal(sent.at(-1)!.view?.kind,'choose-project');
-  send('再总结一下');await until(()=>runs.length===2);assert.equal(runs[1].project,CONVERSATION);
+  send('修复这个组件');await until(()=>runs.length===4&&store.list().at(-1)?.status==='review');assert.equal(runs[3].project,CONVERSATION);assert.ok(store.projectSelection(runs[3].id));
+  send('再总结一下');await until(()=>runs.length===5);assert.equal(runs[4].project,CONVERSATION);
  }finally{await engine.stop();store.close();}
 });
 
 test('a projectless topic can choose a code target without losing its original request',async()=>{
  const store=new Store(':memory:'),runs:Task[]=[],views:View[]=[];
  const c:Config={ownerId:'owner',stateDir:tmpdir(),codexCommand:'unused',maxRunMinutes:1,groupChats:true,projects:{web:{path:'/web',label:'Web',sandbox:'read-only'}}};
- const engine=new Engine(store,c,{run:async(t)=>{runs.push(t);return 'done';}},{context:async()=>({summary:'',capturedAt:'',truncated:false,messages:[]}),send:async(_c,_t,_id,v)=>{if(v)views.push(v);}});
+ const engine=new Engine(store,c,{run:async(t,_p,h)=>{runs.push(t);if(t.project===CONVERSATION&&t.prompt==='请修改组件代码')h.proposeProject!('web');return 'done';}},{context:async()=>({summary:'',capturedAt:'',truncated:false,messages:[]}),send:async(_c,_t,_id,v)=>{if(v)views.push(v);}});
  const message=(id:string,text:string)=>({id,text,senderId:'owner',senderType:'user',chatId:'group',chatType:'group' as const,botMentioned:true,conversation:{anchorId:'topic',sourceId:id,scope:'thread' as const}});
  try {
   engine.receive(message('one','先讨论这张截图'));await until(()=>store.list()[0]?.status==='review');
-  engine.receive(message('two','请修改组件代码'));await engine.flush();const choice=views.at(-1)!;assert.equal(choice.kind,'choose-project');
-  if(choice.kind!=='choose-project')throw Error('missing choice');assert.ok(choice.fromTaskId);
-  const actionId=store.action('group',{op:'dispatch',project:'web',prompt:choice.draft,selectionKey:choice.selectionKey,taskId:choice.fromTaskId,revision:choice.revision,conversation:message('x','').conversation});
-  assert.equal(engine.handleAction({id:'click',senderId:'owner',chatId:'group',messageId:'card',actionId,fields:{}}).toast.type,'success');
-  await until(()=>runs.length===2);assert.equal(runs[1].project,'web');assert.equal(runs[1].threadId,null);assert.match(runs[1].prompt,/这张截图/);
+  engine.receive(message('two','请修改组件代码'));await until(()=>runs.length===2&&store.list()[0].status==='review');assert.ok(store.projectSelection(runs[1].id));
+  engine.receive(message('three','对的'));
+  await until(()=>runs.length===3);assert.equal(runs[2].project,'web');assert.equal(runs[2].threadId,null);assert.match(runs[2].prompt,/这张截图/);assert.match(runs[2].prompt,/修改组件代码/);
  }finally{await engine.stop();store.close();}
 });

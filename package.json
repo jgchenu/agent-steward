@@ -21,6 +21,7 @@
     "setup:feishu": "tsx scripts/setup-feishu.ts",
     "setup:media": "tsx --env-file-if-exists=.env scripts/setup-media.ts",
     "smoke:orchestration": "tsx scripts/smoke-orchestration.ts",
+    "smoke:resources": "tsx scripts/smoke-resources.ts",
     "smoke:workflow": "tsx scripts/smoke-workflow.ts",
     "smoke:codex": "tsx scripts/smoke-codex.ts",
     "smoke:workspace": "tsx scripts/smoke-workspace.ts"

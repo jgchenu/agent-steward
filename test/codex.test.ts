@@ -211,7 +211,7 @@ test('conversation execution cannot inherit full access and new code threads kee
  const rpc=new FakeRpc(),s=setup(rpc);rpc.onTurn=()=>rpc.finish();
  await s.executor.run({...task,project:'__conversation__',permissionMode:'full-access'}, {path:'.',sandbox:'read-only'},s.hooks,AbortSignal.timeout(5000));
  assert.equal(rpc.params['thread/start'].sandbox,'read-only');assert.equal(rpc.params['thread/start'].approvalPolicy,'never');assert.equal(rpc.params['thread/start'].projectId,null);
- assert.match(rpc.params['thread/start'].developerInstructions,/conversation without a code project/);
+ assert.match(rpc.params['thread/start'].developerInstructions,/general task without a bound code resource/);
  const code=new FakeRpc(),cs=setup(code);code.onTurn=()=>code.finish();await cs.executor.run(task,{path:'.',sandbox:'read-only',codexProjectId:'codex-project'},cs.hooks,AbortSignal.timeout(5000));assert.equal(code.params['thread/start'].projectId,'codex-project');
 });
 
@@ -266,6 +266,34 @@ test('invalid structured routing cannot turn arbitrary model prose, unknown proj
  const rpc=new FakeRpc(),s=setup(rpc),proposals:string[]=[];s.hooks.proposeProject=id=>proposals.push(id);
  rpc.onTurn=()=>{rpc.emit('item/completed',{item:{type:'agentMessage',text:JSON.stringify({message:'普通回答',projectId:''})}});rpc.finish()};
  assert.equal(await s.run({...task,project:'__conversation__',projectCandidates:['code']}),'普通回答');assert.deepEqual(proposals,[]);
+ const empty=new FakeRpc(),es=setup(empty);let selected='';es.hooks.proposeProject=id=>{selected=id;};
+ empty.onTurn=()=>{empty.emit('item/completed',{item:{type:'agentMessage',text:JSON.stringify({message:'',projectId:'code'})}});empty.finish();};
+ assert.equal(await es.run({...task,project:'__conversation__',projectCandidates:['code']}),'本任务需要使用代码资源。');assert.equal(selected,'code');
+});
+
+test('general-task resource proposals and durable questions share one schema and cannot conflict',async()=>{
+ const responses=[
+  {message:'完成业务分析',publication:null,projectId:'',clarification:null},
+  {message:'需要代码资源',publication:null,projectId:'code',clarification:null},
+  {message:'需要业务口径',publication:null,projectId:'',clarification:'按哪个日期范围？'},
+  {message:'',publication:null,projectId:'',clarification:'需要哪种活动主题？'},
+  {message:'',publication:null,projectId:'code',clarification:null},
+  {message:'',publication:null,projectId:'',clarification:null},
+  {message:'bad',publication:null,projectId:'ungranted',clarification:null},
+  {message:'bad',publication:null,projectId:'code',clarification:'同时提问'},
+  {message:'bad',publication:null,clarification:null},
+ ];
+ for(const [i,response] of responses.entries()){
+  const rpc=new FakeRpc(),s=setup(rpc);let resource:string|undefined,question:string|undefined;
+  s.hooks.proposeProject=id=>{resource=id;};s.hooks.askClarification=q=>{question=q;};
+  rpc.onTurn=()=>{rpc.emit('item/completed',{item:{type:'agentMessage',text:JSON.stringify(response),phase:'final_answer'}});rpc.finish();};
+  const run=()=>s.run({...task,project:'__conversation__',projectCandidates:['code']});
+  if(i<5){assert.equal(await run(),response.message||response.clarification||'已识别下一步要求。');assert.equal(resource,response.projectId||undefined);assert.equal(question,response.clarification||undefined);}
+  else{await assert.rejects(run(),/响应格式|路由响应|只能提议/);assert.equal(resource,undefined);assert.equal(question,undefined);}
+  const schema=rpc.params['turn/start'].outputSchema;
+  assert.deepEqual(schema.properties.projectId.enum,['','code']);assert.ok(schema.required.includes('projectId'));assert.ok(schema.required.includes('clarification'));
+  assert.equal(rpc.params['turn/start'].sandboxPolicy.type,'readOnly');
+ }
 });
 
 test('write turns hand semantic PR proposals to Steward on start and resume without exposing routing JSON', async () => {

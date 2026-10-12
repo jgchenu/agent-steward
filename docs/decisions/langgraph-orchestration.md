@@ -27,6 +27,8 @@ This decision does not introduce an API model fallback, a model proxy, shared su
 
 ## Task execution boundary
 
+Tasks are the primary unit; spaces, knowledge bases, tools and code projects are resources used only when necessary. See [domain terminology](../../CONTEXT.md). The task-first implementation starts natural requests without code bindings and enrolls resource-free business questions in the same durable pilot. Code access is a structured semantic proposal validated against owner grants. A uniquely owner-named matching resource can continue under its configured mode; inferred targets require a scoped choice. Business wording or product names alone do not select code resources. Multi-user roles and non-code resource connectors remain follow-up work rather than pretending a code workspace is required for every role.
+
 The orchestration loop is:
 
 ```text

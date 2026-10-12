@@ -8,6 +8,7 @@ import type { MergeProposal } from './operation-intent.js';
 
 interface Outcome {
   message: string; question: string | null;
+  projectId?: string; projectGrantKey?: string;
   publication?: PublicationTarget; baseline?: BaselineProposal; merge?: MergeProposal;
 }
 const State = Annotation.Root({
@@ -45,13 +46,18 @@ export class TaskOrchestrator {
         const outcome: Outcome = {message:'',question:null};
         const capture: RunHooks = {...hooks,
           askClarification: question => {outcome.question=clarification(question);},
+          ...(hooks.proposeProject ? {proposeProject:(id:string)=>{
+            const key=task.projectCandidateGrants?.[id];
+            if(typeof key !== 'string')throw Error('提议的代码资源不在本轮授权列表中。');
+            outcome.projectId=id;outcome.projectGrantKey=key;
+          }} : {}),
           ...(hooks.proposePublication ? {proposePublication:(p:PublicationTarget)=>{outcome.publication=p;}} : {}),
           ...(hooks.proposeBaseline ? {proposeBaseline:(p:BaselineProposal)=>{outcome.baseline=p;}} : {}),
           ...(hooks.proposeMerge ? {proposeMerge:(p:MergeProposal)=>{outcome.merge=p;}} : {}),
         };
         outcome.message = await executor.run({...task,prompt:state.prompt,threadId:this.store.get(task.id)!.threadId},project,capture,signal);
         signal.throwIfAborted();
-        if ([!!outcome.question,!!outcome.publication,!!outcome.baseline,!!outcome.merge].filter(Boolean).length > 1) throw Error('每轮只能提出一个业务问题或操作。');
+        if ([!!outcome.question,!!outcome.projectId,!!outcome.publication,!!outcome.baseline,!!outcome.merge].filter(Boolean).length > 1) throw Error('每轮只能提出一个业务问题或操作。');
         this.store.db.prepare('UPDATE graph_operations SET result=? WHERE id=?').run(JSON.stringify(outcome),id);
         return {outcome};
       })
@@ -82,6 +88,10 @@ export class TaskOrchestrator {
     const outcome = current.values.outcome as Outcome;
     if (!outcome) throw Error('编排未产生可交付结果。');
     // Revalidate proposals through the Engine; a cached result never grants authority.
+    if (outcome.projectId) {
+      if(task.projectCandidateGrants?.[outcome.projectId] !== outcome.projectGrantKey) throw Error('代码资源授权已变化，保存的提议不能继续。');
+      hooks.proposeProject?.(outcome.projectId);
+    }
     if (outcome.publication) hooks.proposePublication?.(outcome.publication);
     if (outcome.baseline) hooks.proposeBaseline?.(outcome.baseline);
     if (outcome.merge) hooks.proposeMerge?.(outcome.merge);

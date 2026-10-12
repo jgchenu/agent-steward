@@ -61,13 +61,13 @@ test('topic prose answers durable questions but cannot cross topics; cancelled a
   }finally{await engine.stop();store.close();}
 });
 
-test('pilot is opt in per new project task and disabling it never falls back to legacy execution',async()=>{
+test('pilot enrolls new tasks with optional resources and disabling it never falls back to legacy execution',async()=>{
   const store=new Store(':memory:');const old=store.create('dm','demo','old');let runs=0;
   let engine=new Engine(store,config,{run:async()=>{runs++;return 'done';}},channel);
   try{
     assert.equal(store.get(old.id)?.orchestration,'legacy');
     const task=store.create('dm','demo','pilot');assert.equal(task.orchestration,'langgraph-v1');
-    assert.equal(store.create('dm','__conversation__','chat').orchestration,'legacy');
+    assert.equal(store.create('dm','__conversation__','chat').orchestration,'langgraph-v1');
     store.set(old.id,'review');store.set(store.list()[2].id,'review');
     await engine.stop();engine=new Engine(store,{...config,langGraphPilot:false},{run:async()=>{runs++;return 'wrong';}},channel);
     engine.start();await until(()=>store.get(task.id)?.status==='failed');assert.equal(runs,0);
