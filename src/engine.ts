@@ -9,6 +9,7 @@ import { namedProjects, projectChoices, requiresProject, ungrantedNames, project
 import { Store } from './store.js';
 import { canPublish, publicationBlocker, publicationKey, TargetBranchMoved } from './workspace.js';
 import { mergeIntent, mergePullRequest } from './merge.js';
+import { parseMergeProposal, type MergeProposal } from './operation-intent.js';
 import type { BaselineProposal, CardAction, Channel, Config, ContextSnapshot, Executor, HumanRequest, Incoming, PublicationTarget, RunHooks, Status, Task, View } from './types.js';
 
 const HELP = `Agent Steward · 个人 Agent 分身（预览版）
@@ -398,8 +399,13 @@ export class Engine {
       let proposed: {project: string; grantKey: string} | undefined;
       let publication: PublicationTarget | undefined;
       let baseline: BaselineProposal | undefined;
+      let merge: MergeProposal | undefined;
       const grantKey = projectGrantKey(project);
       const hooks: RunHooks = {
+        ...(task.project !== CONVERSATION && task.mode === 'workspace-write' && project.sandbox === 'workspace-write'
+          && (!task.nextAction || task.nextAction === 'execute') ? {proposeMerge:(request:MergeProposal)=>{
+            abort.signal.throwIfAborted();merge=parseMergeProposal(request);
+          }} : {}),
         modelResolved: model => {
           abort.signal.throwIfAborted();
           this.store.event(task.id,'runtime_model',JSON.stringify(model));
@@ -487,6 +493,11 @@ export class Engine {
       }
       executionTask = { ...executionTask, projectCandidates: hooks.proposeProject ? Object.keys(this.config.projects) : undefined,
         routingContext: JSON.stringify({ currentProject: task.project === CONVERSATION ? null : project.label ?? task.project,
+        workflow: {availableOperations:[...(hooks.proposePublication ? ['publication'] : []),...(hooks.proposeBaseline ? ['baseline'] : []),...(hooks.proposeMerge ? ['merge_preview'] : [])],
+          currentPr:previousReport?.prUrl ?? null,publishedSha:previousReport?.publishedSha ?? null,
+          deliveryError:previousReport?.error ?? null,configuredTarget:project.worktree?.github ?? null,
+          history:this.store.workflowHistory(task.id),
+          approval:'Proposals only; each external operation retains its own owner confirmation.'},
         availableProjects: Object.entries(this.config.projects).map(([id,p]) => ({ id, name:p.label ?? id, aliases:p.aliases ?? [], capability:p.sandbox })) }) };
       let result = await this.executor.run(executionTask, project, hooks, abort.signal);
       if (abort.signal.aborted) throw abort.signal.reason;
@@ -496,7 +507,8 @@ export class Engine {
         result = `${result}\n\n这次使用 ${candidate.label ?? proposed.project} 项目处理，对吗？回复“对的”即可分配工作区并继续，也可以直接告诉我其他项目名称。`;
       }
       const report = this.store.delivery(task.id);
-      if ((publication || baseline) && (!this.config.projects[task.project] || projectGrantKey(this.config.projects[task.project]) !== grantKey)) {
+      if ([!!publication,!!baseline,!!merge].filter(Boolean).length > 1) throw Error('每轮只能提议一个 Steward 操作。');
+      if ((publication || baseline || merge) && (!this.config.projects[task.project] || projectGrantKey(this.config.projects[task.project]) !== grantKey)) {
         throw new Error('项目交付配置已变化，请按当前配置重新准备 PR。');
       }
       const evidence = report ? `\n\n${deliveryFooter(report, project)}` : '';
@@ -507,6 +519,11 @@ export class Engine {
         if (baseline) {
           this.store.event(task.id,'baseline_proposed',JSON.stringify(baseline));
           this.store.queueBaseline(task.id,baseline.ref,{migrateChanges:baseline.migrateChanges,delivery:baseline.delivery});
+        } else if (merge) {
+          const url = merge.url || previousReport?.prUrl;
+          this.store.event(task.id,'merge_proposed',JSON.stringify({url:url ?? null}));
+          if (!url) this.store.enqueue(task.chatId,'当前任务还没有已记录的 PR。请指出要处理的 PR，或先交付当前改动。',{kind:'reply',taskId:task.id});
+          else this.store.queueMerge(task.id,url);
         } else if (publication) {
           // A semantic proposal opens a preview only; it never writes an authorization key.
           const target = project.worktree?.github;

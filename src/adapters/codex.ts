@@ -4,6 +4,7 @@ import { runtimePermissions } from '../permissions.js';
 import { elicitation } from './elicitation.js';
 import { taskInput } from '../channels/context.js';
 import { baselineProposalSchema, parseBaselineProposal } from '../delivery-preparation.js';
+import { mergeProposalSchema, parseMergeProposal, semanticMergeInstructions } from '../operation-intent.js';
 import { CodexRpc, type RpcMessage } from './rpc.js';
 import type { Executor, Project, RunHooks, Task } from '../types.js';
 
@@ -13,7 +14,7 @@ const publicationSchema = {anyOf:[{type:'null'}, {type:'object',
 
 const INSTRUCTIONS = `You are executing a task for the owner of Agent Steward.
 Read the repository's AGENTS.md before changes. Keep work inside the configured project.
-Do not expose credentials. Do not merge PRs yourself, enable auto-merge, force-push, or push main/staging. Steward has a separate owner-confirmed merge action: the owner can say "合并 PR <GitHub URL>" in this topic. It previews exact commits and checks, then asks for one confirmation before merging. Do not claim merging is categorically forbidden; delegate it to that action rather than running merge commands yourself.
+Do not expose credentials. Do not merge PRs yourself, enable auto-merge, force-push, or push main/staging. Steward has a separate owner-confirmed merge action. Use the structured merge handoff when available; do not require the owner to repeat a command or known PR link. It previews exact commits and checks, then asks for one confirmation before merging. Do not claim merging is categorically forbidden; delegate it to that action rather than running merge commands yourself.
 Steward owns the task branch and PR delivery. Do not commit, push, create PRs, switch branches, or modify Git worktree metadata yourself. Preserve unrelated local edits. Implement the requested change and leave it in the provided working directory. The owner can publish a reviewed draft PR with a separate Steward action.
 Ask for human input when blocked. A tool approval is permission for that specific action only.
 Respond like a thoughtful colleague in the owner's language. Answer the actual question directly, with concise connected prose and useful reasoning. Do not wrap ordinary answers in task status, acceptance checklists or instructions to click buttons. Ask one focused question at a time when information is missing. For implementation work, report actual changes, relevant validation and unresolved limitations; for ordinary analysis, just give the answer.
@@ -63,7 +64,9 @@ export class CodexExecutor implements Executor {
     const structuredPublication = task.project !== CONVERSATION && task.mode === 'workspace-write'
       && project.sandbox === 'workspace-write' && !!hooks.proposePublication;
     const structuredBaseline = task.project !== CONVERSATION && !!project.worktree && !!hooks.proposeBaseline;
-    const structuredOperations = structuredPublication || structuredBaseline;
+    const structuredMerge = task.project !== CONVERSATION && task.mode === 'workspace-write'
+      && project.sandbox === 'workspace-write' && !!hooks.proposeMerge;
+    const structuredOperations = structuredPublication || structuredBaseline || structuredMerge;
     const rpc = this.factory(this.command, project.path);
     let threadId: string | undefined, result = '', finished = false;
     const settled = new Set<string | number>();
@@ -165,6 +168,7 @@ Questions about why/how PRs work, negations, hypotheticals, quoted messages and 
 You also have a working Steward baseline preparation handoff via the baseline field. Return baseline=null normally. When the owner asks for a new copy from another version, migrating these changes to the latest base, or preparing missing delivery configuration, return {ref,migrateChanges,delivery}. Set ref to the explicit Git ref (for "latest main", use origin/main); clarify if the target is ambiguous. Set migrateChanges=true only when the owner asks to carry the current changes forward. Preserve the old worktree; do not create/switch worktrees yourself. Steward will resolve the exact SHA, show the concrete operation and ask for one confirmation, then create a new session with an approved snapshot for migration.
 For missing delivery configuration requested by the owner, delivery contains repository, baseBranch and the complete checks array (name,command,args,timeoutSeconds) selected from this project's actual scripts/docs. This must match origin; ref must be origin/<baseBranch>. Use delivery=null when no configuration update is needed/requested. Do not invent verification commands, use a no-op, or add repository CI as a substitute for Steward configuration. The known configuration/blockers are already in deliveryContext. Do not request the same error again, edit private Steward configuration yourself, or tell the owner to repeat 更新代码版本. This is a proposal, not authorization; Steward shows every check command before execution.
 If migration is needed, propose it before doing more implementation on the obsolete base and leave publication=null; the new task carries forward the owner's PR request. A baseline already completed for this task must not be proposed again merely because its historical prompt mentions migration. Do not claim the new copy, configuration update or migration already happened.`;
+      if (structuredMerge) common.developerInstructions += semanticMergeInstructions;
       const response = await rpc.request(task.threadId ? 'thread/resume' : 'thread/start',
         task.threadId ? { ...common, threadId: task.threadId } : { ...common, projectId: project.codexProjectId ?? null });
       threadId = response?.thread?.id;
@@ -180,8 +184,8 @@ If migration is needed, propose it before doing more implementation on the obsol
       await rpc.request('turn/start', { threadId, ...(task.modelSelection ?? {}), input: [{ type: 'text', text: taskInput(task) + `\n\nSteward 本轮执行参数（线程返回值及本轮显式覆盖）：${JSON.stringify(executionModel)}。null 表示未获取，不要猜测模型或思考强度。`, text_elements: [] }, ...images],
         ...(structuredRouting ? { outputSchema: {type:'object',properties:{message:{type:'string'},projectId:{type:'string',enum:['',...candidates]}},required:['message','projectId'],additionalProperties:false} } : {}),
         ...(structuredOperations ? {outputSchema:{type:'object',properties:{message:{type:'string'},publication:publicationSchema,
-          ...(structuredBaseline ? {baseline:baselineProposalSchema} : {})},
-          required:['message','publication',...(structuredBaseline ? ['baseline'] : [])],additionalProperties:false}} : {}),
+          ...(structuredBaseline ? {baseline:baselineProposalSchema} : {}), ...(structuredMerge ? {merge:mergeProposalSchema} : {})},
+          required:['message','publication',...(structuredBaseline ? ['baseline'] : []),...(structuredMerge ? ['merge'] : [])],additionalProperties:false}} : {}),
         approvalPolicy: permissions.approvalPolicy, approvalsReviewer: permissions.approvalsReviewer,
         sandboxPolicy: permissions.sandbox === 'danger-full-access' ? {type:'dangerFullAccess'} : permissions.sandbox === 'read-only' ? {type:'readOnly',networkAccess:false} : {type:'workspaceWrite', writableRoots:[project.path], networkAccess:task.permissionMode === 'sandbox-auto', excludeTmpdirEnvVar:task.permissionMode === 'sandbox-auto', excludeSlashTmp:task.permissionMode === 'sandbox-auto'} });
       const text = await completion;
@@ -192,8 +196,10 @@ If migration is needed, propose it before doing more implementation on the obsol
         if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('PR 交付响应格式无效，未发起发布。');
         const fields = value as Record<string, unknown>;
         if (typeof fields.message !== 'string' || !fields.message.trim()
-          || Object.keys(fields).some(key => !['message','publication',...(structuredBaseline ? ['baseline'] : [])].includes(key))) throw new Error('PR 交付响应格式无效，未发起发布。');
+          || Object.keys(fields).some(key => !['message','publication',...(structuredBaseline ? ['baseline'] : []),...(structuredMerge ? ['merge'] : [])].includes(key))) throw new Error('PR 交付响应格式无效，未发起发布。');
         const baseline = structuredBaseline && fields.baseline !== null ? parseBaselineProposal(fields.baseline) : undefined;
+        const merge = structuredMerge && fields.merge !== null ? parseMergeProposal(fields.merge) : undefined;
+        if ([!!baseline,!!merge,fields.publication!==null].filter(Boolean).length > 1) throw Error('每轮只能提议一个操作；请先完成基线或交付准备，再合并 PR。');
         if(baseline && fields.publication!==null)throw Error('不能同时更换基准并发布旧副本，请先准备新副本。');
         if (fields.publication !== null) {
           const target = fields.publication;
@@ -206,6 +212,7 @@ If migration is needed, propose it before doing more implementation on the obsol
           hooks.proposePublication!({repository:p.repository,baseBranch:p.baseBranch});
         }
         if(baseline)hooks.proposeBaseline!(baseline);
+        if(merge)hooks.proposeMerge!(merge);
         return fields.message;
       }
       if (!structuredRouting) return text;

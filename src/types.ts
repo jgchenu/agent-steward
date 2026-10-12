@@ -69,6 +69,7 @@ export interface HumanRequest {
   resolve: (answer: string) => void;
 }
 export interface RunHooks {
+  proposeMerge?: (request: import('./operation-intent.js').MergeProposal) => void;
   modelResolved?: (model: import('./models.js').RuntimeModel) => void;
   proposeBaseline?: (request: BaselineProposal) => void;
   proposeProject?: (projectId: string) => void;

@@ -411,3 +411,21 @@ for (const accept of [false,true]) test(`target movement preserves checked work 
   assert.ok(messages.some(m=>m.includes('PR 发布暂缓')));assert.ok(!messages.some(m=>m.includes('这次没能完成')));
  }finally{await engine.stop();f.close()}
 });
+
+
+test('semantic merge preview avoids local checks and rejects unsubmitted edits',async()=>{
+ for(const scenario of ['clean','dirty','edited'] as const){
+  const f=fixture();let proposed=0;
+  try{
+   const ex=new WorkspaceExecutor(f.config,f.store,{run:async(_t,p,h)=>{
+    if(scenario==='edited')writeFileSync(join(p.path,'README.md'),'new edits');
+    h.proposeMerge!({url:''});return 'preview';
+   }});
+   if(scenario==='dirty')await f.executor.run(f.task,f.project,hooks,AbortSignal.timeout(5000));
+   const run=ex.run(f.task,f.project,{...hooks,proposeMerge:()=>{proposed++}},AbortSignal.timeout(5000));
+   if(scenario==='clean'){assert.equal(await run,'preview');assert.deepEqual(f.store.delivery(f.task.id)!.checks,[])}
+   else{await assert.rejects(run,/未交付改动/);assert.equal(f.store.delivery(f.task.id)!.ready,false)}
+   assert.equal(proposed,1);
+  }finally{f.close()}
+ }
+});
