@@ -115,7 +115,9 @@ Keep the process and machine awake. Closing the service interrupts active work; 
 | `/answer <request> <answer>` | Answer a question; multiple questions require JSON keyed by question ID |
 | `/done <task>` | Record the owner's acceptance of a result in `review` |
 
-Git project tasks retain their own worktree and continuation session. Modification tasks run locally configured checks after Codex finishes; delivery cards show actual changed files and check exit results. Passing checks enables an explicit draft PR preview and confirmation. Validation binds to file contents and check configuration; target-branch movement stops publication. The publisher reuses an existing open PR. A separate owner-confirmed merge flow checks the remote head, base, CI and review state; say “合并 PR <URL>” in the bound topic. In an existing topic, address the agent with “创建 PR” to open the same preview. UI tasks can return bounded native screenshot images to the original thread; see [screenshot delivery](docs/project-delivery.md#截图交付) for the manifest and evidence boundary.
+Git project tasks retain their own worktree and continuation session. Modification tasks run locally configured checks after Codex finishes; delivery cards show actual changed files and check exit results. Passing checks enables an explicit draft PR preview and confirmation. Validation binds to file contents and check configuration; target-branch movement stops publication. The publisher reuses an existing open PR. A separate owner-confirmed merge flow checks the remote head, base, CI and review state; natural requests in the bound topic can propose the next merge preview using its recorded PR, without repeating a command or link. In an existing topic, address the agent with “创建 PR” to open the same preview. UI tasks can return bounded native screenshot images to the original thread; see [screenshot delivery](docs/project-delivery.md#截图交付) for the manifest and evidence boundary.
+
+Natural merge requests (including context-dependent follow-ups such as “把刚才那份收尾吧”) use a structured proposal and the current task’s PR/result context. Steward inspects the remote PR and asks for a concrete owner confirmation; the model does not merge. Ambiguous targets require clarification. Unsubmitted workspace changes must be delivered first. Commands remain available as shortcuts.
 
 In an existing modification topic, natural requests such as “可以的，提交代码创建 PR 到 main” or “修好后提 PR” also hand off to Steward's PR preview after configured checks. The executor returns a structured proposal; it does not publish by itself. Requested repository/base mismatches produce a specific blocker, and the preview still requires the owner's confirmation.
 
@@ -163,6 +165,7 @@ Optional live check, deliberately outside CI:
 
 ```sh
 npm run smoke:codex
+npm run smoke:workflow # Live semantic evaluation, read-only scratch; no Feishu or merge actions
 ```
 
 This consumes a small amount of your subscription quota in a read-only temporary directory. It verifies authentication, thread creation, inference and final-message handling; it does not verify live Feishu delivery or interactive approval behavior.

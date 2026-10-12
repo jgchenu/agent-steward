@@ -366,3 +366,38 @@ test('resolved thread model and effort are recorded for defaults and resumes and
   assert.equal(rpc.params['turn/start'].model,undefined);
  }
 });
+
+
+test('semantic merge proposals work on new and resumed turns and hide protocol JSON',async()=>{
+ for(const threadId of [null,'thread']){
+  const rpc=new FakeRpc(),s=setup(rpc),proposals:unknown[]=[],progress:string[]=[];
+  s.hooks.proposeMerge=p=>proposals.push(p);s.hooks.progress=p=>progress.push(p);
+  rpc.onTurn=()=>{rpc.emit('item/completed',{item:{type:'agentMessage',text:JSON.stringify({message:'先核对当前 PR 再请你确认。',publication:null,merge:{url:''}})}});rpc.finish()};
+  assert.equal(await s.executor.run({...task,threadId,mode:'workspace-write',prompt:'就按刚才说的把这件事收尾'}, {path:'.',sandbox:'workspace-write'},s.hooks,AbortSignal.timeout(5000)),'先核对当前 PR 再请你确认。');
+  assert.deepEqual(proposals,[{url:''}]);assert.deepEqual(progress,[]);
+  assert.ok(rpc.params['turn/start'].outputSchema.properties.merge);
+  assert.match(rpc.params[threadId?'thread/resume':'thread/start'].developerInstructions,/rather than matching command phrases/);
+ }
+});
+test('merge schema rejects malformed, unauthorized, conflicting or unsuccessful proposals before any hook',async()=>{
+ for(const response of [
+  {message:'ok',publication:null},
+  {message:'ok',publication:null,merge:{url:'https://evil.test/pr/1'}},
+  {message:'ok',publication:null,merge:{url:'',approve:true}},
+  {message:'ok',publication:{repository:'',baseBranch:''},merge:{url:''}},
+ ]){
+  const rpc=new FakeRpc(),s=setup(rpc);s.hooks.proposeMerge=()=>assert.fail('invalid merge');s.hooks.proposePublication=()=>assert.fail('partial dispatch');
+  rpc.onTurn=()=>{rpc.emit('item/completed',{item:{type:'agentMessage',text:JSON.stringify(response)}});rpc.finish()};
+  await assert.rejects(s.executor.run({...task,mode:'workspace-write'},{path:'.',sandbox:'workspace-write'},s.hooks,AbortSignal.timeout(5000)));
+ }
+ for(const status of ['completed','failed']){
+  const rpc=new FakeRpc(),s=setup(rpc);s.hooks.proposeMerge=()=>assert.fail('no merge');
+  rpc.onTurn=()=>{rpc.emit('item/completed',{item:{type:'agentMessage',text:JSON.stringify({message:'仅解释，不操作。',publication:null,merge:status==='failed'?{url:''}:null})}});rpc.finish(status)};
+  const run=s.executor.run({...task,mode:'workspace-write'},{path:'.',sandbox:'workspace-write'},s.hooks,AbortSignal.timeout(5000));
+  if(status==='failed')await assert.rejects(run);else assert.equal(await run,'仅解释，不操作。');
+ }
+ for(const project of ['p','__conversation__']){
+  const rpc=new FakeRpc(),s=setup(rpc);s.hooks.proposeMerge=()=>assert.fail('read-only merge');rpc.onTurn=()=>rpc.finish();
+  await s.executor.run({...task,project,mode:'read-only'},{path:'.',sandbox:'read-only'},s.hooks,AbortSignal.timeout(5000));assert.equal(rpc.params['turn/start'].outputSchema,undefined);
+ }
+});

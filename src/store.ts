@@ -199,6 +199,11 @@ export class Store {
     const row = this.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='merge_receipt' AND seq > (SELECT COALESCE(MAX(seq),0) FROM events WHERE taskId=? AND kind='queued') ORDER BY seq DESC LIMIT 1").get(taskId, taskId) as { body: string } | undefined;
     return row ? JSON.parse(row.body) as MergeReceipt : undefined;
   }
+  workflowHistory(taskId: string): { lastResult: string | null; mergedPr: MergeReceipt | null } {
+    const result = this.db.prepare("SELECT body FROM events WHERE taskId=? AND kind IN ('review','failed') AND body<>'' ORDER BY seq DESC LIMIT 1").get(taskId) as {body:string} | undefined;
+    const receipt = this.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='merge_receipt' ORDER BY seq DESC LIMIT 1").get(taskId) as {body:string} | undefined;
+    return {lastResult:result?.body.slice(0,6000) ?? null,mergedPr:receipt ? JSON.parse(receipt.body) as MergeReceipt : null};
+  }
   latestProgress(taskId: string): string {
     const event = this.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='progress' ORDER BY seq DESC LIMIT 1")
       .get(taskId) as { body: string } | undefined;

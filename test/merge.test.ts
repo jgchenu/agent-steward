@@ -131,3 +131,40 @@ test('merge completion patches the existing approval card and sends a concise re
  } finally {await engine.stop();channel.close();f.store.close()}
  }
 });
+
+
+test('semantic continuation uses recorded PR, reaches real controller preview and still needs owner approval',async()=>{
+ const f=fixture();let modelRuns=0;let context:any;
+ f.store.saveDelivery(f.task.id,{workspace:{taskId:f.task.id,source:'.',path:'.',branch:'feature',baseRef:'main',baseSha:base},mode:'workspace-write',capturedAt:'',files:[],diffStat:'',fingerprint:'fp',headSha:head,checks:[],ready:false,prUrl:url,publishedSha:head});
+ const engine=new Engine(f.store,f.config,{run:async(t,_p,h)=>{modelRuns++;context=JSON.parse(t.routingContext!);h.proposeMerge!({url:''});return '我先核对当前 PR，随后请你确认合并。';}},
+ {send:async()=>{},context:async()=>({summary:'',capturedAt:'',truncated:false,messages:[]})},
+ (s,c,t,p,h,signal)=>mergePullRequest(s,c,t,p,h,signal,f.gh,async()=> 'git@github.com:test/repo.git'));
+ const send=(id:string,text:string,senderId='owner')=>engine.receive({id,text,senderId,senderType:'user',chatId:'group',chatType:'group',botMentioned:true,conversation:{anchorId:'root',sourceId:id,scope:'thread'}});
+ const until=async(fn:()=>boolean)=>{for(let i=0;i<100;i++){if(fn())return;await new Promise(r=>setTimeout(r,5))}assert.fail('timeout')};
+ try{
+  f.store.set(f.task.id,'review','当前 PR 已准备好，下一步检查合并。');
+  send('foreign','把刚才那份收尾吧','other');assert.equal(modelRuns,0);
+  send('go','把刚才那份收尾吧');send('go','把刚才那份收尾吧');await until(()=>f.store.get(f.task.id)?.status==='waiting_approval');
+  assert.equal(modelRuns,1);assert.equal(context.workflow.currentPr,url);assert.match(context.workflow.history.lastResult,/下一步/);
+  assert.ok(f.calls.some(c=>c[0]==='pr'&&c[1]==='view'));assert.ok(!f.calls.some(c=>c.includes('PUT')||c[1]==='ready'));
+  send('yes','对的');assert.ok(!f.calls.some(c=>c.includes('PUT')));
+  const req=f.store.requests(f.task.id)[0];send('approve','/approve '+req.id);
+  await until(()=>f.store.get(f.task.id)?.status==='review');assert.equal(f.calls.filter(c=>c.includes('PUT')).length,1);
+  assert.equal(f.store.workflowHistory(f.task.id).mergedPr?.url,url);
+  f.store.resume(f.task.id,'查看结果');assert.equal(f.store.workflowHistory(f.task.id).mergedPr?.url,url);
+ }finally{await engine.stop();f.store.close()}
+});
+
+test('semantic merge with missing target or changed grants never reaches the controller',async()=>{
+ for(const scenario of ['missing','grant','conflicting']){
+  const f=fixture();let previews=0;const sent:string[]=[];
+  const engine=new Engine(f.store,f.config,{run:async(_t,_p,h)=>{h.proposeMerge!({url:scenario==='missing'?'':url});
+    if(scenario==='grant')f.config.projects.p={...f.config.projects.p,sandbox:'read-only'};
+    if(scenario==='conflicting')h.proposePublication!({repository:'',baseBranch:''});return 'prepare';}},
+   {send:async(_c,text)=>{sent.push(text)},context:async()=>({summary:'',capturedAt:'',truncated:false,messages:[]})},async()=>{previews++;return 'unexpected'});
+  try{engine.receive({id:'go',text:'接着把刚才的工作完成',senderId:'owner',senderType:'user',chatId:'group',chatType:'group',botMentioned:true,conversation:{anchorId:'root',sourceId:'go',scope:'thread'}});
+   for(let i=0;i<100&&!['review','failed'].includes(f.store.get(f.task.id)!.status);i++)await new Promise(r=>setTimeout(r,5));
+   await engine.flush();assert.equal(previews,0);assert.match(sent.join(' '),scenario==='missing'?/没有已记录的 PR/:scenario==='grant'?/配置已变化/:/只能提议一个/);
+  }finally{await engine.stop();f.store.close()}
+ }
+});

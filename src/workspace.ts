@@ -203,15 +203,27 @@ export class WorkspaceExecutor implements Executor {
         github:project.worktree.github ?? null,checks:project.worktree.checks,
         missing:[...(!project.worktree.github ? ['GitHub repository/baseBranch'] : []),...(!project.worktree.checks.length ? ['Steward independent checks'] : [])],
         configurationManagedBy:'Steward; propose baseline.delivery to preview a scoped configuration update'});
-      let changingBaseline=false;
-      const innerHooks=hooks.proposeBaseline ? {...hooks,proposeBaseline:(request:Parameters<NonNullable<RunHooks['proposeBaseline']>>[0])=>{
+      let changingBaseline=false, previewingMerge=false;
+      const innerHooks={...hooks,...(hooks.proposeBaseline ? {proposeBaseline:(request:Parameters<NonNullable<RunHooks['proposeBaseline']>>[0])=>{
         hooks.proposeBaseline!(request);changingBaseline=true;
-      }} : hooks;
+      }} : {}),...(hooks.proposeMerge ? {proposeMerge:(request:Parameters<NonNullable<RunHooks['proposeMerge']>>[0])=>{
+        hooks.proposeMerge!(request);previewingMerge=true;
+      }} : {})};
       const result = await this.inner.run({ ...task, evidenceDirectory, deliveryContext, codeVersion: { ref: workspace.baseRef, baseSha: workspace.baseSha, headSha: initial.headSha } }, { ...project, path: workspace.path, sandbox: mode }, innerHooks, signal);
       signal.throwIfAborted();
       report = { ...report, ...await inventory(workspace, signal), capturedAt: new Date().toISOString() };
+      if (previewingMerge) {
+        if (report.fingerprint !== initial.fingerprint || report.headSha !== initial.headSha
+          || await git(workspace.path,['status','--porcelain','--untracked-files=all','--','.',`:(exclude)${EVIDENCE_DIRECTORY}`],signal)
+          || (previous?.publishedSha && report.headSha !== previous.publishedSha)) throw Error('工作副本仍有未交付改动，请先更新 PR，再准备合并；已有改动保留。');
+        // Remote CI is checked by the merge controller. Preserve valid local evidence
+        // instead of running installation/build commands just to request its preview.
+        if (previous?.fingerprint === report.fingerprint && previous.validationKey === report.validationKey) {
+          report.checks = previous.checks;report.ready = previous.ready;
+        }
+      }
       this.store.saveDelivery(task.id, report);
-      if (mode === 'workspace-write' && !changingBaseline) {
+      if (mode === 'workspace-write' && !changingBaseline && !previewingMerge) {
         const dir = join(this.config.stateDir, 'artifacts', task.id, String(Date.now())); mkdirSync(dir, { recursive: true, mode: 0o700 });
         for (const check of project.worktree.checks) {
           signal.throwIfAborted(); hooks.progress(`正在验证：${check.name}`);
