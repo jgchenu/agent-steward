@@ -4,12 +4,12 @@
 
 Use TypeScript with embedded LangGraph.js, official executor adapters and local SQLite. Preserve Steward's ownership, authorization, evidence and delivery boundaries. See the [architecture decision and pilot gates](decisions/langgraph-orchestration.md).
 
-- [ ] Validate a persistent checkpointer and Codex session recovery in an isolated pilot
-- [ ] Implement one opt-in task flow with contextual intent, human correction and durable business waits
+- [x] Validate a persistent SQLite checkpointer and read-only Codex session continuation in an isolated pilot
+- [x] Implement opt-in project execution with structured business questions, human answers and durable waits
 - [ ] Verify crash reconciliation, cancellation, revoked authority and live channel continuation before expanding adoption
 - [ ] Introduce bounded local task delegation before cross-instance A2A collaboration
 
-This direction is accepted; framework integration and the capabilities above remain planned. Shared PostgreSQL and distributed scheduling require demonstrated deployment needs.
+The pilot is off by default. Simulated recovery tests and read-only live Codex continuation pass; live Feishu and write-workspace acceptance remain outstanding. Shared PostgreSQL and distributed scheduling require demonstrated deployment needs.
 
 ## 0.1 — Personal vertical slice
 

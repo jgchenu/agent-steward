@@ -17,6 +17,7 @@ export interface Attachment {
 }
 export type PermissionMode = 'ask' | 'auto' | 'sandbox-auto' | 'full-access';
 export interface Task {
+  orchestration?: 'legacy' | 'langgraph-v1'; orchestrationRunId?: string | null;
   baselineOptions?: BaselineOptions | null;
   deliveryContext?: string;
   projectCandidates?: string[];
@@ -53,6 +54,7 @@ export interface DeliveryReport {
   ready: boolean; validationKey?: string; authorizedKey?: string; prUrl?: string; publishedSha?: string; targetBefore?: string; error?: string;
 }
 export interface Config {
+  langGraphPilot?: boolean;
   configFile?: string;
   modelSelection?: import('./models.js').ModelSelection;
   consoleUrl?: string;
@@ -69,6 +71,7 @@ export interface HumanRequest {
   resolve: (answer: string) => void;
 }
 export interface RunHooks {
+  askClarification?: (question: string) => void;
   proposeMerge?: (request: import('./operation-intent.js').MergeProposal) => void;
   modelResolved?: (model: import('./models.js').RuntimeModel) => void;
   proposeBaseline?: (request: BaselineProposal) => void;

@@ -133,6 +133,8 @@ With group mode enabled, owner @mentions directly start tasks using an explicitl
 
 ## What survives a restart
 
+The optional LangGraph pilot supports durable business questions and guarded continuation for new project tasks. Set `"langGraphPilot": true` in the private config and restart the service to enroll new tasks. Existing tasks and projectless conversations retain their runtime. The pilot is off by default; see [pilot operation and recovery](docs/architecture.md#langgraph-pilot) before enabling it.
+
 - Tasks, session IDs, events, inbound message deduplication and outbound notifications live in SQLite.
 - Queued work remains queued. Interrupted work requires an explicit `/continue`; it is not automatically replayed.
 - Old permission requests expire. They cannot authorize a new run.
@@ -140,6 +142,8 @@ With group mode enabled, owner @mentions directly start tasks using an explicitl
 - Codex thread data remains in Codex's own local storage. Restoring only Steward's database is not enough to resume a missing Codex thread.
 
 `review` means **the executor returned a result**, not that tests, a browser check, deployment, or independent review passed. Check the reported evidence before `/done`.
+
+For pilot tasks, business questions survive restarts and release the execution slot. Reply normally in the bound topic, or in a DM with only one outstanding business question; cards and `/answer` also work. Tool permission requests still expire on restart. If an executor call has an uncertain outcome, recovery stops for explicit inspection and continuation instead of repeating it.
 
 ## Boundaries
 
@@ -166,6 +170,7 @@ Optional live check, deliberately outside CI:
 ```sh
 npm run smoke:codex
 npm run smoke:workflow # Live semantic evaluation, read-only scratch; no Feishu or merge actions
+npm run smoke:orchestration # Live business question, DB reopen and original Codex session continuation
 ```
 
 This consumes a small amount of your subscription quota in a read-only temporary directory. It verifies authentication, thread creation, inference and final-message handling; it does not verify live Feishu delivery or interactive approval behavior.
