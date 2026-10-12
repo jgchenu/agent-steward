@@ -5,7 +5,9 @@
   "description": "Your self-hosted agent counterpart. Bring your own coding-agent subscription.",
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=24.0.0 <25" },
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
@@ -18,10 +20,19 @@
     "workspaces": "tsx --env-file-if-exists=.env scripts/workspaces.ts",
     "setup:feishu": "tsx scripts/setup-feishu.ts",
     "setup:media": "tsx --env-file-if-exists=.env scripts/setup-media.ts",
+    "smoke:orchestration": "tsx scripts/smoke-orchestration.ts",
     "smoke:workflow": "tsx scripts/smoke-workflow.ts",
     "smoke:codex": "tsx scripts/smoke-codex.ts",
     "smoke:workspace": "tsx scripts/smoke-workspace.ts"
   },
-  "dependencies": { "@larksuiteoapi/node-sdk": "1.74.0" },
-  "devDependencies": { "@types/node": "^24.0.0", "tsx": "^4.20.0", "typescript": "7.0.2" }
+  "dependencies": {
+    "@langchain/langgraph": "1.4.21",
+    "@langchain/langgraph-checkpoint-sqlite": "1.0.4",
+    "@larksuiteoapi/node-sdk": "1.74.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "7.0.2"
+  }
 }

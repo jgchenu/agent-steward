@@ -1,10 +1,11 @@
 # Architecture and invariants
 
-This document describes the implemented runtime. The accepted [LangGraph.js orchestration decision](decisions/langgraph-orchestration.md) defines a staged future migration and its validation gates; the current Engine remains in use.
+This document describes the implemented runtime. The accepted [LangGraph.js orchestration decision](decisions/langgraph-orchestration.md) defines a staged migration. Engine remains the single scheduler; the optional [LangGraph pilot](#langgraph-pilot) orchestrates new project execution turns and durable business questions.
 
 ## Scope
 
 One owner, one local instance, one active execution. The service is a task coordinator around official agent runtimes. It does not implement a model gateway. Transport, orchestration, persistence and execution have separate interfaces.
+
 
 ```text
 src/channels/feishu.ts  — official SDK WebSocket events, callbacks and card delivery
@@ -24,6 +25,7 @@ src/cli.ts             — terminal demo/local mode, diagnostics and service lif
 - **Task**: durable work owned by a human, scoped to an authorized Codex project or a projectless conversation.
 - **Run**: one active invocation of an executor for a task. A continued task reuses its Codex thread.
 - **Human request**: one live, process-bound permission or input request, with its own opaque ID.
+- **Business question**: in the optional pilot, a persisted requirement question tied to a graph run and step. It can outlive the runtime process and never grants operation permission.
 - **Result**: the executor's report, pending acceptance; not an independent verification certificate.
 - **Event**: a local audit/progress record. The database may contain private task content.
 - **Delivery**: a persisted message with a stable transport deduplication UUID.
@@ -39,6 +41,7 @@ stateDiagram-v2
   running --> waiting_input
   waiting_approval --> running
   waiting_input --> running
+  waiting_input --> queued: pilot business answer
   running --> review
   review --> completed: owner /done
   running --> failed
@@ -65,10 +68,10 @@ When several requests are pending, approvals take display precedence over questi
 2. Deduplicate inbound messages in the same SQLite transaction as command effects and response enqueueing. Acknowledge the event without waiting for a model or outbound API call.
 3. Use an exact project alias, never an arbitrary path supplied by a message.
 4. Launch a run only when no other run is active. The state-directory instance lock prevents ordinary duplicate launches.
-5. Bind permission/input requests to the active runtime, task and original conversation. Only accept a pending request once. Never reuse old approvals after restart.
+5. Bind runtime permission/input requests to the active runtime, task and original conversation. Pilot business questions bind to a persisted graph step instead. Only accept a pending request once. Never reuse old approvals after restart.
 6. Send one-shot approval decisions only; do not accept session-wide or policy-amendment grants. If a file approval's changes are unavailable or the description cannot be fully displayed within the configured limit, decline it.
 7. Unknown server requests return a protocol error rather than granting permission.
-8. On startup, mark in-flight work interrupted and expire requests. Retry outbound messages, not potentially side-effecting executions.
+8. On startup, legacy in-flight work becomes interrupted and runtime requests expire. Pilot recovery reconciles checkpoints against operation receipts and stops if an executor outcome is unknown. Retry outbound messages, not potentially completed external effects.
 9. A successful turn transitions to `review`; only the owner transitions it to `completed`.
 10. Keep the authentication and billing distinction explicit. Check ChatGPT authentication before inference; no fallback provider path exists.
 
@@ -86,7 +89,7 @@ SQLite is the record of work; Codex owns the model session. There is no cross-pr
 
 The outbox persists before delivery and uses bounded exponential backoff. The transport receives the same UUID on retry. A crash after remote success but before local acknowledgement can duplicate delivery outside the provider's deduplication window. No exactly-once network-delivery claim is made.
 
-Run timeout includes human waiting time. Failed or cancelled executions retain any changes they already made. A thread that cannot be resumed fails visibly; starting a replacement thread is not automatic. Codex rate-limit errors currently surface as failures requiring a later explicit continuation; quota-aware scheduling is planned.
+Run timeout includes runtime permission/input waiting time. Pilot business questions end the active invocation, so their waiting time does not consume execution time. Failed or cancelled executions retain any changes they already made. A thread that cannot be resumed fails visibly; starting a replacement thread is not automatic. Codex rate-limit errors currently surface as failures requiring a later explicit continuation; quota-aware scheduling is planned.
 
 An instance lock is local to one filesystem and PID namespace. Do not share state storage across containers or hosts. Local SQLite/events and Codex session storage require separate private backups. Schema v2 adds an optional outbox view, durable card message identities and expiring action capabilities without dropping v1 data. Expired action capabilities are pruned when rendering new controls. Other automatic retention is not implemented.
 
@@ -98,6 +101,23 @@ An instance lock is local to one filesystem and PID namespace. Do not share stat
 - Feishu Card 2.0: forms, state-specific controls, paged lists/results and task-card updates. Terminal commands remain a fallback.
 - MIT license: simple reuse for people deploying their own agents.
 
+## LangGraph pilot
+
+`langGraphPilot` is a local boolean configuration option, off by default. When enabled at service startup, new project tasks receive `orchestration=langgraph-v1` and a random `orchestrationRunId`. Existing tasks and projectless conversation routing stay on the legacy path. Baseline migration creates a fresh task under the current intake setting. Engine remains the sole scheduler and allows one active executor. Publication, baseline and merge controllers retain their existing validation and approval flows.
+
+The graph executes the existing WorkspaceExecutor/Codex adapter, then either returns a result or interrupts on a structured `clarification` question. No phrase matcher selects this question: Codex returns the optional field through its output schema. A question and a publication/baseline/merge proposal are mutually exclusive. The graph saves the question before the Engine transaction creates its input request and notification. Waiting releases the active slot. A topic reply, an unambiguous DM reply, an answer card or `/answer` records the answer and queues the same graph. Multiple DM questions require selecting the matching question. The next execution uses the saved Codex thread and accumulated business answers.
+
+Schema v9 adds task runtime/run identity, `graph_operations` and `graph_waits`. The official SQLite checkpointer stores checkpoints and pending writes in the same SQLite file using a separate connection. Domain updates remain synchronous transactions; graph checkpoint writes happen outside those transactions. Both connections use WAL and a busy timeout. The pinned saver introduces a `better-sqlite3` native dependency alongside Node's built-in SQLite.
+
+Each executor invocation has a durable identity formed from the graph run and step. Before calling the executor, the graph records an attempt with the current project grant hash. After the complete executor and workspace checks return, it saves the output and proposals as a receipt. A saved receipt can reconstruct a missing checkpoint without calling the executor again. An attempt without a receipt is an uncertain outcome and fails visibly; it is never automatically repeated. A changed project grant blocks graph continuation. Explicit `/continue` creates a fresh graph run while retaining the Codex session and old evidence for inspection.
+
+On crash recovery, pending business questions remain answerable. Other in-flight pilot execution turns are queued for checkpoint/receipt reconciliation, while live runtime approvals and inputs expire. A saved interrupt cannot recreate a Codex RPC approval callback. A graceful stop interrupts active work and still requires explicit continuation. Owner/chat/topic checks, request single use, card revisions and inbox deduplication apply to business answers. Cancelling invalidates the question. A requirement answer does not approve any subsequent runtime or Git action.
+
+Disabling the option stops pilot intake. Persisted pilot questions remain visible but cannot resume while disabled; queued pilot execution fails with an explicit disabled-runtime notice instead of falling back to legacy execution. Re-enable the option and explicitly continue a stopped task as needed. Preserve the database and Codex session storage; disabling this option is not authorization to run an older binary against a newer schema. Use SQLite's backup API or stop all connections before a filesystem backup; copying only a live WAL database file is insufficient. No automated retention policy is introduced for checkpoints or operation receipts.
+
+Validation includes disk reopen, online SQLite backup/restore, a failed checkpoint after a saved receipt, uncertain executor failure, successive questions, released queue capacity, task versioning, revoked/changed grants, duplicate answers, topic isolation and cards. `npm run smoke:orchestration` additionally drives a real read-only Codex question, reconstructs the Engine and database connection, and resumes the original session with an answer. It does not exercise live Feishu, write workspaces, runtime permissions or deployment. Local delegation, A2A and full operation-registry migration remain follow-up work.
+
+
 ## References
 
 - [Codex App Server](https://learn.chatgpt.com/docs/app-server)
@@ -107,7 +127,7 @@ An instance lock is local to one filesystem and PID namespace. Do not share stat
 
 ## Card interaction and delivery
 
-`View` is a semantic outbox reference, not serialized display text parsed back into business state. Feishu renders current database state at delivery time. Each control holds an opaque random capability persisted with its intended operation and originating conversation; no callback-provided command is executed. Only the configured owner and matching chat may use it. Mutation capabilities are single-use and committed with the task mutation in the inbound transaction. Task revision checks reject stale buttons; approval/input actions also require the exact pending in-memory request. Form validation occurs before consuming its capability. Capabilities expire after seven days; “工作台” opens fresh controls. Task revisions advance monotonically even within one millisecond.
+`View` is a semantic outbox reference, not serialized display text parsed back into business state. Feishu renders current database state at delivery time. Each control holds an opaque random capability persisted with its intended operation and originating conversation; no callback-provided command is executed. Only the configured owner and matching chat may use it. Mutation capabilities are single-use and committed with the task mutation in the inbound transaction. Task revision checks reject stale buttons; runtime approval/input actions also require the exact pending in-memory request. Pilot business answers instead require the pending persisted question for the current graph run and task revision. Form validation occurs before consuming its capability. Capabilities expire after seven days; “工作台” opens fresh controls. Task revisions advance monotonically even within one millisecond.
 
 The callback acknowledges after local synchronous validation/receipt, without waiting for a model or message API. Result acceptance remains an explicit owner action. Approval descriptions are never truncated beside an accept button: descriptions exceeding the display budget get a decline-only card. Untrusted task/result text is rendered as plain text so model-generated mention/markup cannot become card controls. Long results are paginated rather than discarded.
 

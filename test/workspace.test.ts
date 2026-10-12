@@ -429,3 +429,31 @@ test('semantic merge preview avoids local checks and rejects unsubmitted edits',
   }finally{f.close()}
  }
 });
+
+test('LangGraph pilot preserves the worktree across clarification and hands checked publication to the existing preview',async()=>{
+  const f=fixture();f.config.langGraphPilot=true;f.store.set(f.task.id,'completed');
+  let runs=0,worktree='';const views:View[]=[];
+  const executor=new WorkspaceExecutor(f.config,f.store,{run:async(t,p,h)=>{
+    runs++;
+    if(runs===1){worktree=p.path;h.thread('pilot-session');writeFileSync(join(p.path,'README.md'),'changed\n');h.askClarification!('Should I include the explanation?');return 'Question';}
+    assert.equal(p.path,worktree);assert.equal(t.threadId,'pilot-session');assert.match(t.prompt,/include it/);
+    assert.equal(readFileSync(join(p.path,'README.md'),'utf8'),'changed\n');
+    h.proposePublication!({repository:'',baseBranch:'main'});return 'Ready for PR preview';
+  }});
+  const engine=new Engine(f.store,f.config,executor,{send:async(_c,_t,_id,view)=>{if(view)views.push(view);}});
+  const send=(id:string,text:string)=>engine.receive({id,text,chatId:'dm',chatType:'p2p',senderId:'owner',senderType:'user'});
+  const wait=async(fn:()=>boolean)=>{for(let i=0;i<1000;i++){if(fn())return;await delay(5);}assert.fail('pilot condition not reached');};
+  try{
+    send('pilot-task','/edit test Update README then ask for explanation scope');
+    const task=f.store.list().find(t=>t.id!==f.task.id)!;
+    await wait(()=>f.store.get(task.id)?.status==='waiting_input');
+    const question=f.store.requests(task.id)[0].id;send('pilot-answer',`/answer ${question} include it`);
+    await wait(()=>f.store.get(task.id)?.status==='review');await engine.flush();
+    assert.equal(runs,2);assert.equal(f.store.delivery(task.id)?.ready,true);
+    assert.equal(f.store.delivery(task.id)?.checks[0].status,'passed');
+    assert.equal(f.store.delivery(task.id)?.authorizedKey,undefined);
+    assert.equal(f.store.delivery(task.id)?.prUrl,undefined);
+    assert.equal(views.filter(v=>v.kind==='publication').length,1);
+    assert.equal(readFileSync(join(f.source,'README.md'),'utf8'),'base\n');
+  }finally{await engine.stop();f.close();}
+});

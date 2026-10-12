@@ -3,5 +3,6 @@
   "codexCommand": "codex",
   "approvalsReviewer": "user",
   "maxRunMinutes": 60,
+  "langGraphPilot": false,
   "projects": {}
 }

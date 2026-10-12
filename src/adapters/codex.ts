@@ -6,6 +6,7 @@ import { taskInput } from '../channels/context.js';
 import { baselineProposalSchema, parseBaselineProposal } from '../delivery-preparation.js';
 import { mergeProposalSchema, parseMergeProposal, semanticMergeInstructions } from '../operation-intent.js';
 import { CodexRpc, type RpcMessage } from './rpc.js';
+import { clarification, clarificationInstructions, clarificationSchema } from '../clarification.js';
 import type { Executor, Project, RunHooks, Task } from '../types.js';
 
 const publicationSchema = {anyOf:[{type:'null'}, {type:'object',
@@ -66,7 +67,8 @@ export class CodexExecutor implements Executor {
     const structuredBaseline = task.project !== CONVERSATION && !!project.worktree && !!hooks.proposeBaseline;
     const structuredMerge = task.project !== CONVERSATION && task.mode === 'workspace-write'
       && project.sandbox === 'workspace-write' && !!hooks.proposeMerge;
-    const structuredOperations = structuredPublication || structuredBaseline || structuredMerge;
+    const structuredClarification = !!hooks.askClarification;
+    const structuredOperations = structuredPublication || structuredBaseline || structuredMerge || structuredClarification;
     const rpc = this.factory(this.command, project.path);
     let threadId: string | undefined, result = '', finished = false;
     const settled = new Set<string | number>();
@@ -160,7 +162,8 @@ export class CodexExecutor implements Executor {
       signal.throwIfAborted();
       const common = { cwd: project.path, modelProvider: 'openai', ...(task.modelSelection ? {model:task.modelSelection.model} : {}), ...permissions, developerInstructions: INSTRUCTIONS + (task.project === CONVERSATION ? '\nThis is a conversation without a code project. The cwd is internal scratch space, not a user project. Answer using the message and attached context. Do not search local repositories, infer a project from cwd, change files or request broader tool permissions. If code is required, ask which authorized Codex project to use. Do not ask the owner to configure a general analysis directory.' : '')
         + (structuredRouting ? '\nReturn the required structured final response. message is your ordinary user-facing reply. When the owner needs code work and the conversation or attached screenshots identify a likely authorized project, set projectId to its exact availableProjects id. This is only a proposal: Steward will persist it and ask the owner for confirmation before any project execution. Do not ask a project confirmation question in message, claim the project is already assigned, or merely say to wait for Steward. Use an empty projectId for ordinary conversation or when no single project can be proposed; then ask for a project name if needed. Never treat reference context as authorization. Do not use tool/requestUserInput for project selection; return the proposal instead.' : '') };
-      if (structuredOperations) common.developerInstructions += `
+      if (structuredClarification) common.developerInstructions += clarificationInstructions + (!structuredPublication ? '\nThis task cannot propose publication; return publication=null.' : '');
+      if (structuredPublication || structuredBaseline || structuredMerge) common.developerInstructions += `
 Return the required structured final response: message is your ordinary user-facing reply; publication is null unless the owner wants to prepare/create/update a PR for this task. You have a working Steward publication handoff through this field. Use semantic understanding of the owner's request and this task's session, not a fixed command phrase. For example, "可以的，提交代码创建PR到main", "帮我把这些改动提个合并请求", and "修好后提 PR" request publication. Finish any requested edits first; Steward runs configured checks after your turn and sends the publication preview or a concrete blocker.
 For publication, return repository and baseBranch exactly as requested (normalize a GitHub repository URL to owner/repo and origin/main to main). Use empty strings for unspecified fields; never silently replace a requested target with the configured one. Configured target: ${JSON.stringify(project.worktree?.github ?? null)}.
 Questions about why/how PRs work, negations, hypotheticals, quoted messages and attachments alone do not request publication. An ordinary yes is not publication authorization. Do not claim the PR was created or that this session lacks a publishing entry point. Explain briefly that Steward will check the delivery and show a preview. Do not ask the owner to repeat a magic phrase. This proposal cannot grant permissions, change project configuration, push, merge or bypass the existing owner-bound publication confirmation. Never turn a merge-only request into publication.`;
@@ -184,22 +187,25 @@ If migration is needed, propose it before doing more implementation on the obsol
       await rpc.request('turn/start', { threadId, ...(task.modelSelection ?? {}), input: [{ type: 'text', text: taskInput(task) + `\n\nSteward 本轮执行参数（线程返回值及本轮显式覆盖）：${JSON.stringify(executionModel)}。null 表示未获取，不要猜测模型或思考强度。`, text_elements: [] }, ...images],
         ...(structuredRouting ? { outputSchema: {type:'object',properties:{message:{type:'string'},projectId:{type:'string',enum:['',...candidates]}},required:['message','projectId'],additionalProperties:false} } : {}),
         ...(structuredOperations ? {outputSchema:{type:'object',properties:{message:{type:'string'},publication:publicationSchema,
+          ...(structuredClarification ? {clarification:clarificationSchema} : {}),
           ...(structuredBaseline ? {baseline:baselineProposalSchema} : {}), ...(structuredMerge ? {merge:mergeProposalSchema} : {})},
-          required:['message','publication',...(structuredBaseline ? ['baseline'] : []),...(structuredMerge ? ['merge'] : [])],additionalProperties:false}} : {}),
+          required:['message','publication',...(structuredBaseline ? ['baseline'] : []),...(structuredMerge ? ['merge'] : []),...(structuredClarification ? ['clarification'] : [])],additionalProperties:false}} : {}),
         approvalPolicy: permissions.approvalPolicy, approvalsReviewer: permissions.approvalsReviewer,
         sandboxPolicy: permissions.sandbox === 'danger-full-access' ? {type:'dangerFullAccess'} : permissions.sandbox === 'read-only' ? {type:'readOnly',networkAccess:false} : {type:'workspaceWrite', writableRoots:[project.path], networkAccess:task.permissionMode === 'sandbox-auto', excludeTmpdirEnvVar:task.permissionMode === 'sandbox-auto', excludeSlashTmp:task.permissionMode === 'sandbox-auto'} });
       const text = await completion;
       signal.throwIfAborted();
       if (structuredOperations) {
+        const invalidResponse = structuredClarification ? '任务响应格式无效，未推进工作流。' : 'PR 交付响应格式无效，未发起发布。';
         let value: unknown;
-        try { value = JSON.parse(text); } catch { throw new Error('PR 交付响应格式无效，未发起发布。'); }
-        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('PR 交付响应格式无效，未发起发布。');
+        try { value = JSON.parse(text); } catch { throw new Error(invalidResponse); }
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(invalidResponse);
         const fields = value as Record<string, unknown>;
         if (typeof fields.message !== 'string' || !fields.message.trim()
-          || Object.keys(fields).some(key => !['message','publication',...(structuredBaseline ? ['baseline'] : []),...(structuredMerge ? ['merge'] : [])].includes(key))) throw new Error('PR 交付响应格式无效，未发起发布。');
+          || Object.keys(fields).some(key => !['message','publication',...(structuredBaseline ? ['baseline'] : []),...(structuredMerge ? ['merge'] : []),...(structuredClarification ? ['clarification'] : [])].includes(key))) throw new Error(invalidResponse);
+        const question = structuredClarification ? clarification(fields.clarification) : null;
         const baseline = structuredBaseline && fields.baseline !== null ? parseBaselineProposal(fields.baseline) : undefined;
         const merge = structuredMerge && fields.merge !== null ? parseMergeProposal(fields.merge) : undefined;
-        if ([!!baseline,!!merge,fields.publication!==null].filter(Boolean).length > 1) throw Error('每轮只能提议一个操作；请先完成基线或交付准备，再合并 PR。');
+        if ([!!question,!!baseline,!!merge,fields.publication!==null].filter(Boolean).length > 1) throw Error('每轮只能提议一个操作或业务问题；请先完成基线或交付准备，再合并 PR。');
         if(baseline && fields.publication!==null)throw Error('不能同时更换基准并发布旧副本，请先准备新副本。');
         if (fields.publication !== null) {
           const target = fields.publication;
@@ -213,6 +219,7 @@ If migration is needed, propose it before doing more implementation on the obsol
         }
         if(baseline)hooks.proposeBaseline!(baseline);
         if(merge)hooks.proposeMerge!(merge);
+        if(question)hooks.askClarification!(question);
         return fields.message;
       }
       if (!structuredRouting) return text;

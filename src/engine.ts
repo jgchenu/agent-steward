@@ -10,6 +10,7 @@ import { Store } from './store.js';
 import { canPublish, publicationBlocker, publicationKey, TargetBranchMoved } from './workspace.js';
 import { mergeIntent, mergePullRequest } from './merge.js';
 import { parseMergeProposal, type MergeProposal } from './operation-intent.js';
+import { TaskOrchestrator } from './orchestration.js';
 import type { BaselineProposal, CardAction, Channel, Config, ContextSnapshot, Executor, HumanRequest, Incoming, PublicationTarget, RunHooks, Status, Task, View } from './types.js';
 
 const HELP = `Agent Steward · 个人 Agent 分身（预览版）
@@ -35,8 +36,12 @@ export class Engine {
   private timer?: ReturnType<typeof setInterval>;
   private flushPromise?: Promise<void>;
   private stopped = false;
+  private orchestrator?: TaskOrchestrator;
   constructor(readonly store: Store, readonly config: Config, private executor: Executor,
-    private channel: Channel, private mergeRunner = mergePullRequest) {}
+    private channel: Channel, private mergeRunner = mergePullRequest) {
+    store.pilotIntake = config.langGraphPilot === true;
+    if (config.langGraphPilot) this.orchestrator = new TaskOrchestrator(store);
+  }
 
   updateProjects(next: Pick<Config, 'projects' | 'defaultProject' | 'codexProjects'> & Partial<Pick<Config, 'permissionMode' | 'approvalsReviewer' | 'modelSelection'>>): void {
     const previous = this.config.projects;
@@ -69,7 +74,11 @@ export class Engine {
   // Durable receipt + command mutation + notification are committed before acknowledging Feishu.
   receive(message: Incoming, actionId?: string): void {
     if (this.stopped || message.senderId !== this.config.ownerId || message.senderType !== 'user') return;
-    const bound = message.chatType === 'group' ? this.store.conversationTask(message.chatId, message.conversation) : undefined;
+    const dmWaits = message.chatType === 'p2p' && !message.text.trim().startsWith('/')
+      ? this.store.list().filter(t => t.chatId === message.chatId && ['waiting_input','waiting_approval'].includes(t.status)
+        && this.store.requests(t.id).length) : [];
+    const bound = message.chatType === 'group' ? this.store.conversationTask(message.chatId, message.conversation)
+      : dmWaits.length === 1 && this.store.graphWait(dmWaits[0].id)?.requestId === this.store.requests(dmWaits[0].id)[0]?.id ? dmWaits[0] : undefined;
     const pendingInput = bound && this.store.requests(bound.id);
     const projectSelection = bound && this.store.projectSelection(bound.id);
     const answeringProject = !!projectSelection && !!projectAnswer(message.text);
@@ -93,6 +102,7 @@ export class Engine {
       const formPrompt = actionId ? /^\/(?:new|edit)\s+\S+\s+([\s\S]*)$/.exec(text)?.[1] : undefined;
       if (!text || (formPrompt ?? text).length > 16_000) { reply('任务文本应为 1–16000 字符。'); return; }
       const match = /^(\/\S+)(?:\s+([\s\S]*))?$/.exec(text);
+      if (!match && dmWaits.length > 1 && dmWaits.some(t => this.store.graphWait(t.id))) { reply('当前有多个待处理的问题或权限请求，请使用对应卡片提交回答。'); return; }
       let command = match?.[1] ?? '/new';
       let args = match?.[2]?.trim() ?? '';
       if (command === '/model' || (!match && asksModelStatus(text))) {
@@ -200,6 +210,15 @@ export class Engine {
       if (['/approve', '/deny', '/answer'].includes(command)) {
         const req = this.store.getRequest(id), runtime = this.pending.get(id);
         const task = req && this.store.get(req.taskId);
+        const business = task && this.store.graphWait(task.id);
+        if (command === '/answer' && task && req?.kind === 'input' && req.status === 'pending' && business?.requestId === id) {
+          if (task.chatId !== message.chatId || (message.conversation && task.conversation?.anchorId !== message.conversation.anchorId)) { reply('请在问题所在会话回答。'); return; }
+          if (!this.orchestrator) { reply('LangGraph 试点已关闭，问题与任务已保留；重新启用后可以继续。'); return; }
+          if (task.status !== 'waiting_input' || this.active?.task.id === task.id || !body) { reply('请等待问题保存完成，并填写回答。'); return; }
+          if (!this.config.projects[task.project]) { reply('项目授权已撤销，任务尚未继续。'); return; }
+          this.store.answerGraph(task.id,body);
+          reply('收到，我会结合这条补充继续处理。',{kind:'reply',taskId:task.id}); return;
+        }
         if (!req || !task || task.chatId !== message.chatId || (message.conversation && task.conversation?.anchorId !== message.conversation.anchorId) || req.status !== 'pending' || !runtime) {
           reply('请求不存在、已回答或已失效，请查看任务当前状态。'); return;
         }
@@ -250,7 +269,7 @@ export class Engine {
         if (!['queued', 'running', 'waiting_input', 'waiting_approval'].includes(task.status)) {
           reply('任务当前未在执行。'); return;
         }
-        this.store.set(id, 'cancelled'); this.store.expire(id);
+        this.store.set(id, 'cancelled'); this.store.expire(id, false);
         effects.push(() => { if (this.active?.task.id === id) this.active.abort.abort(); });
         reply(`任务 ${id} 已取消；已有文件修改保留。`, { kind: 'task', taskId: id }); return;
       }
@@ -330,9 +349,11 @@ export class Engine {
     if (i.op === 'cancel' && !['queued', 'running', 'waiting_input', 'waiting_approval'].includes(task?.status ?? '')) return fail('任务已经停止。');
     if (['approve', 'deny', 'answer'].includes(i.op)) {
       const req = this.store.getRequest(i.requestId ?? ''), runtime = this.pending.get(i.requestId ?? '');
-      if (!req || req.taskId !== task?.id || req.status !== 'pending' || !runtime ||
+      const business = task && this.store.graphWait(task.id);
+      const durable = i.op === 'answer' && req?.kind === 'input' && business?.requestId === i.requestId && !!this.orchestrator && task?.status === 'waiting_input';
+      if (!req || req.taskId !== task?.id || req.status !== 'pending' || (!runtime && !durable) ||
         (req.kind === 'input') !== (i.op === 'answer')) return fail('该请求已失效，未执行任何授权。');
-      try { runtime.validate?.(i.op === 'answer' ? body : i.op === 'approve' ? 'accept' : 'decline'); }
+      try { runtime?.validate?.(i.op === 'answer' ? body : i.op === 'approve' ? 'accept' : 'decline'); }
       catch (e) { return fail(e instanceof Error ? e.message : '请检查输入。'); }
     }
     const views: Partial<Record<typeof i.op, View>> = {
@@ -499,7 +520,17 @@ export class Engine {
           history:this.store.workflowHistory(task.id),
           approval:'Proposals only; each external operation retains its own owner confirmation.'},
         availableProjects: Object.entries(this.config.projects).map(([id,p]) => ({ id, name:p.label ?? id, aliases:p.aliases ?? [], capability:p.sandbox })) }) };
-      let result = await this.executor.run(executionTask, project, hooks, abort.signal);
+      let result: string;
+      if (task.orchestration === 'langgraph-v1' && task.nextAction !== 'publish') {
+        if (!this.orchestrator) throw Error('LangGraph 试点已关闭；任务已保留，不会通过旧运行时重放。');
+        const outcome = await this.orchestrator.run(executionTask,project,this.executor,hooks,abort.signal);
+        abort.signal.throwIfAborted();
+        if (outcome.waiting) {
+          this.store.transaction(() => { this.store.graphQuestion(task.id,outcome.step,outcome.question); });
+          return;
+        }
+        result = outcome.message;
+      } else result = await this.executor.run(executionTask, project, hooks, abort.signal);
       if (abort.signal.aborted) throw abort.signal.reason;
       if (proposed) {
         const candidate = this.config.projects[proposed.project];
@@ -592,5 +623,6 @@ export class Engine {
     this.active?.abort.abort(new Error('服务停止'));
     await this.active?.done;
     await this.flush();
+    this.orchestrator?.close(); this.orchestrator = undefined;
   }
 }

@@ -1,6 +1,6 @@
 # LangGraph.js orchestration and collaboration
 
-Accepted on 2026-10-12. Implementation status: planned; the current Engine remains the production runtime.
+Accepted on 2026-10-12. Implementation status: an opt-in project execution and business clarification pilot is implemented; Engine remains the scheduler and the default execution path. See [pilot operation and validation boundaries](../architecture.md#langgraph-pilot).
 
 Agent Steward will use TypeScript and embedded LangGraph.js for task orchestration, retaining official agent runtimes behind executor adapters. The first implementation will be a reversible pilot within the modular monolith. SQLite remains the local database. Human collaboration and agent delegation will share explicit task ownership, scoped authority and delivery records.
 

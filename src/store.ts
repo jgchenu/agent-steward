@@ -4,8 +4,9 @@ import type { Conversation, ContextSnapshot, DeliveryReport, MergeReceipt, Evide
 
 export interface Outgoing { id: string; chatId: string; text: string; attempts: number; view: string | null }
 export class Store {
+  pilotIntake = false;
   readonly db: DatabaseSync;
-  constructor(path: string) {
+  constructor(readonly path: string) {
     this.db = new DatabaseSync(path);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS tasks (
@@ -33,6 +34,8 @@ export class Store {
     if (!taskColumns.some(c => c.name === 'baselineRef')) this.db.exec('ALTER TABLE tasks ADD COLUMN baselineRef TEXT');
     if (!taskColumns.some(c => c.name === 'baselineOptions')) this.db.exec('ALTER TABLE tasks ADD COLUMN baselineOptions TEXT');
     if (!taskColumns.some(c => c.name === 'mergeUrl')) this.db.exec('ALTER TABLE tasks ADD COLUMN mergeUrl TEXT');
+    if (!taskColumns.some(c => c.name === 'orchestration')) this.db.exec("ALTER TABLE tasks ADD COLUMN orchestration TEXT NOT NULL DEFAULT 'legacy'");
+    if (!taskColumns.some(c => c.name === 'orchestrationRunId')) this.db.exec('ALTER TABLE tasks ADD COLUMN orchestrationRunId TEXT');
     this.db.exec(`CREATE TABLE IF NOT EXISTS workspaces (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS deliveries (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS task_conversations (taskId TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -40,7 +43,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS conversation_bindings (chatId TEXT NOT NULL, messageKey TEXT NOT NULL, taskId TEXT NOT NULL, PRIMARY KEY(chatId,messageKey));
       CREATE TABLE IF NOT EXISTS evidence (id TEXT PRIMARY KEY, taskId TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS project_selections (taskId TEXT PRIMARY KEY, project TEXT NOT NULL, grantKey TEXT NOT NULL, revision TEXT NOT NULL);
-      PRAGMA user_version=8;`);
+      CREATE TABLE IF NOT EXISTS graph_operations (id TEXT PRIMARY KEY, taskId TEXT NOT NULL, grantKey TEXT NOT NULL, result TEXT);
+      CREATE TABLE IF NOT EXISTS graph_waits (runId TEXT PRIMARY KEY, taskId TEXT NOT NULL, requestId TEXT NOT NULL, step INTEGER NOT NULL, answer TEXT);
+      PRAGMA user_version=9;`);
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -54,6 +59,8 @@ export class Store {
     const id = randomUUID().slice(0, 8), now = new Date().toISOString();
     this.db.prepare('INSERT INTO tasks(id,chatId,project,prompt,status,createdAt,updatedAt,mode) VALUES (?,?,?,?,?,?,?,?)')
       .run(id, chatId, project, prompt, 'queued', now, now, mode);
+    // Existing tasks and projectless project-selection flows retain their runtime.
+    if (this.pilotIntake && project !== '__conversation__') this.db.prepare("UPDATE tasks SET orchestration='langgraph-v1',orchestrationRunId=? WHERE id=?").run(randomUUID(), id);
     if (conversation) this.saveConversation(id, conversation);
     this.event(id, 'created', prompt);
     return this.get(id)!;
@@ -148,6 +155,10 @@ export class Store {
     this.event(id, status, result ?? '');
   }
   resume(id: string, prompt: string): void {
+    if (this.get(id)?.orchestration === 'langgraph-v1') {
+      this.expire(id, false);
+      this.db.prepare('UPDATE tasks SET orchestrationRunId=? WHERE id=?').run(randomUUID(), id);
+    }
     const pending = this.pendingFollowups(id);
     if (pending.length) {
       prompt = `此前执行期间主人留下的待处理补充（不构成权限批准）：\n${pending.join('\n\n')}\n\n主人本次要求：\n${prompt}`;
@@ -224,12 +235,51 @@ export class Store {
   resolveRequest(id: string, status = 'answered'): void {
     this.db.prepare("UPDATE requests SET status=? WHERE id=? AND status='pending'").run(status, id);
   }
-  expire(taskId: string): void {
-    this.db.prepare("UPDATE requests SET status='expired' WHERE taskId=? AND status='pending'").run(taskId);
+  expire(taskId: string, preserveBusinessWait = true): void {
+    const keep = preserveBusinessWait ? this.graphWait(taskId)?.requestId ?? '' : '';
+    this.db.prepare("UPDATE requests SET status='expired' WHERE taskId=? AND status='pending' AND id!=?").run(taskId, keep);
+  }
+  graphWait(taskId: string): {runId: string; requestId: string; step: number; answer: string | null} | undefined {
+    return this.db.prepare('SELECT w.* FROM graph_waits w JOIN tasks t ON t.orchestrationRunId=w.runId WHERE t.id=?').get(taskId) as ReturnType<Store['graphWait']>;
+  }
+  graphQuestion(taskId: string, step: number, question: string): string {
+    const existing = this.graphWait(taskId);
+    if (existing?.step === step) return existing.requestId;
+    const task = this.get(taskId)!;
+    const requestId = this.request(taskId, 'input', question);
+    this.db.prepare('INSERT OR REPLACE INTO graph_waits VALUES (?,?,?,?,NULL)').run(task.orchestrationRunId!, taskId, requestId, step);
+    this.set(taskId, 'waiting_input', question);
+    this.enqueue(task.chatId, `${question}${task.conversation ? '' : `\n/answer ${requestId} <回答>`}`, {kind:task.conversation ? 'reply' : 'task',taskId});
+    return requestId;
+  }
+  answerGraph(taskId: string, answer: string): void {
+    const wait = this.graphWait(taskId)!;
+    if (this.getRequest(wait.requestId)?.status !== 'pending' || wait.answer !== null) throw Error('问题已失效。');
+    const pending = this.pendingFollowups(taskId);
+    if (pending.length) {
+      answer = `此前执行期间主人补充：\n${pending.join('\n\n')}\n\n本次回答：\n${answer}`;
+      this.event(taskId, 'followups_consumed', 'Business clarification answer');
+    }
+    this.db.prepare('UPDATE graph_waits SET answer=? WHERE runId=?').run(answer, wait.runId);
+    this.resolveRequest(wait.requestId);
+    this.event(taskId, 'human_response', `${wait.requestId}: ${answer}`);
+    this.event(taskId, 'followup', answer);
+    const report = this.delivery(taskId);
+    if (report) this.saveDelivery(taskId, {...report,ready:false,authorizedKey:undefined});
+    this.set(taskId, 'queued');
   }
   recover(): void {
     this.transaction(() => {
       for (const task of this.list()) {
+        if (task.orchestration === 'langgraph-v1' && (!task.nextAction || task.nextAction === 'execute')) {
+          const wait = this.graphWait(task.id);
+          if (task.status === 'waiting_input' && wait && this.getRequest(wait.requestId)?.status === 'pending') { this.expire(task.id); continue; }
+          if (['running','waiting_input','waiting_approval'].includes(task.status)) {
+            this.expire(task.id);
+            // The graph operation receipt prevents replay of an uncertain executor call.
+            this.set(task.id,'queued'); continue;
+          }
+        }
         if (['running', 'waiting_approval', 'waiting_input'].includes(task.status)) {
           this.set(task.id, 'interrupted', '进程已重启；旧确认已失效。请检查已有改动，再明确继续。');
           this.expire(task.id);

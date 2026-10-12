@@ -401,3 +401,25 @@ test('merge schema rejects malformed, unauthorized, conflicting or unsuccessful 
   await s.executor.run({...task,project,mode:'read-only'},{path:'.',sandbox:'read-only'},s.hooks,AbortSignal.timeout(5000));assert.equal(rpc.params['turn/start'].outputSchema,undefined);
  }
 });
+
+test('pilot business questions are structured and validated before any operation hook',async()=>{
+  for(const response of [
+    {message:'等待补充',publication:null,clarification:'采用哪个日期范围？'},
+    {message:'完成',publication:null,clarification:null},
+    {message:'bad',publication:null,clarification:''},
+    {message:'bad',publication:null},
+    {message:'bad',publication:{repository:'x/y',baseBranch:'main'},clarification:'approve?'},
+    {message:'bad',publication:null,clarification:'question',approve:true},
+  ]){
+    const rpc=new FakeRpc(),s=setup(rpc);let question:string|undefined;
+    s.hooks.askClarification=q=>{question=q;};
+    rpc.onTurn=()=>{rpc.emit('item/completed',{item:{type:'agentMessage',text:JSON.stringify(response),phase:'final_answer'}});rpc.finish();};
+    if(response.message==='bad'){
+      await assert.rejects(s.run());assert.equal(question,undefined);
+    }else{
+      assert.equal(await s.run(),response.message);assert.equal(question,response.clarification??undefined);
+      assert.ok(rpc.params['turn/start'].outputSchema.required.includes('clarification'));
+      assert.match(rpc.params['thread/start'].developerInstructions,/durable business clarification/);
+    }
+  }
+});
