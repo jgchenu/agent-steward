@@ -54,6 +54,7 @@ export interface RpcPort {
 }
 
 export class CodexExecutor implements Executor {
+  readonly commitAuthors = [{ name: 'Codex', email: 'codex@openai.com' }] as const;
   constructor(private command = 'codex', private factory: (command: string, cwd: string) => RpcPort
     = (command, cwd) => new CodexRpc(command, cwd), private approvalsReviewer: 'user' | 'auto_review' = 'user') {}
 

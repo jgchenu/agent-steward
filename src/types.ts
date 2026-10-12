@@ -47,6 +47,7 @@ export interface EvidenceImage {
   id: string; taskId: string; path: string; sha256: string; caption: string; scope: 'local-preview' | 'deployed'; capturedAt: string;
 }
 export interface DeliveryReport {
+  commitAuthors?: CommitAuthor[];
   evidenceIds?: string[]; evidenceWarning?: string;
   workspace: Workspace; mode: 'read-only' | 'workspace-write'; capturedAt: string;
   files: string[]; diffStat: string; fingerprint: string; headSha: string;
@@ -84,8 +85,10 @@ export interface RunHooks {
   resolved: (id: string) => void;
 }
 export interface Executor {
+  readonly commitAuthors?: readonly CommitAuthor[];
   run(task: Task, project: Project, hooks: RunHooks, signal: AbortSignal): Promise<string>;
 }
+export interface CommitAuthor { name: string; email: string }
 // Empty fields mean the owner did not specify an override; use the configured target.
 export interface PublicationTarget { repository: string; baseBranch: string }
 export interface BaselineOptions { migrateChanges: boolean; delivery: (PublicationTarget & {checks: Check[]}) | null }

@@ -12,10 +12,10 @@ import { commandEnv, runCommand } from '../src/process.js';
 import { loadConfig } from '../src/config.js';
 import { Engine } from '../src/engine.js';
 import { buildCard } from '../src/channels/cards.js';
-import type { Config, PublicationTarget, RunHooks, View } from '../src/types.js';
+import type { Config, Executor, PublicationTarget, RunHooks, View } from '../src/types.js';
 const signal = () => AbortSignal.timeout(30_000);
 const hooks: RunHooks = { thread() {}, progress() {}, request() { throw Error('unexpected request'); }, resolved() {} };
-function fixture() {
+function fixture(commitAuthors: Executor['commitAuthors'] | null = [{ name: 'Codex', email: 'codex@openai.com' }]) {
   const root = mkdtempSync(join(tmpdir(), 'steward-worktree-'));
   const source = join(root, 'repo'), remote = join(root, 'remote.git'), stateDir = join(root, 'state');
   mkdirSync(source); mkdirSync(stateDir);
@@ -30,7 +30,8 @@ function fixture() {
       github: { repository: 'test/repo', baseBranch: 'main' } } } } };
   const store = new Store(join(stateDir, 'db.sqlite'));
   const task = store.create('dm', 'test', 'Update README', 'workspace-write');
-  const executor = new WorkspaceExecutor(config, store, { run: async (_t, p) => { writeFileSync(join(p.path, 'README.md'), 'changed\n'); return 'done'; } });
+  const executor = new WorkspaceExecutor(config, store, { ...(commitAuthors ? { commitAuthors } : {}),
+    run: async (_t, p) => { writeFileSync(join(p.path, 'README.md'), 'changed\n'); return 'done'; } });
   return { root, source, config, project: config.projects.test, store, task, executor, g,
     close() { store.close(); rmSync(root, { recursive: true, force: true }); } };
 }
@@ -142,40 +143,73 @@ test('readonly defaults never execute project checks; write needs both explicit 
     await assert.rejects(ex.run(f.task, { path: f.source, sandbox: 'read-only' }, hooks, signal()), /不允许修改/);
   } finally { f.close(); }
 });
-test('publication commits exact validated files, reuses PR, and only pushes the task branch', async () => {
+test('publication attributes the recorded executor, commits validated files, reuses PR, and only pushes the task branch', async () => {
+  const cases: Array<Executor['commitAuthors'] | null> = [
+    [{ name: 'Codex', email: 'codex@openai.com' }],
+    [{ name: 'Other Agent', email: 'agent@example.invalid' }],
+    null,
+  ];
+  for (const authors of cases) {
+    const f = fixture(authors);
+    try {
+      await f.executor.run(f.task, f.project, hooks, signal());
+      const report = f.store.delivery(f.task.id)!;
+      f.store.saveDelivery(f.task.id, { ...report, authorizedKey: publicationKey(f.task, f.project, report) });
+      const evidenceDir = join(report.workspace.path, '.steward-delivery');
+      mkdirSync(evidenceDir, {recursive:true});
+      writeFileSync(join(evidenceDir, 'private.png'), 'not code');
+      const calls: string[][] = []; let creates = 0, edits = 0;
+      const repoGit: typeof git = async (cwd, args, sig) => {
+        calls.push(args);
+        // Network transport is a local bare Git repository; production identity check is exercised separately.
+        if (args[0] === 'remote') return 'https://github.com/test/repo.git';
+        return git(cwd, args, sig);
+      };
+      const gh = async (cwd: string, args: string[], sig: AbortSignal) => {
+        if (args[1] === 'create') { creates++; assert.ok(args.includes('--draft')); throw Error('simulated lost response after remote creation'); }
+        if (args[1] === 'edit') { edits++; return ''; }
+        const pr = { number: 1, url: 'https://github.com/test/repo/pull/1', state: 'OPEN', baseRefName: 'main', headRefName: report.workspace.branch };
+        if (args[1] === 'list') return JSON.stringify(creates ? [pr] : []);
+        if (args[1] === 'view') return JSON.stringify({ ...pr, headRefOid: await git(cwd, ['rev-parse', 'HEAD'], sig) });
+        throw Error('unexpected gh command');
+      };
+      await publish(f.store, f.config, f.task, f.project, signal(), gh, repoGit);
+      const publishedHead = await git(report.workspace.path, ['rev-parse', 'HEAD'], signal());
+      assert.equal(await git(report.workspace.path, ['log', '-1', '--format=%an <%ae>'], signal()), 'Test <test@example.invalid>');
+      assert.equal(await git(report.workspace.path, ['log', '-1', '--format=%s'], signal()), `Steward task ${f.task.id}: test`);
+      assert.equal(await git(report.workspace.path, ['log', '-1', '--format=%(trailers:key=Co-authored-by,valueonly)'], signal()),
+        authors?.map(a => `${a.name} <${a.email}>`).join('\n') ?? '');
+      await publish(f.store, f.config, f.task, f.project, signal(), gh, repoGit);
+      assert.equal(await git(report.workspace.path, ['rev-parse', 'HEAD'], signal()), publishedHead);
+      assert.equal(calls.filter(a => a[0] === 'commit').length, 1);
+      assert.equal(creates, 1); assert.equal(edits, 1);
+      assert.equal(await git(report.workspace.path, ['ls-files', '--', '.steward-delivery'], signal()), '');
+      assert.equal(f.store.delivery(f.task.id)!.prUrl, 'https://github.com/test/repo/pull/1');
+      assert.equal(f.g('rev-parse', 'origin/main'), report.workspace.baseSha);
+      assert.ok(calls.filter(a => a[0] === 'push').every(a => a.join(' ') === `push origin HEAD:refs/heads/${report.workspace.branch}`));
+      assert.equal((await inventory(report.workspace, signal())).fingerprint, report.fingerprint);
+      writeFileSync(join(report.workspace.path, 'README.md'), 'changed after validation');
+      await assert.rejects(publish(f.store, f.config, f.task, f.project, signal(), gh, repoGit), /验证后文件发生变化/);
+    } finally { f.close(); }
+  }
+});
+test('continuation preserves recorded contributors, deduplicates identities, and binds publication confirmation to them', async () => {
   const f = fixture();
   try {
     await f.executor.run(f.task, f.project, hooks, signal());
+    await f.executor.run(f.task, f.project, hooks, signal());
+    const next = new WorkspaceExecutor(f.config, f.store, {
+      commitAuthors: [{ name: 'Other Agent', email: 'agent@example.invalid' }], run: async () => 'reviewed',
+    });
+    await next.run(f.task, f.project, hooks, signal());
     const report = f.store.delivery(f.task.id)!;
-    f.store.saveDelivery(f.task.id, { ...report, authorizedKey: publicationKey(f.task, f.project, report) });
-    const evidenceDir = join(report.workspace.path, '.steward-delivery');
-    mkdirSync(evidenceDir, {recursive:true});
-    writeFileSync(join(evidenceDir, 'private.png'), 'not code');
-    const calls: string[][] = []; let creates = 0, edits = 0;
-    const repoGit: typeof git = async (cwd, args, sig) => {
-      calls.push(args);
-      // Network transport is a local bare Git repository; production identity check is exercised separately.
-      if (args[0] === 'remote') return 'https://github.com/test/repo.git';
-      return git(cwd, args, sig);
-    };
-    const gh = async (cwd: string, args: string[], sig: AbortSignal) => {
-      if (args[1] === 'create') { creates++; assert.ok(args.includes('--draft')); throw Error('simulated lost response after remote creation'); }
-      if (args[1] === 'edit') { edits++; return ''; }
-      const pr = { number: 1, url: 'https://github.com/test/repo/pull/1', state: 'OPEN', baseRefName: 'main', headRefName: report.workspace.branch };
-      if (args[1] === 'list') return JSON.stringify(creates ? [pr] : []);
-      if (args[1] === 'view') return JSON.stringify({ ...pr, headRefOid: await git(cwd, ['rev-parse', 'HEAD'], sig) });
-      throw Error('unexpected gh command');
-    };
-    await publish(f.store, f.config, f.task, f.project, signal(), gh, repoGit);
-    await publish(f.store, f.config, f.task, f.project, signal(), gh, repoGit);
-    assert.equal(creates, 1); assert.equal(edits, 1);
-    assert.equal(await git(report.workspace.path, ['ls-files', '--', '.steward-delivery'], signal()), '');
-    assert.equal(f.store.delivery(f.task.id)!.prUrl, 'https://github.com/test/repo/pull/1');
-    assert.equal(f.g('rev-parse', 'origin/main'), report.workspace.baseSha);
-    assert.ok(calls.filter(a => a[0] === 'push').every(a => a.join(' ') === `push origin HEAD:refs/heads/${report.workspace.branch}`));
-    assert.equal((await inventory(report.workspace, signal())).fingerprint, report.fingerprint);
-    writeFileSync(join(report.workspace.path, 'README.md'), 'changed after validation');
-    await assert.rejects(publish(f.store, f.config, f.task, f.project, signal(), gh, repoGit), /验证后文件发生变化/);
+    assert.deepEqual(report.commitAuthors, [
+      { name: 'Codex', email: 'codex@openai.com' }, { name: 'Other Agent', email: 'agent@example.invalid' },
+    ]);
+    const authorizedKey = publicationKey(f.task, f.project, report);
+    f.store.saveDelivery(f.task.id, { ...report, authorizedKey, commitAuthors: [] });
+    await assert.rejects(publish(f.store, f.config, f.task, f.project, signal(), async () => { throw Error('unexpected GitHub call'); }), /重新预览/);
+    assert.equal(await git(report.workspace.path, ['rev-parse', 'HEAD'], signal()), report.headSha);
   } finally { f.close(); }
 });
 test('publication rejects wrong origin, changed target, and closed PR before push', async () => {

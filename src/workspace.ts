@@ -1,4 +1,5 @@
 import { collectEvidence, prepareEvidenceDirectory, isEvidencePath, EVIDENCE_DIRECTORY } from './evidence.js';
+import { mergeCommitAuthors } from './attribution.js';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
@@ -111,7 +112,7 @@ export function canPublish(task: Task, project: Project | undefined, report: Del
 
 export function publicationKey(task: Task, project: Project, report: DeliveryReport): string {
   return createHash('sha256').update(JSON.stringify([task.id, project.path, project.worktree?.github,
-    report.workspace, report.fingerprint, report.validationKey, publicationText(task, report)])).digest('hex');
+    report.workspace, report.fingerprint, report.validationKey, report.commitAuthors, publicationText(task, report)])).digest('hex');
 }
 
 export type Gh = (cwd: string, args: string[], signal: AbortSignal) => Promise<string>;
@@ -157,7 +158,11 @@ export async function publish(store: Store, config: Config, task: Task, project:
   if (pendingFiles.length) await repoGit(w.path, ['add', '--', ...pendingFiles], signal);
   const staged = await repoGit(w.path, ['diff', '--cached', '--name-only', '-z'], signal);
   if (lines0(staged).some(isEvidencePath)) throw new Error('截图产物不能提交到代码仓库。');
-  if (staged) await repoGit(w.path, ['commit', '-m', `Steward task ${task.id}: ${task.project}`], signal);
+  if (staged) {
+    const trailers = mergeCommitAuthors(report.commitAuthors).map(a => `Co-authored-by: ${a.name} <${a.email}>`);
+    await repoGit(w.path, ['commit', '-m', `Steward task ${task.id}: ${task.project}`,
+      ...(trailers.length ? ['-m', trailers.join('\n')] : [])], signal);
+  }
   if ((await inventory(w, signal)).fingerprint !== report.fingerprint) throw new Error('提交过程改变了验证过的文件，未推送；请重新验证。');
   const head = await repoGit(w.path, ['rev-parse', 'HEAD'], signal);
   await repoGit(w.path, ['push', 'origin', `HEAD:refs/heads/${w.branch}`], signal);
@@ -194,6 +199,7 @@ export class WorkspaceExecutor implements Executor {
     const previous = this.store.delivery(task.id);
     const initial = await inventory(workspace, signal);
     let report: DeliveryReport = { workspace, mode, ...initial, capturedAt: new Date().toISOString(), checks: [], ready: false, validationKey: validationKey(project),
+      commitAuthors: mergeCommitAuthors(previous?.commitAuthors),
       ...(previous?.prUrl ? { prUrl: previous.prUrl, publishedSha: previous.publishedSha } : {}) };
     this.store.saveDelivery(task.id, report);
     try {
@@ -209,6 +215,10 @@ export class WorkspaceExecutor implements Executor {
       }} : {}),...(hooks.proposeMerge ? {proposeMerge:(request:Parameters<NonNullable<RunHooks['proposeMerge']>>[0])=>{
         hooks.proposeMerge!(request);previewingMerge=true;
       }} : {})};
+      if (mode === 'workspace-write') {
+        report.commitAuthors = mergeCommitAuthors(report.commitAuthors, this.inner.commitAuthors);
+        this.store.saveDelivery(task.id, report);
+      }
       const result = await this.inner.run({ ...task, evidenceDirectory, deliveryContext, codeVersion: { ref: workspace.baseRef, baseSha: workspace.baseSha, headSha: initial.headSha } }, { ...project, path: workspace.path, sandbox: mode }, innerHooks, signal);
       signal.throwIfAborted();
       report = { ...report, ...await inventory(workspace, signal), capturedAt: new Date().toISOString() };
