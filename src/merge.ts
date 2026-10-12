@@ -16,9 +16,18 @@ function ready(p:Pull) {
   if(p.baseRefName==='staging')throw Error('staging 按共享分支规则须由人工在 GitHub 审查并手动合并；分身只准备 PR。');
   if(p.state!=='OPEN')throw Error('PR 已关闭或合并，请重新查看 GitHub 状态。');
   if(p.isCrossRepository!==false || !sha(p.headRefOid) || !sha(p.baseRefOid))throw Error('不支持跨仓库或身份不完整的 PR 合并。');
-  if(p.mergeable!=='MERGEABLE'||p.mergeStateStatus!=='CLEAN')throw Error('PR 存在冲突、检查未定或仓库保护尚未满足；不会绕过保护或自动排队合并。');
   if(!['','APPROVED'].includes(p.reviewDecision))throw Error('PR 仍需审查或有修改要求，请先完成审查。');
-  if(!Array.isArray(p.statusCheckRollup)||!p.statusCheckRollup.length||p.statusCheckRollup.some(c=>c.status ? c.status!=='COMPLETED'||c.conclusion!=='SUCCESS' : c.state!=='SUCCESS'))throw Error('当前 PR 提交的检查尚未全部成功；没有检查记录也不能代为合并。');
+  if(!Array.isArray(p.statusCheckRollup)||!p.statusCheckRollup.length)throw Error('当前 PR 提交没有远端检查记录，不能代为合并。');
+  // GitHub accepts completed success, skipped and neutral check runs. Legacy
+  // commit statuses still require SUCCESS; pending/unknown values fail closed.
+  const blocked=p.statusCheckRollup.filter(c=>c.status!==undefined
+    ? c.status!=='COMPLETED'||!['SUCCESS','SKIPPED','NEUTRAL'].includes(c.conclusion??'')
+    : c.state!=='SUCCESS');
+  if(blocked.length){
+    const detail=blocked.slice(0,10).map(c=>`${(c.name||c.context||'未命名检查').replace(/[\r\n<>]/g,' ').slice(0,100)}: ${c.status!==undefined?`${c.status||'UNKNOWN'}/${c.conclusion||'UNKNOWN'}`:c.state||'UNKNOWN'}`).join('；');
+    throw Error(`当前 PR 提交的远端检查尚未满足合并条件：${detail}${blocked.length>10?'；其余 '+(blocked.length-10)+' 项未通过':''}。请查看 PR 检查详情；重复授权不会改变检查状态。`);
+  }
+  if(p.mergeable!=='MERGEABLE'||p.mergeStateStatus!=='CLEAN')throw Error('PR 存在冲突、检查未定或仓库保护尚未满足；不会绕过保护或自动排队合并。');
 }
 // Remote PR text is display data only, never execution instructions. Keep the
 // opening description bounded and omit validation/release claims from the excerpt.
@@ -79,7 +88,7 @@ export async function mergePullRequest(store:Store,config:Config,task:Task,proje
   if(repo.allow_squash_merge!==true)throw Error('仓库未允许 squash 合并；请在 GitHub 按仓库要求处理。');
   const key=JSON.stringify([url,preview.headRefName,preview.headRefOid,preview.baseRefName,preview.baseRefOid]);
   store.event(task.id,'merge_preview',key);
-  const description=`确认代你合并 [PR #${number}](${url})？\n来源：${preview.headRefName} @ ${preview.headRefOid}\n目标：${preview.baseRefName} @ ${preview.baseRefOid}\n范围：${preview.changedFiles} 个文件，+${preview.additions}/-${preview.deletions}；当前提交的 ${preview.statusCheckRollup.length} 项远端检查成功，GitHub 显示可合并。\n方式：squash${preview.isDraft?'，先将草稿转为待审阅':''}。只合并上述提交；分支或检查变化会停止。本地工作副本不会推送或重置，也不会删除分支。目标分支的现有 CI/CD 可能随合并触发。`;
+  const description=`确认代你合并 [PR #${number}](${url})？\n来源：${preview.headRefName} @ ${preview.headRefOid}\n目标：${preview.baseRefName} @ ${preview.baseRefOid}\n范围：${preview.changedFiles} 个文件，+${preview.additions}/-${preview.deletions}；当前提交的 ${preview.statusCheckRollup.length} 项远端检查满足合并条件（成功 ${preview.statusCheckRollup.filter(c=>c.conclusion==='SUCCESS'||c.state==='SUCCESS').length}，跳过 ${preview.statusCheckRollup.filter(c=>c.conclusion==='SKIPPED').length}，中立 ${preview.statusCheckRollup.filter(c=>c.conclusion==='NEUTRAL').length}），GitHub 显示可合并。\n方式：squash${preview.isDraft?'，先将草稿转为待审阅':''}。只合并上述提交；分支或检查变化会停止。本地工作副本不会推送或重置，也不会删除分支。目标分支的现有 CI/CD 可能随合并触发。`;
   const accepted=await new Promise<boolean>((resolve,reject)=>{
     const abort=()=>reject(signal.reason??Error('合并已取消')); signal.addEventListener('abort',abort,{once:true});
     if(signal.aborted){abort();return;}
