@@ -168,3 +168,31 @@ test('semantic merge with missing target or changed grants never reaches the con
   }finally{await engine.stop();f.store.close()}
  }
 });
+
+
+test('GitHub skipped and neutral check runs allow preview without claiming they ran successfully',async()=>{
+ const f=fixture();let description='';try{
+  f.pr.statusCheckRollup=[{name:'admin',status:'COMPLETED',conclusion:'SUCCESS'},{context:'external',state:'SUCCESS'},{name:'deploy',status:'COMPLETED',conclusion:'SKIPPED'},{name:'advisory',status:'COMPLETED',conclusion:'NEUTRAL'}];
+  const request=f.hooks.request;f.hooks.request=r=>{description=r.description;return request(r)};
+  assert.match(await f.run(),/已合并/);assert.equal(f.asks,1);
+  assert.match(description,/成功 2，跳过 1，中立 1/);
+ }finally{f.store.close()}
+});
+test('blocked check diagnostics name the check even when GitHub aggregate is not CLEAN',async()=>{
+ for(const check of [
+  {status:'IN_PROGRESS',conclusion:''},{status:'QUEUED',conclusion:'SKIPPED'},
+  ...['FAILURE','CANCELLED','TIMED_OUT','ACTION_REQUIRED','STALE','STARTUP_FAILURE','UNKNOWN',''].map(conclusion=>({status:'COMPLETED',conclusion})),
+  {state:'PENDING'},{state:'ERROR'},{state:'SKIPPED'},{}
+ ]){const f=fixture();try{
+  f.pr.mergeStateStatus='UNSTABLE';f.pr.statusCheckRollup=[{name:'deploy',...check}];
+  await assert.rejects(f.run(),/deploy: /);assert.equal(f.asks,0);assert.ok(!f.calls.some(a=>a.includes('PUT')||a[1]==='ready'));
+ }finally{f.store.close()}}
+});
+test('checks regressing after approval block mutation',async()=>{
+ const f=fixture();try{
+  f.pr.statusCheckRollup.push({name:'deploy',status:'COMPLETED',conclusion:'SKIPPED'});
+  f.confirm(()=>{f.pr.statusCheckRollup[1].conclusion='FAILURE'});
+  await assert.rejects(f.run(),/deploy: COMPLETED\/FAILURE/);assert.equal(f.asks,1);
+  assert.ok(!f.calls.some(a=>a.includes('PUT')||a[1]==='ready'));
+ }finally{f.store.close()}
+});
