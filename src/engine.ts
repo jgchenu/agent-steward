@@ -144,7 +144,7 @@ export class Engine {
         }
         const mode = selected.naturalMode ?? 'read-only';
         if (mode === 'workspace-write' && (selected.sandbox !== mode || !selected.worktree)) { reply('该项目当前没有可用的修改工作区，请在控制台检查授权。'); return; }
-        const prompt = `本话题的需求与补充：\n${this.store.ownerRequirements(bound.id)}\n\n主人已确认项目：${selected.label ?? projectSelection.project}\n主人本次回答：${text}`;
+        const prompt = `${this.store.ownerRequirements(bound.id)}\n\n主人已确认代码资源：${selected.label ?? projectSelection.project}\n主人本次回答：${text}`;
         const next = this.store.handoff(bound, projectSelection.project, prompt, mode, message.conversation);
         this.store.event(next.id, 'project_confirmed', JSON.stringify({fromTaskId:bound.id,project:projectSelection.project,messageId:message.id}));
         reply(`已确认 ${selected.label ?? projectSelection.project}，正在分配工作区并继续处理。`, {kind:'reply',taskId:next.id}); return;
@@ -558,7 +558,7 @@ export class Engine {
           const selected = this.config.projects[automaticallySelected], mode = selected.naturalMode ?? 'read-only';
           if (mode === 'workspace-write' && (selected.sandbox !== mode || !selected.worktree)) throw Error('该代码资源没有可用的修改工作目录。');
           const next = this.store.handoff(this.store.get(task.id)!,automaticallySelected,
-            `本任务的需求与补充：\n${this.store.ownerRequirements(task.id)}\n\n模型判断需要使用主人已明确指定的代码资源：${selected.label ?? automaticallySelected}`,mode,task.conversation);
+            `${this.store.ownerRequirements(task.id)}\n\n模型判断需要使用主人已明确指定的代码资源：${selected.label ?? automaticallySelected}`,mode,task.conversation);
           this.store.event(next.id,'resource_bound',JSON.stringify({fromTaskId:task.id,resource:{kind:'code-project',id:automaticallySelected},source:'owner-named-model-proposal'}));
           this.store.enqueue(task.chatId,`本任务需要使用你指定的 ${selected.label ?? automaticallySelected} 代码资源，正在准备执行目录并继续。`,{kind:'reply',taskId:next.id});
         } else if (proposed) this.store.saveProjectSelection(task.id, proposed.project, proposed.grantKey);

@@ -91,6 +91,7 @@ test('a semantic code need binds an owner-named resource after clarification and
       h.proposeProject!('code');return 'need code resource';
     }
     assert.deepEqual(t.resources,[{kind:'code-project',id:'code'}]);assert.equal(t.threadId,null);assert.match(t.prompt,/最近七天/);
+    assert.ok(t.prompt.startsWith('修改产品甲的数据页'));
     assert.notEqual(p.path,dir);assert.ok(store.workspace(t.id));writeFileSync(join(p.path,'sample.txt'),'changed');return 'implemented';
   }});
   const engine=new Engine(store,config,executor,channel);
