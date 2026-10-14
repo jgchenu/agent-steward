@@ -1,3 +1,4 @@
+import { approveOperation, currentOperation, decideOperation, operationFailure, OperationWaiting } from './operations.js';
 import { viewKey } from './channels/cards.js';
 import { CONVERSATION, conversationProject } from './conversation.js';
 import { permissionMode, permissionRank } from './permissions.js';
@@ -211,6 +212,21 @@ export class Engine {
         const req = this.store.getRequest(id), runtime = this.pending.get(id);
         const task = req && this.store.get(req.taskId);
         const business = task && this.store.graphWait(task.id);
+        const operation=task && currentOperation(this.store,task.id);
+        if(operation?.requestId===id && req?.status==='pending' && operation.state==='pending'){
+          if(!task || task.status!=='waiting_approval' || task.nextAction!=='merge' || this.active?.task.id===task.id
+            || task.chatId!==message.chatId || task.conversation?.anchorId!==message.conversation?.anchorId
+            || (bound && bound.id!==task.id) || operation.scope.ownerId!==message.senderId){reply('请在操作所属话题处理有效的确认。');return;}
+          if(!['/approve','/deny'].includes(command)){reply('请明确允许或拒绝这项操作。');return;}
+          const project=this.config.projects[task.project];
+          if(!project || projectGrantKey(project)!==operation.scope.grantKey || operation.expiresAt<=Date.now()){
+            operationFailure(this.store,task.id,'项目授权已变化或确认已过期，请重新预览。');
+            this.store.set(task.id,'review','项目授权已变化或确认已过期，请重新预览。');this.refreshTaskCard(task);reply('项目授权已变化或确认已过期，请重新预览。',{kind:'task',taskId:task.id});return;
+          }
+          decideOperation(this.store,operation,message.senderId,command==='/approve');
+          this.refreshTaskCard(task);
+          reply(command==='/approve'?'已记录这项操作的确认，重新校验后执行。':'未合并，PR 保持原样。',{kind:'task',taskId:task.id});return;
+        }
         if (command === '/answer' && task && req?.kind === 'input' && req.status === 'pending' && business?.requestId === id) {
           if (task.chatId !== message.chatId || (message.conversation && task.conversation?.anchorId !== message.conversation.anchorId)) { reply('请在问题所在会话回答。'); return; }
           if (!this.orchestrator) { reply('LangGraph 试点已关闭，问题与任务已保留；重新启用后可以继续。'); return; }
@@ -350,8 +366,12 @@ export class Engine {
     if (['approve', 'deny', 'answer'].includes(i.op)) {
       const req = this.store.getRequest(i.requestId ?? ''), runtime = this.pending.get(i.requestId ?? '');
       const business = task && this.store.graphWait(task.id);
+      const operation = task && currentOperation(this.store, task.id);
+      const operationWait = !!operation && ['approve','deny'].includes(i.op) && operation.requestId === i.requestId
+        && operation.state === 'pending' && operation.expiresAt > Date.now() && operation.scope.ownerId === action.senderId
+        && task?.status === 'waiting_approval' && task.nextAction === 'merge' && this.active?.task.id !== task.id;
       const durable = i.op === 'answer' && req?.kind === 'input' && business?.requestId === i.requestId && !!this.orchestrator && task?.status === 'waiting_input';
-      if (!req || req.taskId !== task?.id || req.status !== 'pending' || (!runtime && !durable) ||
+      if (!req || req.taskId !== task?.id || req.status !== 'pending' || (!runtime && !durable && !operationWait) ||
         (req.kind === 'input') !== (i.op === 'answer')) return fail('该请求已失效，未执行任何授权。');
       try { runtime?.validate?.(i.op === 'answer' ? body : i.op === 'approve' ? 'accept' : 'decline'); }
       catch (e) { return fail(e instanceof Error ? e.message : '请检查输入。'); }
@@ -395,7 +415,9 @@ export class Engine {
     this.store.set(id, status);
   }
   private tick(): void {
-    if (this.stopped || this.active) return;
+    if (this.stopped) return;
+    this.store.expireOperations();
+    if(this.active)return;
     const queued = this.store.list().find(t => t.status === 'queued');
     if (!queued) return;
     const task = { ...queued, permissionMode: permissionMode(this.config), modelSelection: this.config.modelSelection ? {...this.config.modelSelection} : undefined };
@@ -425,6 +447,7 @@ export class Engine {
       const resourceCatalog = Object.entries(this.config.projects).map(([id,p]) => ({id,kind:'code-project',name:p.label ?? id,aliases:[...(p.aliases ?? [])],description:p.description ?? '',capability:p.sandbox}));
       const resourceGrants = Object.fromEntries(Object.entries(this.config.projects).map(([id,p]) => [id,projectGrantKey(p)]));
       const hooks: RunHooks = {
+        ...(task.nextAction==='merge'?{approveOperation:proposal=>{abort.signal.throwIfAborted();approveOperation(this.store,task.id,proposal);}}:{}),
         ...(task.project !== CONVERSATION && task.mode === 'workspace-write' && project.sandbox === 'workspace-write'
           && (!task.nextAction || task.nextAction === 'execute') ? {proposeMerge:(request:MergeProposal)=>{
             abort.signal.throwIfAborted();merge=parseMergeProposal(request);
@@ -586,6 +609,8 @@ export class Engine {
       if (task.nextAction !== 'publish' && report?.evidenceIds?.length) this.store.enqueue(task.chatId, '验收截图（执行 Agent 提供）', { kind:'evidence', taskId:task.id, evidenceIds:report.evidenceIds });
       if (report?.evidenceWarning) this.store.enqueue(task.chatId, report.evidenceWarning, {kind:'reply', taskId:task.id});
     } catch (error) {
+      if(error instanceof OperationWaiting)return;
+      if(task.nextAction==='merge')operationFailure(this.store,task.id,error instanceof Error?error.message:'操作失败');
       const state = this.store.get(task.id)?.status;
       if (state !== 'cancelled' && !abort.signal.aborted && task.nextAction === 'publish' && error instanceof TargetBranchMoved) {
         // No Git mutation has occurred. Preserve the implementation result and checks,

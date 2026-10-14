@@ -77,7 +77,7 @@ Edit the private config:
 }
 ```
 
-Paths are resolved relative to the config file. Code projects must exist in your local Codex project list and be explicitly authorized in the console. Conversation also works with zero project grants. To allow edits, configure `workspace-write` **and** an isolated Git `worktree`, then choose modification mode for each task. See [project setup and PR delivery](docs/project-delivery.md). A run can request additional permissions; requests are handled according to the selected console permission mode. The timeout includes time spent waiting for you.
+Paths are resolved relative to the config file. Code projects must exist in your local Codex project list and be explicitly authorized in the console. Conversation also works with zero project grants. To allow edits, configure `workspace-write` **and** an isolated Git `worktree`, then choose modification mode for each task. See [project setup and PR delivery](docs/project-delivery.md). A run can request additional permissions; requests are handled according to the selected console permission mode. Runtime permission waits count toward the run timeout. Steward merge confirmations are saved separately and release the execution slot.
 
 ```sh
 npm run doctor  # Checks configuration, App Server and ChatGPT auth; no inference
@@ -111,7 +111,7 @@ Keep the process and machine awake. Closing the service interrupts active work; 
 | `/model [task]` | Read the current or most recent execution model/effort and next-turn settings without starting or interrupting work |
 | `/cancel <task>` | Stop execution; existing changes are retained |
 | `/continue <task> <instructions>` | Queue another turn using the saved Codex thread |
-| `/approve <request>`, `/deny <request>` | Answer one live permission request |
+| `/approve <request>`, `/deny <request>` | Answer one pending runtime permission or Steward merge confirmation |
 | `/answer <request> <answer>` | Answer a question; multiple questions require JSON keyed by question ID |
 | `/done <task>` | Record the owner's acceptance of a result in `review` |
 
@@ -123,7 +123,7 @@ In an existing modification topic, natural requests such as “可以的，提�
 
 Requests to move the work onto the latest base or fill in missing delivery settings also have a structured handoff. Steward previews the exact baseline, migration scope and complete check commands for one owner confirmation. It then preserves the old copy, gives a fresh task an approved change snapshot to adapt, and runs the configured checks. The executor sees the actual delivery configuration instead of asking the owner to repeat known errors. See [baseline and delivery preparation](docs/project-delivery.md#更换任务代码版本).
 
-In Feishu, directly @mention the bot with your request. Analysis, writing, customer-support drafts and reasoning over supplied business data need no space or code grant. Natural requests first reach the general executor in a read-only scratch directory; words such as “submit” or “repair” and product names do not select code resources. The model can propose a granted code resource when its files are actually necessary. A uniquely owner-named matching resource uses its configured mode without repeating project selection; inferred or ambiguous resources need a scoped choice. Configure [approval modes, Codex project grants](docs/workspaces.md) with `npm run workspaces` only when code resources are needed. The optional `工作台` or `/help` entry opens the manual code-task form. Group answers and clarifying questions are ordinary threaded posts with Markdown and complete long-answer splitting; reply naturally to continue. Explicit permission requests and on-demand task management retain their cards. Commands remain available in Feishu and the terminal. A generic “yes” never grants operation permission. Each instance runs one task at a time.
+In Feishu, directly @mention the bot with your request. Analysis, writing, customer-support drafts and reasoning over supplied business data need no space or code grant. Natural requests first reach the general executor in a read-only scratch directory; words such as “submit” or “repair” and product names do not select code resources. The model can propose a granted code resource when its files are actually necessary. A uniquely owner-named matching resource uses its configured mode without repeating project selection; inferred or ambiguous resources need a scoped choice. Configure [approval modes, Codex project grants](docs/workspaces.md) with `npm run workspaces` only when code resources are needed. The optional `工作台` or `/help` entry opens the manual code-task form. Group answers and clarifying questions are ordinary threaded posts with Markdown and complete long-answer splitting; reply naturally to continue. Explicit permission requests and on-demand task management retain their cards. Commands remain available in Feishu and the terminal. A generic “yes” never grants operation permission. Each instance runs one execution at a time; durable business questions and Steward merge confirmations release that slot while waiting.
 
 Enable `card.action.trigger` under the application’s **callback configuration**, using the existing long connection. An existing installation must verify this separately. Ordinary progress refreshes update a card in place; requests for input, results and failures produce a fresh notification so they are not silently hidden in an old message. Forms accept up to 1,000 characters; longer tasks can still be sent as text.
 
@@ -136,8 +136,9 @@ With group mode enabled, owner @mentions directly start tasks using an explicitl
 The optional LangGraph pilot supports durable business questions and guarded continuation for all new tasks, including tasks with no resource binding. Set `"langGraphPilot": true` in the private config and restart the service to enroll new tasks. Existing tasks retain their runtime. The pilot is off by default; see [pilot operation and recovery](docs/architecture.md#langgraph-pilot) before enabling it.
 
 - Tasks, session IDs, events, inbound message deduplication and outbound notifications live in SQLite.
-- Queued work remains queued. Interrupted work requires an explicit `/continue`; it is not automatically replayed.
-- Old permission requests expire. They cannot authorize a new run.
+- Queued work remains queued. Interrupted executor work requires an explicit `/continue`; it is not automatically replayed.
+- Steward merge confirmations survive restarts for up to 24 hours and release the execution slot. An accepted, unattempted merge resumes with fresh grant, commit, CI and review checks. A recorded external attempt is reconciled by readback only.
+- Runtime tool permission requests expire on restart. They cannot authorize a new run.
 - Outbound messages retry with the same Feishu UUID. Delivery is at-least-once; Feishu's deduplication window is finite, so duplicates after long outages remain possible.
 - Codex thread data remains in Codex's own local storage. Restoring only Steward's database is not enough to resume a missing Codex thread.
 

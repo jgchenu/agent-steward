@@ -31,7 +31,8 @@ The pilot is off by default. Simulated recovery tests and read-only live Codex c
 - [ ] Knowledge-base and business-system resource connectors with actor-scoped grants
 - [ ] Operational tasks for customer support, operations and finance with inspectable business artifacts
 - [ ] Scoped human collaboration: requester, participant and approver roles
-- [ ] Unified operation contracts and receipts across code and business actions
+- [x] Durable scoped PR merge decisions, slot release and conservative external-attempt recovery
+- [ ] Extend operation contracts and receipts to publication, baseline and business actions
 
 - [x] Local workspace grant UI, default workspace and direct natural-language dispatch
 - [x] Group reaction acknowledgement before execution and threaded results
