@@ -48,6 +48,13 @@ test('configuration fails closed for missing owner, unknown sandbox and invalid 
     process.env.STEWARD_OWNER_ID = 'owner';
     assert.equal(loadConfig(path).projects.demo.sandbox, 'read-only');
     assert.equal(loadConfig(path).approvalsReviewer, 'user');
+    assert.equal(loadConfig(path).langGraphPilot, true);
+    for (const value of [false, true]) {
+      writeFileSync(path, JSON.stringify({ langGraphPilot: value, projects: {} }));
+      assert.equal(loadConfig(path).langGraphPilot, value);
+    }
+    writeFileSync(path, JSON.stringify({ langGraphPilot: 'false', projects: {} }));
+    assert.throws(() => loadConfig(path), /langGraphPilot/);
     writeFileSync(path, JSON.stringify({ approvalsReviewer: 'auto_review', projects: { demo: { path: dir } } }));
     assert.equal(loadConfig(path).approvalsReviewer, 'auto_review');
     writeFileSync(path, JSON.stringify({ approvalsReviewer: 'always', projects: { demo: { path: dir } } }));

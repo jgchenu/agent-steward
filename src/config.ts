@@ -67,5 +67,5 @@ export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.
     throw new Error('maxRunMinutes must be between 1 and 1440.');
   }
   return { configFile: resolve(file), ownerId, projects, modelSelection:modelSelection(raw.modelSelection), ...(catalog ? {codexProjects:catalog} : {}), maxRunMinutes, permissionMode: permissionMode(raw), approvalsReviewer: raw.approvalsReviewer ?? 'user', defaultProject: raw.defaultProject, groupChats: raw.groupChats ?? false, stateDir: resolve(base, raw.stateDir ?? '.steward'),
-    codexCommand: raw.codexCommand ?? 'codex', langGraphPilot: raw.langGraphPilot ?? false };
+    codexCommand: raw.codexCommand ?? 'codex', langGraphPilot: raw.langGraphPilot ?? true };
 }

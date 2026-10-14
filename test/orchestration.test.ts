@@ -13,7 +13,7 @@ let seq=0;
 const message=(text:string,extra:Partial<Incoming>={}):Incoming=>({id:`msg-${++seq}`,text,chatId:'dm',senderId:'owner',senderType:'user',chatType:'p2p',...extra});
 const project={path:process.cwd(),sandbox:'read-only' as const};
 const hooks:RunHooks={thread:()=>{},progress:()=>{},request:()=>{throw Error('unexpected live permission');},resolved:()=>{}};
-const config:Config={ownerId:'owner',stateDir:'.',codexCommand:'unused',maxRunMinutes:1,langGraphPilot:true,projects:{demo:project}};
+const config:Config={ownerId:'owner',stateDir:'.',codexCommand:'unused',maxRunMinutes:1,projects:{demo:project}};
 async function until(fn:()=>boolean){for(let i=0;i<200;i++){if(fn())return;await setTimeout(10);}assert.fail('condition not reached');}
 const channel={send:async()=>{}};
 
@@ -61,18 +61,46 @@ test('topic prose answers durable questions but cannot cross topics; cancelled a
   }finally{await engine.stop();store.close();}
 });
 
-test('pilot enrolls new tasks with optional resources and disabling it never falls back to legacy execution',async()=>{
-  const store=new Store(':memory:');const old=store.create('dm','demo','old');let runs=0;
-  let engine=new Engine(store,config,{run:async()=>{runs++;return 'done';}},channel);
+test('default intake uses LangGraph while existing legacy tasks retain their runtime',async()=>{
+  const store=new Store(':memory:');const old=store.create('dm','demo','old');
+  const engine=new Engine(store,config,{run:async(task,_p,h)=>{
+    if(task.id===old.id)assert.equal(h.askClarification,undefined);
+    else assert.equal(typeof h.askClarification,'function');
+    return 'done';
+  }},channel);
   try{
     assert.equal(store.get(old.id)?.orchestration,'legacy');
-    const task=store.create('dm','demo','pilot');assert.equal(task.orchestration,'langgraph-v1');
-    assert.equal(store.create('dm','__conversation__','chat').orchestration,'langgraph-v1');
-    store.set(old.id,'review');store.set(store.list()[2].id,'review');
-    await engine.stop();engine=new Engine(store,{...config,langGraphPilot:false},{run:async()=>{runs++;return 'wrong';}},channel);
-    engine.start();await until(()=>store.get(task.id)?.status==='failed');assert.equal(runs,0);
-    assert.match(store.get(task.id)!.result!,/不会通过旧运行时/);
+    const task=store.create('dm','demo','graph');assert.equal(task.orchestration,'langgraph-v1');
+    const general=store.create('dm','__conversation__','chat');assert.equal(general.orchestration,'langgraph-v1');
+    engine.start();await until(()=>store.list().every(t=>t.status==='review'));
+    engine.receive(message(`/continue ${old.id} more`));await until(()=>store.get(old.id)?.status==='review');
+    assert.equal(store.get(old.id)?.orchestration,'legacy');
   }finally{await engine.stop();store.close();}
+});
+
+test('legacy intake rollback preserves graph waits and continues their saved session after restart',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'steward-graph-rollback-')),db=join(dir,'state.db');
+  let store=new Store(db),runs=0;
+  const executor:Executor={run:async(task,_p,h)=>{
+    runs++;
+    if(runs===1){h.thread('retained-session');h.askClarification!('Which range?');return 'question';}
+    if(task.orchestration==='langgraph-v1'){
+      assert.equal(task.threadId,'retained-session');assert.match(task.prompt,/last week/);
+      assert.equal(typeof h.askClarification,'function');
+    }else assert.equal(h.askClarification,undefined);
+    return 'done';
+  }};
+  let engine=new Engine(store,config,executor,channel);
+  try{
+    engine.receive(message('/new demo first'));await until(()=>store.list()[0]?.status==='waiting_input');
+    const task=store.list()[0],request=store.requests(task.id)[0].id;
+    await engine.stop();store.close();store=new Store(db);
+    engine=new Engine(store,{...config,langGraphPilot:false},executor,channel);engine.start();
+    assert.equal(store.getRequest(request)?.status,'pending');
+    engine.receive(message('last week'));await until(()=>store.get(task.id)?.status==='review');
+    engine.receive(message('/new demo legacy'));await until(()=>store.list()[1]?.status==='review');
+    assert.equal(store.list()[1].orchestration,'legacy');assert.equal(runs,3);
+  }finally{await engine.stop();store.close();rmSync(dir,{recursive:true,force:true});}
 });
 
 test('uncertain executor effects are not repeated after recovery; live approvals expire',async()=>{
@@ -195,4 +223,36 @@ test('online SQLite backup includes both graph checkpoints and the matching busi
     assert.deepEqual(await graph.run(store.get(task.id)!,project,executor,hooks,AbortSignal.timeout(5000)),{waiting:false,message:'done'});
     assert.equal(runs,2);
   }finally{graph.close();store.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test('restart reconstructs a checkpointed question before domain delivery without replaying execution',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'steward-graph-gap-')),db=join(dir,'state.db');
+  let store=new Store(db);store.pilotIntake=true;
+  const task=store.create('dm','demo','work');store.set(task.id,'running');
+  // A runtime question can remain in the database when the process dies.
+  const stale=store.request(task.id,'input','old runtime question');
+  let runs=0;
+  const executor:Executor={run:async(t,_p,h)=>{
+    runs++;
+    if(runs===1){h.thread('checkpoint-session');h.askClarification!('Which date?');return 'question';}
+    assert.equal(t.threadId,'checkpoint-session');assert.match(t.prompt,/Friday/);return 'done';
+  }};
+  const graph=new TaskOrchestrator(store);
+  let engine:Engine|undefined;
+  try{
+    const outcome=await graph.run(task,project,executor,{...hooks,thread:id=>store.thread(task.id,id)},AbortSignal.timeout(5000));
+    assert.equal(outcome.waiting,true);
+    // Crash after checkpoint commit but before graphQuestion/request/outbox commit.
+    assert.equal(store.graphWait(task.id),undefined);
+    graph.close();store.close();store=new Store(db);
+    engine=new Engine(store,config,executor,channel);engine.start();
+    await until(()=>store.get(task.id)?.status==='waiting_input');
+    assert.equal(runs,1);assert.equal(store.getRequest(stale)?.status,'expired');
+    assert.equal(store.requests(task.id).length,1);
+    const request=store.requests(task.id)[0].id;assert.notEqual(request,stale);
+    engine.receive(message(`/answer ${stale} wrong`));assert.equal(runs,1);
+    engine.receive(message('Friday'));await until(()=>store.get(task.id)?.status==='review');
+    assert.equal(runs,2);assert.equal(store.requests(task.id).length,0);
+  }finally{if(engine)await engine.stop();else graph.close();store.close();rmSync(dir,{recursive:true,force:true});}
 });

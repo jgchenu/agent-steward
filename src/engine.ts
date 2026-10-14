@@ -40,8 +40,9 @@ export class Engine {
   private orchestrator?: TaskOrchestrator;
   constructor(readonly store: Store, readonly config: Config, private executor: Executor,
     private channel: Channel, private mergeRunner = mergePullRequest) {
-    store.pilotIntake = config.langGraphPilot === true;
-    if (config.langGraphPilot) this.orchestrator = new TaskOrchestrator(store);
+    store.pilotIntake = config.langGraphPilot !== false;
+    // Intake policy must not strand persisted graph questions or recovery receipts.
+    this.orchestrator = new TaskOrchestrator(store);
   }
 
   updateProjects(next: Pick<Config, 'projects' | 'defaultProject' | 'codexProjects'> & Partial<Pick<Config, 'permissionMode' | 'approvalsReviewer' | 'modelSelection'>>): void {
@@ -229,7 +230,7 @@ export class Engine {
         }
         if (command === '/answer' && task && req?.kind === 'input' && req.status === 'pending' && business?.requestId === id) {
           if (task.chatId !== message.chatId || (message.conversation && task.conversation?.anchorId !== message.conversation.anchorId)) { reply('请在问题所在会话回答。'); return; }
-          if (!this.orchestrator) { reply('LangGraph 试点已关闭，问题与任务已保留；重新启用后可以继续。'); return; }
+          if (!this.orchestrator) { reply('编排运行时不可用，问题与任务已保留。'); return; }
           if (task.status !== 'waiting_input' || this.active?.task.id === task.id || !body) { reply('请等待问题保存完成，并填写回答。'); return; }
           if (task.project !== CONVERSATION && !this.config.projects[task.project]) { reply('项目授权已撤销，任务尚未继续。'); return; }
           this.store.answerGraph(task.id,body);
@@ -551,7 +552,7 @@ export class Engine {
         availableProjects: resourceCatalog }) };
       let result: string;
       if (task.orchestration === 'langgraph-v1' && task.nextAction !== 'publish') {
-        if (!this.orchestrator) throw Error('LangGraph 试点已关闭；任务已保留，不会通过旧运行时重放。');
+        if (!this.orchestrator) throw Error('编排运行时不可用；任务已保留，不会通过旧运行时重放。');
         const outcome = await this.orchestrator.run(executionTask,project,this.executor,hooks,abort.signal);
         abort.signal.throwIfAborted();
         if (outcome.waiting) {
