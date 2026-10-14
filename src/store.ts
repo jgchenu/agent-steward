@@ -59,8 +59,8 @@ export class Store {
     const id = randomUUID().slice(0, 8), now = new Date().toISOString();
     this.db.prepare('INSERT INTO tasks(id,chatId,project,prompt,status,createdAt,updatedAt,mode) VALUES (?,?,?,?,?,?,?,?)')
       .run(id, chatId, project, prompt, 'queued', now, now, mode);
-    // Existing tasks and projectless project-selection flows retain their runtime.
-    if (this.pilotIntake && project !== '__conversation__') this.db.prepare("UPDATE tasks SET orchestration='langgraph-v1',orchestrationRunId=? WHERE id=?").run(randomUUID(), id);
+    // Enrollment is task-based; resources are optional. Existing tasks retain their runtime.
+    if (this.pilotIntake) this.db.prepare("UPDATE tasks SET orchestration='langgraph-v1',orchestrationRunId=? WHERE id=?").run(randomUUID(), id);
     if (conversation) this.saveConversation(id, conversation);
     this.event(id, 'created', prompt);
     return this.get(id)!;
@@ -75,7 +75,8 @@ export class Store {
   }
   private hydrate(task: Task): Task {
     const conversation = this.db.prepare('SELECT data FROM task_conversations WHERE taskId=?').get(task.id) as { data: string } | undefined;
-    return { ...task, baselineOptions: typeof task.baselineOptions === 'string' ? JSON.parse(task.baselineOptions) : null,
+    return { ...task, resources: task.project === '__conversation__' ? [] : [{kind:'code-project',id:task.project}],
+      baselineOptions: typeof task.baselineOptions === 'string' ? JSON.parse(task.baselineOptions) : null,
       ...(conversation ? { conversation: JSON.parse(conversation.data) } : {}) };
   }
   saveConversation(id: string, conversation: Conversation): void {
@@ -113,7 +114,7 @@ export class Store {
   clearProjectSelection(taskId: string): void {
     this.db.prepare('DELETE FROM project_selections WHERE taskId=?').run(taskId);
   }
-  handoff(from: Task, project: string, prompt: string, mode: Task['mode'], conversation: Conversation): Task {
+  handoff(from: Task, project: string, prompt: string, mode: Task['mode'], conversation?: Conversation): Task {
     if (!['review','completed','failed','cancelled','interrupted'].includes(this.get(from.id)?.status ?? '')) throw Error('当前任务仍在执行，无法切换项目。');
     const next = this.create(from.chatId, project, prompt, mode, conversation);
     this.clearProjectSelection(from.id);

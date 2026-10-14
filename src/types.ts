@@ -16,11 +16,14 @@ export interface Attachment {
   visuals?: Array<{ path: string; label: string }>;
 }
 export type PermissionMode = 'ask' | 'auto' | 'sandbox-auto' | 'full-access';
+export interface ResourceBinding { kind: 'code-project'; id: string }
 export interface Task {
+  resources?: ResourceBinding[];
   orchestration?: 'legacy' | 'langgraph-v1'; orchestrationRunId?: string | null;
   baselineOptions?: BaselineOptions | null;
   deliveryContext?: string;
   projectCandidates?: string[];
+  projectCandidateGrants?: Record<string,string>;
   modelSelection?: import('./models.js').ModelSelection;
   permissionMode?: PermissionMode;
   id: string; chatId: string; project: string; prompt: string; status: Status;

@@ -53,7 +53,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
       icon: { tag: 'standard_icon', token: 'todo_colorful' } },
     body: { direction: 'vertical', padding: '12px 12px 20px 12px', vertical_spacing: '12px', elements },
   });
-  const projectLabel = (name: string) => name === CONVERSATION ? '对话' : config.projects[name]?.label ?? name;
+  const projectLabel = (name: string) => name === CONVERSATION ? '通用任务' : config.projects[name]?.label ?? name;
   const homeButton = (primary = false) => button('派新任务', { op: 'home' }, primary);
   if (!view || view.kind === 'notice') return card('Agent Steward', '工作动态', 'blue', [box(notice), homeButton()]);
   if (view.kind === 'choose-project') return card('这次处理哪个项目？', '选一下就开始，不用重新填写需求', 'blue', [
@@ -64,20 +64,19 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   if (view.kind === 'home') {
     const projects = Object.entries(config.projects);
     return card('交给我来做', 'Agent Steward · 你的 Agent 分身', 'blue', [
-      box('直接发消息说需求就能开始，群里请 @我。这里也可以手动选择代码项目和工作方式。'),
+      box('直接说需求就能开始，群里请 @我。默认无需选择空间；只有需要代码时才使用已授权的代码资源。'),
       ...(conversation ? [caption(`自动读取${conversation.scope === 'thread' ? '当前话题' : '当前群最近讨论'}作为参考；结果会回复到对应话题，仅主人可操作。`)] : []),
-      ...(projects.length ? [form('开始执行', { op: 'new' }, [
-        text('工作项目'),
-        { tag: 'select_static', name: 'project', required: true, width: 'fill', placeholder: plain('选择项目'),
-          ...(projects.length === 1 ? { initial_option: projects[0][0] } : {}),
-          options: projects.map(([name]) => ({ text: plain(projectLabel(name)), value: name })) },
+      form('开始处理', { op: 'new' }, [
+        text('任务资源'),
+        { tag: 'select_static', name: 'project', required: true, width: 'fill', initial_option: CONVERSATION,
+          options: [{text:plain('通用任务 · 按需使用资源'),value:CONVERSATION},...projects.map(([name]) => ({ text: plain(projectLabel(name)), value: name }))] },
         text('本次工作方式'),
         { tag: 'select_static', name: 'mode', required: true, width: 'fill', initial_option: 'read-only',
-          options: [{ text: plain('只读分析 · 不修改文件'), value: 'read-only' },
+          options: [{ text: plain('分析与内容整理'), value: 'read-only' },
             ...(projects.some(([, p]) => p.sandbox === 'workspace-write' && p.worktree) ? [{ text: plain('允许修改 · 完成后自动验证'), value: 'workspace-write' }] : [])] },
-        { ...input('任务要求', '例如：检查这个项目，并给我三条改进建议'), ...(view.draft ? { default_value: view.draft.slice(0, 1000) } : {}) },
-      ])] : [caption('尚未授权代码项目。可以直接与我聊天、讨论或分析附件；代码工作请先在本机控制台授权 Codex 项目。')]),
-        { tag: 'collapsible_panel', expanded: false, header: { title: plain('这些项目是什么？') }, elements: projects.map(([name, p]) => text(`${projectLabel(name)}\n${p.description ?? '配置在这台电脑上的工作目录。'}${conversation ? '' : `\n本机位置：${p.path}`}`)) },
+        { ...input('任务要求', '例如：归纳客服反馈，或整理这份报销说明'), ...(view.draft ? { default_value: view.draft.slice(0, 1000) } : {}) },
+      ]),
+      ...(projects.length ? [{ tag: 'collapsible_panel', expanded: false, header: { title: plain('可用代码资源') }, elements: projects.map(([name, p]) => text(`${projectLabel(name)}\n${p.description ?? '配置在这台电脑上的工作目录。'}${conversation ? '' : `\n本机位置：${p.path}`}`)) }] : []),
       row(button('我的任务', { op: 'list' }), button('刷新入口', { op: 'home' })),
     ]);
   }
@@ -89,7 +88,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
       border_color: `${status[t.status][1]}-100`, background_style: `${status[t.status][1]}-50`,
       padding: '12px', vertical_spacing: '8px',
       behaviors: [{ type: 'callback', value: { actionId: action({ op: 'status', taskId: t.id }) } }],
-      elements: [badge(t.status), taskHeading(t.prompt), caption(`项目 · ${projectLabel(t.project)}`),
+      elements: [badge(t.status), taskHeading(t.prompt), caption(t.project===CONVERSATION?'无需代码资源':`代码资源 · ${projectLabel(t.project)}`),
         row(caption(status[t.status][3]), { tag: 'div', text: { ...plain('打开任务 ›'), text_color: status[t.status][1], text_align: 'right', text_size: 'notation' } })],
     }));
     const nav = [homeButton(true)];

@@ -26,6 +26,13 @@ The pilot is off by default. Simulated recovery tests and read-only live Codex c
 
 ## Next — Make it useful every day
 
+- [x] Task-first natural intake with optional code resources; no keyword-based code requirement
+- [x] Resource-free durable business questions, restart and continuation in the LangGraph pilot
+- [ ] Knowledge-base and business-system resource connectors with actor-scoped grants
+- [ ] Operational tasks for customer support, operations and finance with inspectable business artifacts
+- [ ] Scoped human collaboration: requester, participant and approver roles
+- [ ] Unified operation contracts and receipts across code and business actions
+
 - [x] Local workspace grant UI, default workspace and direct natural-language dispatch
 - [x] Group reaction acknowledgement before execution and threaded results
 - [ ] Guided setup and diagnostics, with locally completed authentication

@@ -5,7 +5,6 @@ import {Engine} from '../src/engine.js';
 import {Store} from '../src/store.js';
 import {buildCard} from '../src/channels/cards.js';
 import {FeishuChannel} from '../src/channels/feishu.js';
-import {projectChoices} from '../src/routing.js';
 import type {Config, Incoming, Task, View} from '../src/types.js';
 const cfg=():Config=>({ownerId:'owner',stateDir:'.',codexCommand:'codex',maxRunMinutes:1,groupChats:true,defaultProject:'general',projects:{
   general:{path:'.',sandbox:'read-only',label:'通用分析',description:'讨论、归纳与写作'},
@@ -21,15 +20,16 @@ test('natural task bypasses forms, acknowledges before inference, preserves full
  assert.deepEqual(order,['reaction','context','run']);assert.equal(tasks[0].project,'__conversation__');assert.equal(tasks[0].prompt,text);assert.equal(tasks[0].mode,'read-only');assert.equal(sent.length,1);assert.equal(sent[0].kind,'reply');
  }finally{await engine.stop();store.close()}
 });
-test('bare mention asks a short question; explicit names route only among grants; ambiguity keeps the full task',async()=>{
+test('bare mention asks a short question; product references do not force resources and explicit choice keeps the full task',async()=>{
  const store=new Store(':memory:'),sent:Array<{view?:View,text:string}>=[];const config=cfg();const engine=new Engine(store,config,{run:async()=> 'done'},{send:async(_c,text,_i,view)=>{sent.push({view,text})},context:async()=>snapshot});
  try{engine.receive(incoming(''));await engine.flush();assert.equal(store.list().length,0);assert.match(sent[0].text,/直接告诉我/);assert.equal(sent[0].view?.kind,'notice');
- assert.deepEqual(projectChoices(config,'看看代码项目的问题'),['code']);assert.deepEqual(projectChoices(config,'decode this'),['__conversation__']);
- const text=('比较通用分析和代码项目：'+'内容'.repeat(8000)).slice(0,16000);engine.receive(incoming(text));await engine.flush();const view=sent.at(-1)!.view!;assert.equal(view.kind,'choose-project');
+ const text=('比较通用分析和代码项目：'+'内容'.repeat(8000)).slice(0,16000),m=incoming(text);engine.receive(m);await until(()=>store.list()[0]?.status==='review');
+ const task=store.list()[0];assert.equal(task.project,'__conversation__');assert.deepEqual(task.resources,[]);
+ const view:View={kind:'choose-project',draft:text,choices:['general','code'],selectionKey:'explicit-resource',fromTaskId:task.id,revision:task.updatedAt,conversation:m.conversation};
  const card=buildCard(store,config,'group',view) as any;const button=card.body.elements.find((e:any)=>e.tag==='button');const actionId=button.behaviors[0].value.actionId;
  const click={id:'click',actionId,senderId:'owner',chatId:'group',messageId:'card',fields:{project:'forged',body:'forged'}};
- assert.equal(engine.handleAction({...click,senderId:'other'}).toast.type,'error');engine.handleAction(click);await until(()=>store.list()[0]?.status==='review');
- assert.equal(store.list()[0].prompt,text);engine.handleAction({...click,id:'click2'});assert.equal(store.list().length,1);
+ assert.equal(engine.handleAction({...click,senderId:'other'}).toast.type,'error');engine.handleAction(click);await until(()=>store.list().length===2&&store.list().every(t=>t.status==='review'));
+ assert.match(store.list()[1].prompt,/比较通用分析和代码项目/);engine.handleAction({...click,id:'click2'});assert.equal(store.list().length,2);
  const home=JSON.stringify(buildCard(store,config,'group',{kind:'home',conversation:incoming('').conversation}));assert.match(home,/通用分析/);assert.doesNotMatch(home,/\/private\/code/);
  assert.match(JSON.stringify(buildCard(store,config,'dm',{kind:'home'})),/\/private\/code/);
  }finally{await engine.stop();store.close()}
@@ -37,7 +37,7 @@ test('bare mention asks a short question; explicit names route only among grants
 test('revoking a project interrupts active work and an old project-choice action cannot restore access',async()=>{
  const store=new Store(':memory:');const config=cfg();let started=false;
  const engine=new Engine(store,config,{run:async(_t,_p,_h,signal)=>new Promise((_,reject)=>{started=true;signal.addEventListener('abort',()=>reject(signal.reason),{once:true})})},{send:async()=>{},context:async()=>snapshot});
- try{const actionId=store.action('group',{op:'dispatch',project:'code',prompt:'edit code',selectionKey:'revoked',conversation:incoming('').conversation});engine.receive(incoming('改进代码项目'));await until(()=>started);
+ try{const actionId=store.action('group',{op:'dispatch',project:'code',prompt:'edit code',selectionKey:'revoked',conversation:incoming('').conversation});engine.receive(incoming('/edit code 改进代码项目'));await until(()=>started);
  assert.equal(store.list()[0].mode,'workspace-write');engine.updateProjects({projects:{general:config.projects.general},defaultProject:'general'});await until(()=>store.list()[0]?.status==='failed');
  assert.equal(engine.handleAction({id:'old',actionId,senderId:'owner',chatId:'group',messageId:'card',fields:{}}).toast.type,'error');
  }finally{await engine.stop();store.close()}

@@ -1,6 +1,6 @@
 # Architecture and invariants
 
-This document describes the implemented runtime. The accepted [LangGraph.js orchestration decision](decisions/langgraph-orchestration.md) defines a staged migration. Engine remains the single scheduler; the optional [LangGraph pilot](#langgraph-pilot) orchestrates new project execution turns and durable business questions.
+This document describes the implemented runtime. The accepted [LangGraph.js orchestration decision](decisions/langgraph-orchestration.md) defines a staged migration. Engine remains the single scheduler; the optional [LangGraph pilot](#langgraph-pilot) orchestrates new task execution turns and durable business questions, with or without code resources.
 
 ## Scope
 
@@ -22,7 +22,8 @@ src/cli.ts             — terminal demo/local mode, diagnostics and service lif
 
 ## Domain
 
-- **Task**: durable work owned by a human, scoped to an authorized Codex project or a projectless conversation.
+- **Task**: durable work owned by a human; resources are optional. A general task can reason over supplied inputs without a space or code project.
+- **Resource binding**: an authorized resource selected because its use is necessary for a task. This release exposes code-project bindings; knowledge bases and business connectors remain planned. See [domain terminology](../CONTEXT.md).
 - **Run**: one active invocation of an executor for a task. A continued task reuses its Codex thread.
 - **Human request**: one live, process-bound permission or input request, with its own opaque ID.
 - **Business question**: in the optional pilot, a persisted requirement question tied to a graph run and step. It can outlive the runtime process and never grants operation permission.
@@ -103,7 +104,11 @@ An instance lock is local to one filesystem and PID namespace. Do not share stat
 
 ## LangGraph pilot
 
-`langGraphPilot` is a local boolean configuration option, off by default. When enabled at service startup, new project tasks receive `orchestration=langgraph-v1` and a random `orchestrationRunId`. Existing tasks and projectless conversation routing stay on the legacy path. Baseline migration creates a fresh task under the current intake setting. Engine remains the sole scheduler and allows one active executor. Publication, baseline and merge controllers retain their existing validation and approval flows.
+`langGraphPilot` is a local boolean configuration option, off by default. When enabled at service startup, all new tasks receive `orchestration=langgraph-v1` and a random `orchestrationRunId`, including resource-free general tasks. Existing tasks retain their runtime. Baseline migration creates a fresh task under the current intake setting. Engine remains the sole scheduler and allows one active executor. Publication, baseline and merge controllers retain their existing validation and approval flows.
+
+Natural intake creates a general task without first choosing a workspace. Code-resource selection is a typed model proposal, separate from business clarification. Product references and words such as submit, repair or read a file do not classify tasks. The combined response schema validates resource identity and excludes simultaneous questions/operations. The graph saves and replays resource proposals through the Engine's current grant validation. If exactly one owner-named resource matches the proposal, the Engine prepares a fresh resource-bound task/session with the configured natural mode. Otherwise a revision- and grant-bound choice is persisted; a unique DM choice can also be answered normally. Quoted group context does not count as an owner-named resource. Requirements and business answers survive the handoff. Explicit code commands and old cards remain compatible.
+
+`Task.resources` is a projection of the existing code-project binding: general tasks expose an empty list, while code tasks expose a `code-project` reference. The stored `project` field and `__conversation__` sentinel remain internal compatibility details, not a mandatory business space or a new authorization source. No schema migration is needed for this projection. Current general execution remains read-only and uses supplied context/attachments; business-system writes, non-code resource catalogs and multi-user roles are not introduced.
 
 The graph executes the existing WorkspaceExecutor/Codex adapter, then either returns a result or interrupts on a structured `clarification` question. No phrase matcher selects this question: Codex returns the optional field through its output schema. A question and a publication/baseline/merge proposal are mutually exclusive. The graph saves the question before the Engine transaction creates its input request and notification. Waiting releases the active slot. A topic reply, an unambiguous DM reply, an answer card or `/answer` records the answer and queues the same graph. Multiple DM questions require selecting the matching question. The next execution uses the saved Codex thread and accumulated business answers.
 
@@ -115,7 +120,7 @@ On crash recovery, pending business questions remain answerable. Other in-flight
 
 Disabling the option stops pilot intake. Persisted pilot questions remain visible but cannot resume while disabled; queued pilot execution fails with an explicit disabled-runtime notice instead of falling back to legacy execution. Re-enable the option and explicitly continue a stopped task as needed. Preserve the database and Codex session storage; disabling this option is not authorization to run an older binary against a newer schema. Use SQLite's backup API or stop all connections before a filesystem backup; copying only a live WAL database file is insufficient. No automated retention policy is introduced for checkpoints or operation receipts.
 
-Validation includes disk reopen, online SQLite backup/restore, a failed checkpoint after a saved receipt, uncertain executor failure, successive questions, released queue capacity, task versioning, revoked/changed grants, duplicate answers, topic isolation and cards. `npm run smoke:orchestration` additionally drives a real read-only Codex question, reconstructs the Engine and database connection, and resumes the original session with an answer. It does not exercise live Feishu, write workspaces, runtime permissions or deployment. Local delegation, A2A and full operation-registry migration remain follow-up work.
+Validation includes disk reopen, online SQLite backup/restore, a failed checkpoint after a saved receipt, uncertain executor failure, successive questions, released queue capacity, task versioning, revoked/changed grants, duplicate answers, topic isolation and cards. Resource-free business wording and owner-named semantic resource handoffs are covered independently. `npm run smoke:orchestration` additionally drives a real read-only Codex question with zero code grants, reconstructs the Engine and database connection, and resumes the original session with a plain DM answer. `npm run smoke:resources` evaluates synthetic business/code decisions through the combined response schema. Neither exercises live Feishu, user-code writes, business systems, runtime permissions or deployment. Local delegation, A2A and full operation-registry migration remain follow-up work.
 
 
 ## References

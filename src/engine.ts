@@ -5,7 +5,7 @@ import { asksModelStatus, modelStatusText } from './models.js';
 import { codeSourceReceipt, codeSourceDetails, codeSourceChanged, deliveryFooter } from './code-source.js';
 import { baselinePreview, restartAtBaseline, validBaseRef } from './baseline.js';
 import { parseBaselineProposal } from './delivery-preparation.js';
-import { namedProjects, projectChoices, requiresProject, ungrantedNames, projectAnswer, projectGrantKey } from './routing.js';
+import { namedProjects, projectAnswer, projectGrantKey } from './routing.js';
 import { Store } from './store.js';
 import { canPublish, publicationBlocker, publicationKey, TargetBranchMoved } from './workspace.js';
 import { mergeIntent, mergePullRequest } from './merge.js';
@@ -14,7 +14,7 @@ import { TaskOrchestrator } from './orchestration.js';
 import type { BaselineProposal, CardAction, Channel, Config, ContextSnapshot, Executor, HumanRequest, Incoming, PublicationTarget, RunHooks, Status, Task, View } from './types.js';
 
 const HELP = `Agent Steward · 个人 Agent 分身（预览版）
-/projects — 可用项目
+/projects — 可用代码资源
 /new <项目> <任务要求> — 只读分析
 /edit <项目> <任务要求> — 在独立目录修改并验证
 /source <任务ID> — 查看实际代码来源
@@ -77,8 +77,12 @@ export class Engine {
     const dmWaits = message.chatType === 'p2p' && !message.text.trim().startsWith('/')
       ? this.store.list().filter(t => t.chatId === message.chatId && ['waiting_input','waiting_approval'].includes(t.status)
         && this.store.requests(t.id).length) : [];
+    const dmSelections = message.chatType === 'p2p' && !message.text.trim().startsWith('/')
+      ? this.store.list(message.chatId).filter(t => t.status === 'review' && this.store.projectSelection(t.id)) : [];
+    const selectionAnswer = !!projectAnswer(message.text) || namedProjects(this.config,message.text).length > 0;
     const bound = message.chatType === 'group' ? this.store.conversationTask(message.chatId, message.conversation)
-      : dmWaits.length === 1 && this.store.graphWait(dmWaits[0].id)?.requestId === this.store.requests(dmWaits[0].id)[0]?.id ? dmWaits[0] : undefined;
+      : dmWaits.length === 1 && this.store.graphWait(dmWaits[0].id)?.requestId === this.store.requests(dmWaits[0].id)[0]?.id ? dmWaits[0]
+      : !dmWaits.length && dmSelections.length === 1 && selectionAnswer ? dmSelections[0] : undefined;
     const pendingInput = bound && this.store.requests(bound.id);
     const projectSelection = bound && this.store.projectSelection(bound.id);
     const answeringProject = !!projectSelection && !!projectAnswer(message.text);
@@ -103,8 +107,10 @@ export class Engine {
       if (!text || (formPrompt ?? text).length > 16_000) { reply('任务文本应为 1–16000 字符。'); return; }
       const match = /^(\/\S+)(?:\s+([\s\S]*))?$/.exec(text);
       if (!match && dmWaits.length > 1 && dmWaits.some(t => this.store.graphWait(t.id))) { reply('当前有多个待处理的问题或权限请求，请使用对应卡片提交回答。'); return; }
+      if (!match && !dmWaits.length && dmSelections.length > 1 && projectAnswer(text)) { reply('当前有多个待选择的代码资源，请说明对应的任务和项目。'); return; }
       let command = match?.[1] ?? '/new';
       let args = match?.[2]?.trim() ?? '';
+      let selectedResource: string | undefined;
       if (command === '/model' || (!match && asksModelStatus(text))) {
         const target = args ? this.store.get(args) : bound ?? (message.chatType === 'p2p' ? this.store.list(message.chatId)[0] : undefined);
         if (args && (!target || target.chatId !== message.chatId || (message.conversation && target.conversation?.anchorId !== message.conversation.anchorId))) {
@@ -127,7 +133,6 @@ export class Engine {
       if (!match && bound && /^(更新代码版本|更换代码版本|更新任务基线)$/.test(text)) {
         reply('选择从哪个代码版本继续。原副本会保留。', { kind: 'baseline', taskId: bound.id, fresh: true }); return;
       }
-      if (!match && !navigation && ungrantedNames(this.config, text).length) { reply('这个 Codex 项目还未授权给分身，请先在本机控制台授权：' + ungrantedNames(this.config, text).join('、')); return; }
       if (!match && !navigation && bound && projectSelection && projectAnswer(text)) {
         if (this.active?.task.id === bound.id || bound.status !== 'review' || bound.project !== CONVERSATION
           || this.store.requests(bound.id).length) { reply('当前执行尚未结束，请稍后回答项目选择。'); return; }
@@ -139,8 +144,8 @@ export class Engine {
         }
         const mode = selected.naturalMode ?? 'read-only';
         if (mode === 'workspace-write' && (selected.sandbox !== mode || !selected.worktree)) { reply('该项目当前没有可用的修改工作区，请在控制台检查授权。'); return; }
-        const prompt = `本话题的需求与补充：\n${this.store.ownerRequirements(bound.id)}\n\n主人已确认项目：${selected.label ?? projectSelection.project}\n主人本次回答：${text}`;
-        const next = this.store.handoff(bound, projectSelection.project, prompt, mode, message.conversation!);
+        const prompt = `${this.store.ownerRequirements(bound.id)}\n\n主人已确认代码资源：${selected.label ?? projectSelection.project}\n主人本次回答：${text}`;
+        const next = this.store.handoff(bound, projectSelection.project, prompt, mode, message.conversation);
         this.store.event(next.id, 'project_confirmed', JSON.stringify({fromTaskId:bound.id,project:projectSelection.project,messageId:message.id}));
         reply(`已确认 ${selected.label ?? projectSelection.project}，正在分配工作区并继续处理。`, {kind:'reply',taskId:next.id}); return;
       }
@@ -156,13 +161,11 @@ export class Engine {
           }
           reply(bound.status === 'waiting_approval' ? '这一步需要你确认具体操作，我在等你的决定。' : '这一步需要你通过卡片明确提交回答，普通聊天不会回答工具权限请求。', { kind:'task', taskId: bound.id }); return;
         } else {
-          const choices = namedProjects(this.config, text);
-          if (choices.length > 1) {
-            reply('这次处理哪个项目？', { kind:'choose-project', draft:text, choices, selectionKey:message.id, fromTaskId:bound.id, revision:bound.updatedAt }); return;
-          }
-          if (choices.length === 1 && choices[0] !== bound.project) command = '/new';
-          else if (bound.project === CONVERSATION && requiresProject(text)) command = '/new';
-          else { command = '/continue'; args = `${bound.id} ${text}`; }
+          // A named resource is an answer only within an existing resource-selection request.
+          const choices = projectSelection ? namedProjects(this.config, text) : [];
+          if (choices.length === 1 && choices[0] !== projectSelection!.project) {
+            selectedResource = choices[0]; command = '/new';
+          } else { command = '/continue'; args = `${bound.id} ${text}`; }
         }
       }
       if (command === '/help' || (!match && ['首页', '工作台', '帮助'].includes(text))) { reply(HELP, { kind: 'home' }); return; }
@@ -172,10 +175,7 @@ export class Engine {
       if (command === '/new' || command === '/edit') {
         let project: string, prompt: string;
         if (!match) {
-          const choices = projectChoices(this.config, text);
-          if (!choices.length) { reply('这项工作需要代码项目，请先在控制台授权对应的 Codex 项目，再告诉我项目名称。'); return; }
-          if (choices.length !== 1 || (requiresProject(text) && !namedProjects(this.config, text).length)) { reply('这次处理哪个项目？', { kind: 'choose-project', draft: text, choices, selectionKey: message.id, ...(bound ? {fromTaskId:bound.id,revision:bound.updatedAt} : {}) }); return; }
-          project = choices[0]; prompt = text;
+          project = selectedResource ?? CONVERSATION; prompt = text;
         }
         else {
           const parts = /^(\S+)\s+([\s\S]+)$/.exec(args);
@@ -215,7 +215,7 @@ export class Engine {
           if (task.chatId !== message.chatId || (message.conversation && task.conversation?.anchorId !== message.conversation.anchorId)) { reply('请在问题所在会话回答。'); return; }
           if (!this.orchestrator) { reply('LangGraph 试点已关闭，问题与任务已保留；重新启用后可以继续。'); return; }
           if (task.status !== 'waiting_input' || this.active?.task.id === task.id || !body) { reply('请等待问题保存完成，并填写回答。'); return; }
-          if (!this.config.projects[task.project]) { reply('项目授权已撤销，任务尚未继续。'); return; }
+          if (task.project !== CONVERSATION && !this.config.projects[task.project]) { reply('项目授权已撤销，任务尚未继续。'); return; }
           this.store.answerGraph(task.id,body);
           reply('收到，我会结合这条补充继续处理。',{kind:'reply',taskId:task.id}); return;
         }
@@ -320,13 +320,13 @@ export class Engine {
     if (mutating && task && i.revision !== task.updatedAt) return fail('任务状态已变化，请刷新后再操作。');
     const body = typeof action.fields.body === 'string' ? action.fields.body.trim() : '';
     if (['new', 'continue', 'answer', 'restart'].includes(i.op) && (!body || body.length > 1000)) return fail('请填写 1–1000 字的内容。');
-    if (i.op === 'new' && (typeof action.fields.project !== 'string' || !Object.hasOwn(this.config.projects, action.fields.project))) {
-      return fail('请选择已配置的项目。');
+    if (i.op === 'new' && (typeof action.fields.project !== 'string' || (action.fields.project !== CONVERSATION && !Object.hasOwn(this.config.projects, action.fields.project)))) {
+      return fail('请选择通用任务或已授权的代码资源。');
     }
     if (i.op === 'new') {
       if (action.fields.mode !== undefined && !['read-only', 'workspace-write'].includes(String(action.fields.mode))) return fail('请选择有效的工作模式。');
       const project = this.config.projects[String(action.fields.project)];
-      if (action.fields.mode === 'workspace-write' && (project.sandbox !== 'workspace-write' || !project.worktree)) return fail('该项目仅支持只读分析，请重新选择模式。');
+      if (action.fields.mode === 'workspace-write' && (project?.sandbox !== 'workspace-write' || !project?.worktree)) return fail('请先选择已授权且支持修改的代码资源。');
     }
     if (i.op === 'publish') {
       if (!task || this.active?.task.id === task.id || !['review', 'completed', 'failed'].includes(task.status)
@@ -422,6 +422,8 @@ export class Engine {
       let baseline: BaselineProposal | undefined;
       let merge: MergeProposal | undefined;
       const grantKey = projectGrantKey(project);
+      const resourceCatalog = Object.entries(this.config.projects).map(([id,p]) => ({id,kind:'code-project',name:p.label ?? id,aliases:[...(p.aliases ?? [])],description:p.description ?? '',capability:p.sandbox}));
+      const resourceGrants = Object.fromEntries(Object.entries(this.config.projects).map(([id,p]) => [id,projectGrantKey(p)]));
       const hooks: RunHooks = {
         ...(task.project !== CONVERSATION && task.mode === 'workspace-write' && project.sandbox === 'workspace-write'
           && (!task.nextAction || task.nextAction === 'execute') ? {proposeMerge:(request:MergeProposal)=>{
@@ -440,10 +442,11 @@ export class Engine {
             abort.signal.throwIfAborted();
             publication = { ...target };
           } } : {}),
-        ...(task.project === CONVERSATION && task.conversation ? { proposeProject: (id: string) => {
+        ...(task.project === CONVERSATION ? { proposeProject: (id: string) => {
           abort.signal.throwIfAborted();
           const candidate = this.config.projects[id];
-          if (!candidate) throw new Error('提议的项目不在已授权列表中。');
+          if (!Object.hasOwn(this.config.projects,id) || !Object.hasOwn(resourceGrants,id)) throw new Error('提议的项目不在已授权列表中。');
+          if (projectGrantKey(candidate) !== resourceGrants[id]) throw Error('代码资源授权在本轮发生变化，请重新确认任务。');
           proposed = {project:id,grantKey:projectGrantKey(candidate)};
         } } : {}),
         prepared: report => {
@@ -512,14 +515,17 @@ export class Engine {
         this.store.saveContext(task.id, snapshot); this.store.event(task.id, 'context_loaded', snapshot.summary);
         executionTask = { ...task, contextSnapshot: snapshot };
       }
-      executionTask = { ...executionTask, projectCandidates: hooks.proposeProject ? Object.keys(this.config.projects) : undefined,
+      executionTask = { ...executionTask, projectCandidates: hooks.proposeProject ? Object.keys(resourceGrants) : undefined,
+        projectCandidateGrants: hooks.proposeProject ? resourceGrants : undefined,
         routingContext: JSON.stringify({ currentProject: task.project === CONVERSATION ? null : project.label ?? task.project,
+        resources: task.resources ?? [],
+        resourcePolicy: 'Tasks need no space by default. Propose a code project only when completing the goal requires its files. Business wording and named products alone do not require code access.',
         workflow: {availableOperations:[...(hooks.proposePublication ? ['publication'] : []),...(hooks.proposeBaseline ? ['baseline'] : []),...(hooks.proposeMerge ? ['merge_preview'] : [])],
           currentPr:previousReport?.prUrl ?? null,publishedSha:previousReport?.publishedSha ?? null,
           deliveryError:previousReport?.error ?? null,configuredTarget:project.worktree?.github ?? null,
           history:this.store.workflowHistory(task.id),
           approval:'Proposals only; each external operation retains its own owner confirmation.'},
-        availableProjects: Object.entries(this.config.projects).map(([id,p]) => ({ id, name:p.label ?? id, aliases:p.aliases ?? [], capability:p.sandbox })) }) };
+        availableProjects: resourceCatalog }) };
       let result: string;
       if (task.orchestration === 'langgraph-v1' && task.nextAction !== 'publish') {
         if (!this.orchestrator) throw Error('LangGraph 试点已关闭；任务已保留，不会通过旧运行时重放。');
@@ -532,20 +538,30 @@ export class Engine {
         result = outcome.message;
       } else result = await this.executor.run(executionTask, project, hooks, abort.signal);
       if (abort.signal.aborted) throw abort.signal.reason;
+      let automaticallySelected: string | undefined;
       if (proposed) {
         const candidate = this.config.projects[proposed.project];
         if (!candidate || projectGrantKey(candidate) !== proposed.grantKey) throw new Error('项目授权已变化，请重新选择项目。');
-        result = `${result}\n\n这次使用 ${candidate.label ?? proposed.project} 项目处理，对吗？回复“对的”即可分配工作区并继续，也可以直接告诉我其他项目名称。`;
+        const explicit = namedProjects(this.config,this.store.ownerRequirements(task.id));
+        if (explicit.length === 1 && explicit[0] === proposed.project) automaticallySelected = proposed.project;
+        else result = `${result}\n\n这次使用 ${candidate.label ?? proposed.project} 代码资源处理，对吗？回复“对的”即可分配工作区并继续，也可以直接告诉我其他项目名称。`;
       }
       const report = this.store.delivery(task.id);
-      if ([!!publication,!!baseline,!!merge].filter(Boolean).length > 1) throw Error('每轮只能提议一个 Steward 操作。');
+      if ([!!proposed,!!publication,!!baseline,!!merge].filter(Boolean).length > 1) throw Error('每轮只能提议一个 Steward 操作。');
       if ((publication || baseline || merge) && (!this.config.projects[task.project] || projectGrantKey(this.config.projects[task.project]) !== grantKey)) {
         throw new Error('项目交付配置已变化，请按当前配置重新准备 PR。');
       }
       const evidence = report ? `\n\n${deliveryFooter(report, project)}` : '';
       this.store.transaction(() => {
         this.store.set(task.id, 'review', result);
-        if (proposed) this.store.saveProjectSelection(task.id, proposed.project, proposed.grantKey);
+        if (automaticallySelected) {
+          const selected = this.config.projects[automaticallySelected], mode = selected.naturalMode ?? 'read-only';
+          if (mode === 'workspace-write' && (selected.sandbox !== mode || !selected.worktree)) throw Error('该代码资源没有可用的修改工作目录。');
+          const next = this.store.handoff(this.store.get(task.id)!,automaticallySelected,
+            `${this.store.ownerRequirements(task.id)}\n\n模型判断需要使用主人已明确指定的代码资源：${selected.label ?? automaticallySelected}`,mode,task.conversation);
+          this.store.event(next.id,'resource_bound',JSON.stringify({fromTaskId:task.id,resource:{kind:'code-project',id:automaticallySelected},source:'owner-named-model-proposal'}));
+          this.store.enqueue(task.chatId,`本任务需要使用你指定的 ${selected.label ?? automaticallySelected} 代码资源，正在准备执行目录并继续。`,{kind:'reply',taskId:next.id});
+        } else if (proposed) this.store.saveProjectSelection(task.id, proposed.project, proposed.grantKey);
         if (task.conversation) this.store.enqueue(task.chatId, result + (report && task.mode === 'workspace-write' ? evidence : ''), {kind:'reply',taskId:task.id});
         if (baseline) {
           this.store.event(task.id,'baseline_proposed',JSON.stringify(baseline));
