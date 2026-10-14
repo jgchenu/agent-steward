@@ -124,6 +124,7 @@ export async function mergePullRequest(store:Store,config:Config,task:Task,proje
   };
   await recheck();
   if(preview.isDraft){
+    currentGrant();
     operationAttempt(store,task.id,'draft');
     await gh(cwd,['pr','ready',number,'--repo',repository],signal);
     preview.isDraft=false;

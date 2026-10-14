@@ -23,10 +23,10 @@ function fixture(){
   const pr={number:12,url,title:'Feature',body:'Change behavior',state:'OPEN',isDraft:true,headRefName:'feature',headRefOid:head,
     baseRefName:'main',baseRefOid:base,isCrossRepository:false,mergeable:'MERGEABLE',mergeStateStatus:'CLEAN',reviewDecision:'',
     statusCheckRollup:[{name:'CI',status:'COMPLETED',conclusion:'SUCCESS'}],changedFiles:2,additions:4,deletions:1,mergeCommit:null as {oid:string}|null};
-  const calls:string[][]=[];
+  const calls:string[][]=[];let onRead=()=>{};
   const gh=async(_cwd:string,args:string[])=>{
     calls.push(args);
-    if(args[0]==='pr'&&args[1]==='view')return JSON.stringify(pr);
+    if(args[0]==='pr'&&args[1]==='view'){onRead();return JSON.stringify(pr);}
     if(args[1]==='ready'){pr.isDraft=false;return '';}
     if(args.includes('PUT')){
       if(putMode==='unknown')throw Error('network lost');
@@ -44,7 +44,7 @@ function fixture(){
   return {
     config,task,pr,calls,send,get store(){return store;},get engine(){return engine;},get executions(){return executions;},
     get op(){return currentOperation(store,task.id)!;},get effects(){return calls.filter(a=>a.includes('PUT')||a[1]==='ready');},
-    setPutMode(mode:typeof putMode){putMode=mode;},setExecutor(next:Executor){executor=next;},
+    setPutMode(mode:typeof putMode){putMode=mode;},onRead(callback:()=>void){onRead=callback;},setExecutor(next:Executor){executor=next;},
     async preview(){send('合并 PR '+url);await until(()=>store.get(task.id)?.status==='waiting_approval'&&!engine.permissionState().active);return currentOperation(store,task.id)!;},
     async restart(){await engine.stop();store.close();store=new Store(db);engine=make();engine.start();},
     async close(){await engine.stop();store.close();rmSync(dir,{recursive:true,force:true});},
@@ -240,4 +240,19 @@ test('a persisted success recovers the task result without querying or mutating 
     await f.restart();assert.equal(f.store.get(f.task.id)?.status,'review');
     assert.match(f.store.get(f.task.id)!.result!,/已合并到 main/);assert.equal(f.calls.length,count);
   }finally{await f.close();}
+});
+
+
+test('expiry or grant revocation during the final remote check blocks the first mutation',async()=>{
+  for(const variation of ['expiry','grant']){
+    const f=fixture();try{
+      const op=await f.preview();let reads=0;
+      f.onRead(()=>{if(++reads===2){
+        if(variation==='expiry')f.store.db.prepare('UPDATE operations SET expiresAt=0').run();
+        else f.config.projects.p={...f.config.projects.p,label:'revoked grant snapshot'};
+      }});
+      f.send('/approve '+op.requestId);await until(()=>f.store.get(f.task.id)?.status==='failed');
+      assert.equal(f.effects.length,0);assert.equal(f.op.state,'failed');
+    }finally{await f.close();}
+  }
 });

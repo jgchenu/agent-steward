@@ -74,6 +74,7 @@ export function decideOperation(store: Store, op: Operation, actorId: string, ac
 }
 export function operationAttempt(store: Store, taskId: string, phase: 'draft'|'merge'): void {
   const op=currentOperation(store,taskId);if(!op)return;
+  if(op.expiresAt<=Date.now())throw Error('合并确认已过期，未发送新的操作请求。');
   if(store.db.prepare("UPDATE operations SET state='applying',phase=? WHERE id=? AND state='approved'").run(phase,op.id).changes!==1)throw Error('操作不能重复执行。');
   store.event(taskId,'operation_attempted',JSON.stringify({id:op.id,phase}));
 }
