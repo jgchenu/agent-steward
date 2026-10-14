@@ -1,3 +1,4 @@
+import { currentOperation, retireOperation, cancelOperation } from './operations.js';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import type { Conversation, ContextSnapshot, DeliveryReport, MergeReceipt, EvidenceImage, Intent, Status, Task, View, Workspace } from './types.js';
@@ -45,7 +46,12 @@ export class Store {
       CREATE TABLE IF NOT EXISTS project_selections (taskId TEXT PRIMARY KEY, project TEXT NOT NULL, grantKey TEXT NOT NULL, revision TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS graph_operations (id TEXT PRIMARY KEY, taskId TEXT NOT NULL, grantKey TEXT NOT NULL, result TEXT);
       CREATE TABLE IF NOT EXISTS graph_waits (runId TEXT PRIMARY KEY, taskId TEXT NOT NULL, requestId TEXT NOT NULL, step INTEGER NOT NULL, answer TEXT);
-      PRAGMA user_version=9;`);
+      CREATE TABLE IF NOT EXISTS operations (
+        id TEXT PRIMARY KEY, taskId TEXT NOT NULL, requestId TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
+        scope TEXT NOT NULL, state TEXT NOT NULL, phase TEXT NOT NULL, expiresAt INTEGER NOT NULL,
+        actorId TEXT, result TEXT, current INTEGER NOT NULL DEFAULT 1);
+      CREATE UNIQUE INDEX IF NOT EXISTS operations_current ON operations(taskId) WHERE current=1;
+      PRAGMA user_version=10;`);
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -156,6 +162,7 @@ export class Store {
     this.event(id, status, result ?? '');
   }
   resume(id: string, prompt: string): void {
+    retireOperation(this,id);
     if (this.get(id)?.orchestration === 'langgraph-v1') {
       this.expire(id, false);
       this.db.prepare('UPDATE tasks SET orchestrationRunId=? WHERE id=?').run(randomUUID(), id);
@@ -182,6 +189,7 @@ export class Store {
     this.set(id, 'queued');
   }
   queueMerge(id: string, url: string): void {
+    retireOperation(this,id);
     this.db.prepare("UPDATE tasks SET result=NULL, nextAction='merge', mergeUrl=? WHERE id=?").run(url,id);
     this.set(id,'queued');
   }
@@ -237,7 +245,9 @@ export class Store {
     this.db.prepare("UPDATE requests SET status=? WHERE id=? AND status='pending'").run(status, id);
   }
   expire(taskId: string, preserveBusinessWait = true): void {
-    const keep = preserveBusinessWait ? this.graphWait(taskId)?.requestId ?? '' : '';
+    if(!preserveBusinessWait)cancelOperation(this,taskId);
+    const operation=currentOperation(this,taskId);
+    const keep = preserveBusinessWait ? (operation?.state==='pending' ? operation.requestId : this.graphWait(taskId)?.requestId ?? '') : '';
     this.db.prepare("UPDATE requests SET status='expired' WHERE taskId=? AND status='pending' AND id!=?").run(taskId, keep);
   }
   graphWait(taskId: string): {runId: string; requestId: string; step: number; answer: string | null} | undefined {
@@ -269,9 +279,38 @@ export class Store {
     if (report) this.saveDelivery(taskId, {...report,ready:false,authorizedKey:undefined});
     this.set(taskId, 'queued');
   }
+  expireOperations(): void {
+    const rows=this.db.prepare("SELECT taskId,requestId,id FROM operations WHERE current=1 AND state='pending' AND expiresAt<=?").all(Date.now()) as Array<{taskId:string;requestId:string;id:string}>;
+    if(!rows.length)return;
+    this.transaction(()=>{for(const op of rows){
+      this.db.prepare("UPDATE operations SET state='failed',result='确认已过期' WHERE id=?").run(op.id);
+      this.resolveRequest(op.requestId,'expired');
+      this.event(op.taskId,'operation_expired',op.id);
+      const task=this.get(op.taskId);
+      if(task?.status==='waiting_approval' && task.nextAction==='merge'){
+        this.set(task.id,'review','合并确认已过期，尚未执行。请重新预览后确认。');
+        this.enqueue(task.chatId,'合并确认已过期，尚未执行。请重新预览后确认。',{kind:'task',taskId:task.id});
+      }
+    }});
+  }
   recover(): void {
     this.transaction(() => {
       for (const task of this.list()) {
+        const operation=currentOperation(this,task.id);
+        if(task.nextAction==='merge' && operation?.state==='succeeded' && operation.result
+          && ['queued','running','interrupted'].includes(task.status)){
+          this.expire(task.id);
+          this.set(task.id,'review',operation.result);
+          this.enqueue(task.chatId,operation.result,{kind:'task',taskId:task.id});
+          continue;
+        }
+        if(task.nextAction==='merge' && operation && ['pending','approved','applying','uncertain'].includes(operation.state)
+          && ['queued','running','waiting_approval','interrupted'].includes(task.status)){
+          this.expire(task.id);
+          const state=operation.state==='pending'?'waiting_approval':'queued';
+          if(task.status!==state)this.set(task.id,state);
+          continue;
+        }
         if (task.orchestration === 'langgraph-v1' && (!task.nextAction || task.nextAction === 'execute')) {
           const wait = this.graphWait(task.id);
           if (task.status === 'waiting_input' && wait && this.getRequest(wait.requestId)?.status === 'pending') { this.expire(task.id); continue; }

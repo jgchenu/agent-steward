@@ -75,6 +75,7 @@ export interface HumanRequest {
   resolve: (answer: string) => void;
 }
 export interface RunHooks {
+  approveOperation?: (proposal: import('./operations.js').OperationProposal) => void;
   askClarification?: (question: string) => void;
   proposeMerge?: (request: import('./operation-intent.js').MergeProposal) => void;
   modelResolved?: (model: import('./models.js').RuntimeModel) => void;

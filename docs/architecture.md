@@ -12,6 +12,7 @@ src/channels/feishu.ts  — official SDK WebSocket events, callbacks and card de
 src/channels/cards.ts   — Card 2.0 presentation and opaque action issuance
 src/engine.ts           — authorization, commands, queue, approval routing, delivery
 src/store.ts            — SQLite task/event/inbox/request/outbox records
+src/operations.ts       — durable scoped merge decisions and external-attempt receipts
 src/adapters/codex.ts   — task-to-Codex protocol mapping
 src/adapters/rpc.ts     — isolated stdio protocol connection per run
 src/adapters/demo.ts    — explicitly simulated experience
@@ -26,6 +27,7 @@ src/cli.ts             — terminal demo/local mode, diagnostics and service lif
 - **Resource binding**: an authorized resource selected because its use is necessary for a task. This release exposes code-project bindings; knowledge bases and business connectors remain planned. See [domain terminology](../CONTEXT.md).
 - **Run**: one active invocation of an executor for a task. A continued task reuses its Codex thread.
 - **Human request**: one live, process-bound permission or input request, with its own opaque ID.
+- **Operation approval**: a persisted Steward merge preview and decision, scoped to its owner, task, project grant, PR and exact head/base snapshot. It releases the execution slot while awaiting a decision; runtime tool requests do not.
 - **Business question**: in the optional pilot, a persisted requirement question tied to a graph run and step. It can outlive the runtime process and never grants operation permission.
 - **Result**: the executor's report, pending acceptance; not an independent verification certificate.
 - **Event**: a local audit/progress record. The database may contain private task content.
@@ -40,7 +42,9 @@ stateDiagram-v2
   queued --> cancelled
   running --> waiting_approval
   running --> waiting_input
-  waiting_approval --> running
+  waiting_approval --> running: live runtime permission
+  waiting_approval --> queued: durable merge approval
+  waiting_approval --> review: merge denied or expired
   waiting_input --> running
   waiting_input --> queued: pilot business answer
   running --> review
@@ -69,7 +73,7 @@ When several requests are pending, approvals take display precedence over questi
 2. Deduplicate inbound messages in the same SQLite transaction as command effects and response enqueueing. Acknowledge the event without waiting for a model or outbound API call.
 3. Use an exact project alias, never an arbitrary path supplied by a message.
 4. Launch a run only when no other run is active. The state-directory instance lock prevents ordinary duplicate launches.
-5. Bind runtime permission/input requests to the active runtime, task and original conversation. Pilot business questions bind to a persisted graph step instead. Only accept a pending request once. Never reuse old approvals after restart.
+5. Bind runtime permission/input requests to the active runtime, task and original conversation. Pilot business questions bind to a persisted graph step instead. Only accept a pending request once. Runtime approvals expire on restart. Steward merge decisions persist within their exact scope and expiry; they never authorize another operation.
 6. Send one-shot approval decisions only; do not accept session-wide or policy-amendment grants. If a file approval's changes are unavailable or the description cannot be fully displayed within the configured limit, decline it.
 7. Unknown server requests return a protocol error rather than granting permission.
 8. On startup, legacy in-flight work becomes interrupted and runtime requests expire. Pilot recovery reconciles checkpoints against operation receipts and stops if an executor outcome is unknown. Retry outbound messages, not potentially completed external effects.
@@ -90,7 +94,7 @@ SQLite is the record of work; Codex owns the model session. There is no cross-pr
 
 The outbox persists before delivery and uses bounded exponential backoff. The transport receives the same UUID on retry. A crash after remote success but before local acknowledgement can duplicate delivery outside the provider's deduplication window. No exactly-once network-delivery claim is made.
 
-Run timeout includes runtime permission/input waiting time. Pilot business questions end the active invocation, so their waiting time does not consume execution time. Failed or cancelled executions retain any changes they already made. A thread that cannot be resumed fails visibly; starting a replacement thread is not automatic. Codex rate-limit errors currently surface as failures requiring a later explicit continuation; quota-aware scheduling is planned.
+Run timeout includes runtime permission/input waiting time. Pilot business questions and Steward merge confirmations end the active invocation, so their waiting time does not consume execution time. Merge confirmations expire after 24 hours independently of the run timeout. Failed or cancelled executions retain any changes they already made. A thread that cannot be resumed fails visibly; starting a replacement thread is not automatic. Codex rate-limit errors currently surface as failures requiring a later explicit continuation; quota-aware scheduling is planned.
 
 An instance lock is local to one filesystem and PID namespace. Do not share state storage across containers or hosts. Local SQLite/events and Codex session storage require separate private backups. Schema v2 adds an optional outbox view, durable card message identities and expiring action capabilities without dropping v1 data. Expired action capabilities are pruned when rendering new controls. Other automatic retention is not implemented.
 
@@ -251,7 +255,7 @@ An addressed owner message “合并 PR <GitHub URL>” or `/merge <task> <URL>`
 
 The shared `staging` target remains manual-only: reject before confirmation or any mutation, even for an owner merge request.
 
-The remote preview shows source/target names and SHAs, file counts, CI status, squash method, draft conversion and possible existing CI/CD triggers. Only OPEN, MERGEABLE, CLEAN PRs with a nonempty acceptable check rollup and no outstanding review requirement proceed. An explicit process-bound approval is required even in sandbox-auto/full-access; generic yes, another user/topic, expiry and restart cannot grant it. The controller rechecks grants, head/base SHAs, draft state, CI and reviews after approval and again after draft conversion. A one-shot REST merge uses the approved head SHA; no admin bypass, auto-merge, direct branch push or branch deletion. A base movement in the small interval between final read and API mutation remains subject to GitHub branch protections (the API supports head CAS only); enable strict branch protection where required.
+The remote preview shows source/target names and SHAs, file counts, CI status, squash method, draft conversion and possible existing CI/CD triggers. Only OPEN, MERGEABLE, CLEAN PRs with a nonempty acceptable check rollup and no outstanding review requirement proceed. An explicit durable owner approval is required even in sandbox-auto/full-access; generic yes, another user/topic or expiry cannot grant it. Restart preserves a valid pending decision without changing the task revision or invalidating its original card. The controller rechecks grants, head/base SHAs, draft state, CI and reviews after approval and again after draft conversion. A one-shot REST merge uses the approved head SHA; no admin bypass, auto-merge, direct branch push or branch deletion. A base movement in the small interval between final read and API mutation remains subject to GitHub branch protections (the API supports head CAS only); enable strict branch protection where required.
 
 The receipt requires remote MERGED state and a matching merge commit. Unknown merge responses perform readback only, never replay the mutation. Converting a draft is retained if later checks fail; merged code cannot be rolled back by cancellation. The audit records preview, authorization, attempt and result. Local workspace files and previous validation reports are not presented as proof of the remote PR's contents or deployment. Repository rules that mandate manual merges still need an explicit owner policy exception; this capability does not supersede branch protections.
 
@@ -284,10 +288,22 @@ Project write turns expose structured proposals for publication, baseline prepar
 
 Workflow facts include available operations, the task's recorded PR and published SHA, delivery errors, configured destination, the latest result, and the last confirmed merge receipt. Historical results and PR text remain reference data, not new owner instructions or proof of current remote status. The model can resolve “that PR” or suggest the next merge inspection on an unambiguous continuation; it must clarify competing targets, respect negation, and not infer authority from quotations. A nullable `merge: {url}` proposal uses the saved task PR when the URL is empty, preserving explicitly specified URLs. Missing targets produce a concrete question. Removed or changed grants and multiple proposals fail before controller dispatch.
 
-After successful execution, the engine atomically records the proposal and queues the existing merge controller in the single execution slot. It does not set an authorization flag. The controller still verifies origin/repository/target, remote head/base, CI and review state, then waits for a fresh owner approval. Generic affirmative text cannot approve it; staging, stale-head, wrong-owner/topic, cancellation and restart restrictions remain unchanged. There is no automatic merge retry or deployment. Existing queued merge work survives restart but still needs a new process-bound approval.
+After successful execution, the engine atomically records the proposal and queues the existing merge controller in the single execution slot. It does not set an authorization flag. The controller still verifies origin/repository/target, remote head/base, CI and review state, then waits for a fresh owner approval. Generic affirmative text cannot approve it; staging, stale-head, wrong-owner/topic and cancellation restrictions remain unchanged. There is no automatic merge retry or deployment. Pending merge confirmations survive restart; accepted work rechecks its original scope before mutation, and a recorded attempt permits readback only.
 
 A merge-preview turn preserves unchanged local check evidence and avoids rerunning installation/build commands merely to inspect a remote PR. New or existing unsubmitted changes, or local HEAD diverging from the last published SHA, block semantic merge handoff without discarding files. The remote controller's checks are distinct from local validation. Existing free-form/code task behavior, project selection and explicit command compatibility are retained.
 
 `npm run smoke:workflow` is an opt-in live subscription evaluation of the shared semantic instructions/schema with six synthetic cases (paraphrase, contextual continuation, negation, explanation, ambiguous targets and quoted text). It runs in read-only scratch space without controllers or Feishu. Deterministic tests cover the proposal-to-controller-to-approval path with simulated provider output/GitHub; neither form of verification establishes live Feishu acceptance.
 
 Merge checks follow GitHub conclusions: completed `SUCCESS`, `SKIPPED` and `NEUTRAL` check runs are acceptable; legacy commit statuses require `SUCCESS`. Pending, failed, cancelled, unknown and absent checks remain blocking. The preview reports success/skipped/neutral counts separately, and blockers name the affected checks and states. Every recheck uses the same policy; CLEAN status, reviews and exact-commit approval remain required. This does not establish that a skipped deployment ran.
+
+## Durable merge approvals and recovery
+
+Schema v10 adds a small `operations` ledger for the merge controller; it is separate from the LangGraph executor-call receipts. This works for legacy and pilot tasks without enabling another scheduler. One current operation per task binds the configured owner, project grant hash, PR URL, source and target branch names/SHAs, draft state and expiry. Older decisions remain audit records. The preview, request, waiting task state and outbox notification commit atomically before the controller yields the single execution slot.
+
+An owner decision from the original card or `/approve`/`/deny` is committed with inbox deduplication, request resolution and queue transition. A restart keeps pending previews and card revisions. Accepted, unattempted work queues for normal scheduling; the controller re-reads GitHub and checks the saved scope, grant, expiry, checks and reviews before any effect. Denial, cancellation and expiry invalidate the request. The scheduler expires pending decisions even while another task executes. No model invocation or keyword rule determines approval.
+
+Before draft conversion or merge PUT, the ledger records `applying` and the relevant phase. A positively verified draft conversion records `draft-ready`, allowing the remaining merge step after a restart without converting the draft again. A crash or failure after an attempt makes its outcome uncertain; recovery only reads GitHub. Matching remote MERGED evidence settles the operation. An OPEN PR, a changed head or missing merge evidence remains visibly unresolved; a new prompt or merge request on the same task cannot discard that receipt or replay the effect. If uncertainty persists, inspect and complete the PR in GitHub, then request another merge status check. This conservative path can require manual completion even if the first request never reached GitHub.
+
+This is not an exactly-once guarantee across GitHub and SQLite: there is no cross-system transaction, and separate tasks are not a global PR lock. Receipts prevent this controller from replaying an uncertain attempt within the original task. Existing GitHub checks and head-bound API conditions remain necessary. PR publication, baseline changes and Codex tool/MCP approvals retain their existing process-bound behavior; this slice does not migrate them or implement multi-user roles/A2A.
+
+Behavioral tests use temporary disk databases, the real Engine and merge controller, rendered Feishu buttons/callback parsing, and simulated GitHub. They cover slot release, restart, duplicate/wrong-owner/wrong-topic decisions, changed grants/commits/checks, expiry/cancellation, draft recovery and lost-response reconciliation. These tests do not establish a live Feishu callback or real GitHub mutation.
