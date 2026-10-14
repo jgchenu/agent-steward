@@ -209,8 +209,10 @@ export class WorkspaceExecutor implements Executor {
         github:project.worktree.github ?? null,checks:project.worktree.checks,
         missing:[...(!project.worktree.github ? ['GitHub repository/baseBranch'] : []),...(!project.worktree.checks.length ? ['Steward independent checks'] : [])],
         configurationManagedBy:'Steward; propose baseline.delivery to preview a scoped configuration update'});
-      let changingBaseline=false, previewingMerge=false;
-      const innerHooks={...hooks,...(hooks.proposeBaseline ? {proposeBaseline:(request:Parameters<NonNullable<RunHooks['proposeBaseline']>>[0])=>{
+      let changingBaseline=false, previewingMerge=false, awaitingClarification=false;
+      const innerHooks={...hooks,...(hooks.askClarification ? {askClarification:(question:string)=>{
+        hooks.askClarification!(question);awaitingClarification=true;
+      }} : {}),...(hooks.proposeBaseline ? {proposeBaseline:(request:Parameters<NonNullable<RunHooks['proposeBaseline']>>[0])=>{
         hooks.proposeBaseline!(request);changingBaseline=true;
       }} : {}),...(hooks.proposeMerge ? {proposeMerge:(request:Parameters<NonNullable<RunHooks['proposeMerge']>>[0])=>{
         hooks.proposeMerge!(request);previewingMerge=true;
@@ -233,7 +235,8 @@ export class WorkspaceExecutor implements Executor {
         }
       }
       this.store.saveDelivery(task.id, report);
-      if (mode === 'workspace-write' && !changingBaseline && !previewingMerge) {
+      // An unfinished business turn must not run delivery checks or become publishable.
+      if (mode === 'workspace-write' && !changingBaseline && !previewingMerge && !awaitingClarification) {
         const dir = join(this.config.stateDir, 'artifacts', task.id, String(Date.now())); mkdirSync(dir, { recursive: true, mode: 0o700 });
         for (const check of project.worktree.checks) {
           signal.throwIfAborted(); hooks.progress(`正在验证：${check.name}`);

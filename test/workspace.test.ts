@@ -464,8 +464,11 @@ test('semantic merge preview avoids local checks and rejects unsubmitted edits',
  }
 });
 
-test('LangGraph pilot preserves the worktree across clarification and hands checked publication to the existing preview',async()=>{
-  const f=fixture();f.config.langGraphPilot=true;f.store.set(f.task.id,'completed');
+test('default LangGraph defers checks until clarification finishes and preserves the worktree for publication',async()=>{
+  const f=fixture();f.store.set(f.task.id,'completed');
+  const checkLog=join(f.root,'checks-ran');
+  f.project.worktree!.checks[0].args.push(checkLog);
+  f.project.worktree!.checks[0].args[1]+=";require('fs').appendFileSync(process.argv[1],'check\\n')";
   let runs=0,worktree='';const views:View[]=[];
   const executor=new WorkspaceExecutor(f.config,f.store,{run:async(t,p,h)=>{
     runs++;
@@ -481,9 +484,14 @@ test('LangGraph pilot preserves the worktree across clarification and hands chec
     send('pilot-task','/edit test Update README then ask for explanation scope');
     const task=f.store.list().find(t=>t.id!==f.task.id)!;
     await wait(()=>f.store.get(task.id)?.status==='waiting_input');
+    assert.equal(task.orchestration,'langgraph-v1');
+    assert.equal(existsSync(checkLog),false);
+    assert.deepEqual(f.store.delivery(task.id)?.checks,[]);
+    assert.equal(f.store.delivery(task.id)?.ready,false);
     const question=f.store.requests(task.id)[0].id;send('pilot-answer',`/answer ${question} include it`);
     await wait(()=>f.store.get(task.id)?.status==='review');await engine.flush();
     assert.equal(runs,2);assert.equal(f.store.delivery(task.id)?.ready,true);
+    assert.equal(readFileSync(checkLog,'utf8'),'check\n');
     assert.equal(f.store.delivery(task.id)?.checks[0].status,'passed');
     assert.equal(f.store.delivery(task.id)?.authorizedKey,undefined);
     assert.equal(f.store.delivery(task.id)?.prUrl,undefined);

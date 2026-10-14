@@ -58,6 +58,7 @@ export interface DeliveryReport {
   ready: boolean; validationKey?: string; authorizedKey?: string; prUrl?: string; publishedSha?: string; targetBefore?: string; error?: string;
 }
 export interface Config {
+  /** Defaults to true. Historical name; false affects new-task intake only. */
   langGraphPilot?: boolean;
   configFile?: string;
   modelSelection?: import('./models.js').ModelSelection;

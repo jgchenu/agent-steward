@@ -11,7 +11,9 @@ Send work from Feishu. Steward keeps the task, runs Codex on your machine, bring
 ```text
 Feishu DM / local terminal
           ↕
-Owner gate → task service → SQLite tasks, events, requests and outbox
+Owner gate → Engine scheduler → SQLite tasks, events, requests and outbox
+                 ↕
+        LangGraph (task execution, durable business waits)
                  ↕
         Codex App Server (local, ChatGPT login)
                  ↕
@@ -133,7 +135,7 @@ With group mode enabled, owner @mentions directly start tasks using an explicitl
 
 ## What survives a restart
 
-The optional LangGraph pilot supports durable business questions and guarded continuation for all new tasks, including tasks with no resource binding. Set `"langGraphPilot": true` in the private config and restart the service to enroll new tasks. Existing tasks retain their runtime. The pilot is off by default; see [pilot operation and recovery](docs/architecture.md#langgraph-pilot) before enabling it.
+LangGraph is the default for new tasks, including tasks with no resource binding. Existing tasks keep their recorded runtime and Codex session; an upgrade does not replay or migrate them. No opt-in is needed. The historical `langGraphPilot` option remains as an intake fallback: setting it to `false` and restarting creates new tasks on the legacy path, while previously created LangGraph tasks still resume through LangGraph. If your old config explicitly sets it to `false`, remove that entry or set it to `true` to use the new default. See [operation and recovery](docs/architecture.md#langgraph-orchestration).
 
 - Tasks, session IDs, events, inbound message deduplication and outbound notifications live in SQLite.
 - Queued work remains queued. Interrupted executor work requires an explicit `/continue`; it is not automatically replayed.
@@ -144,7 +146,7 @@ The optional LangGraph pilot supports durable business questions and guarded con
 
 `review` means **the executor returned a result**, not that tests, a browser check, deployment, or independent review passed. Check the reported evidence before `/done`.
 
-For pilot tasks, business questions survive restarts and release the execution slot. Reply normally in the bound topic, or in a DM with only one outstanding business question; cards and `/answer` also work. Tool permission requests still expire on restart. If an executor call has an uncertain outcome, recovery stops for explicit inspection and continuation instead of repeating it.
+For LangGraph tasks, business questions survive restarts and release the execution slot. Reply normally in the bound topic, or in a DM with only one outstanding business question; cards and `/answer` also work. Tool permission requests still expire on restart. If an executor call has an uncertain outcome, recovery stops for explicit inspection and continuation instead of repeating it.
 
 ## Boundaries
 

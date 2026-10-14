@@ -2,14 +2,14 @@
 
 ## Accepted orchestration direction
 
-Use TypeScript with embedded LangGraph.js, official executor adapters and local SQLite. Preserve Steward's ownership, authorization, evidence and delivery boundaries. See the [architecture decision and pilot gates](decisions/langgraph-orchestration.md).
+Use TypeScript with embedded LangGraph.js, official executor adapters and local SQLite. Preserve Steward's ownership, authorization, evidence and delivery boundaries. See the [architecture decision and validation boundaries](decisions/langgraph-orchestration.md).
 
 - [x] Validate a persistent SQLite checkpointer and read-only Codex session continuation in an isolated pilot
-- [x] Implement opt-in project execution with structured business questions, human answers and durable waits
+- [x] Make LangGraph the default for new tasks, with durable business questions and legacy-task compatibility
 - [ ] Verify crash reconciliation, cancellation, revoked authority and live channel continuation before expanding adoption
 - [ ] Introduce bounded local task delegation before cross-instance A2A collaboration
 
-The pilot is off by default. Simulated recovery tests and read-only live Codex continuation pass; live Feishu and write-workspace acceptance remain outstanding. Shared PostgreSQL and distributed scheduling require demonstrated deployment needs.
+New tasks use LangGraph by default. An explicit legacy intake override leaves existing graph tasks resumable. Simulated recovery tests and read-only live Codex continuation pass; live Feishu and write-workspace acceptance remain outstanding. Shared PostgreSQL and distributed scheduling require demonstrated deployment needs.
 
 ## 0.1 — Personal vertical slice
 
@@ -27,7 +27,7 @@ The pilot is off by default. Simulated recovery tests and read-only live Codex c
 ## Next — Make it useful every day
 
 - [x] Task-first natural intake with optional code resources; no keyword-based code requirement
-- [x] Resource-free durable business questions, restart and continuation in the LangGraph pilot
+- [x] Resource-free durable business questions, restart and continuation through LangGraph
 - [ ] Knowledge-base and business-system resource connectors with actor-scoped grants
 - [ ] Operational tasks for customer support, operations and finance with inspectable business artifacts
 - [ ] Scoped human collaboration: requester, participant and approver roles

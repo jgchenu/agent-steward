@@ -1,8 +1,8 @@
 # LangGraph.js orchestration and collaboration
 
-Accepted on 2026-10-12. Implementation status: an opt-in project execution and business clarification pilot is implemented; Engine remains the scheduler and the default execution path. See [pilot operation and validation boundaries](../architecture.md#langgraph-pilot).
+Accepted on 2026-10-12; default adoption requested on 2026-10-14. Implementation status: LangGraph orchestrates new task executions and business questions by default; Engine remains the only scheduler. Existing tasks retain their recorded runtime. See [operation and validation boundaries](../architecture.md#langgraph-orchestration).
 
-Agent Steward will use TypeScript and embedded LangGraph.js for task orchestration, retaining official agent runtimes behind executor adapters. The first implementation will be a reversible pilot within the modular monolith. SQLite remains the local database. Human collaboration and agent delegation will share explicit task ownership, scoped authority and delivery records.
+Agent Steward will use TypeScript and embedded LangGraph.js for task orchestration, retaining official agent runtimes behind executor adapters. The initial pilot has become the default new-task path within the modular monolith, with an explicit legacy intake fallback. SQLite remains the local database. Human collaboration and agent delegation will share explicit task ownership, scoped authority and delivery records.
 
 ## Motivation
 
@@ -27,7 +27,7 @@ This decision does not introduce an API model fallback, a model proxy, shared su
 
 ## Task execution boundary
 
-Tasks are the primary unit; spaces, knowledge bases, tools and code projects are resources used only when necessary. See [domain terminology](../../CONTEXT.md). The task-first implementation starts natural requests without code bindings and enrolls resource-free business questions in the same durable pilot. Code access is a structured semantic proposal validated against owner grants. A uniquely owner-named matching resource can continue under its configured mode; inferred targets require a scoped choice. Business wording or product names alone do not select code resources. Multi-user roles and non-code resource connectors remain follow-up work rather than pretending a code workspace is required for every role.
+Tasks are the primary unit; spaces, knowledge bases, tools and code projects are resources used only when necessary. See [domain terminology](../../CONTEXT.md). The task-first implementation starts natural requests without code bindings and enrolls resource-free business questions in the same durable graph. Code access is a structured semantic proposal validated against owner grants. A uniquely owner-named matching resource can continue under its configured mode; inferred targets require a scoped choice. Business wording or product names alone do not select code resources. Multi-user roles and non-code resource connectors remain follow-up work rather than pretending a code workspace is required for every role.
 
 The orchestration loop is:
 
@@ -44,7 +44,7 @@ Operation definitions should keep their input schema, capability requirement, ex
 
 The model receives the current task, relevant conversation, available operations, pending questions and existing authorization facts. Quoted messages, attachments, tool results and another agent's claims are reference material. Clarification is needed when targets or meanings remain ambiguous; a project confirmation must not silently authorize publication or merge.
 
-Steward's domain records remain authoritative for ownership, grants, approval validity and externally observed results. LangGraph checkpoints record where execution can resume and reference those records. A checkpoint must not create an independent copy of authoritative permissions or a second competing task scheduler. The pilot must define transaction and reconciliation boundaries between checkpoint writes and domain updates.
+Steward's domain records remain authoritative for ownership, grants, approval validity and externally observed results. LangGraph checkpoints record where execution can resume and reference those records. A checkpoint must not create an independent copy of authoritative permissions or a second competing task scheduler. The implementation defines transaction and reconciliation boundaries between checkpoint writes and domain updates.
 
 Persist an operation identity and attempt before externally visible effects. On uncertain outcomes, inspect the existing effect and record a receipt before deciding whether a retry is allowed. Retain inbox deduplication and the durable outbox; retrying a notification must never rerun model or Git operations. Checkpoint recovery alone does not provide exactly-once external effects.
 
@@ -52,7 +52,7 @@ Persist an operation identity and attempt before externally visible effects. On 
 
 Treat clarification, requirement changes, permission decisions and acceptance as distinct task inputs. Record who supplied each input and which task or operation it addresses. Previously granted authority may be reused only within its actual scope and validity, subject to repository and operation-specific rules.
 
-Persist business-level waits so an inactive task can eventually release execution capacity. Keep one active executor during the pilot. A saved graph interrupt cannot restore a live Codex RPC approval callback: the adapter must establish whether a session can reconnect or needs an explicit new turn. Existing process-bound permission requests still expire on restart until a separately reviewed implementation establishes a valid replacement flow.
+Persist business-level waits so an inactive task can eventually release execution capacity. Keep one active executor. A saved graph interrupt cannot restore a live Codex RPC approval callback: the adapter must establish whether a session can reconnect or needs an explicit new turn. Existing process-bound permission requests still expire on restart until a separately reviewed implementation establishes a valid replacement flow.
 
 Task completion continues to distinguish executor output, independent checks, publication, deployment and human acceptance. A graph reaching its end does not establish all of these outcomes.
 
@@ -64,11 +64,11 @@ An agent result is evidence for the parent to assess; it is not an instruction w
 
 Across independent instances, use A2A after task delegation works locally. The receiving instance validates its own owner grants, caller identity and artifact visibility. Delegation does not propagate credentials or automatically extend authority. Internal calls do not need a network protocol merely to use multiple agents.
 
-## Pilot and adoption gates
+## Adoption and remaining validation
 
-First implement one opt-in path: request a change, resolve its project, execute through Codex, accept a human correction, resume, review and deliver. Keep existing tasks on the existing runtime; record the orchestration version for pilot tasks so only one runtime owns each task. Disabling the pilot must stop new pilot intake while retaining inspectable state and artifacts; do not silently replay pilot tasks through the old Engine.
+The owner requested default adoption on 2026-10-14. New tasks use LangGraph; existing tasks keep their recorded runtime. The historical `langGraphPilot: false` option selects legacy intake only. It does not disable recovery of already-enrolled graph tasks or replay them through the old runtime. Business clarification defers workspace delivery checks until the task can produce a completed result.
 
-Before expanding the pilot, verify:
+Default adoption is a product choice, not evidence that every live acceptance gate has passed. Keep the following validation boundaries explicit; local delegation remains a future feature, and live Feishu/write-workspace acceptance is still outstanding:
 
 1. Paraphrases, contextual confirmations, negation, ambiguous targets and quoted instructions route correctly without new keyword lists.
 2. The chosen persistent checkpointer works with Node.js 24 and local SQLite deployment, including concurrent domain writes, backup and restart. An in-memory saver is not sufficient. Package versions and any native dependencies must be pinned and tested.
@@ -78,7 +78,7 @@ Before expanding the pilot, verify:
 6. Local delegated work returns traceable artifacts; child failure and cancellation propagate without losing the parent task or exceeding its authority.
 7. Existing behavior tests and checks pass. Live Codex session recovery and live Feishu continuation are accepted separately from simulated tests.
 
-Adopt the pilot path only after these gates pass, then migrate other operations incrementally. Add another executor and local delegation before exposing A2A endpoints. PostgreSQL, distributed scheduling and parallel execution remain conditional follow-up decisions.
+Migrate other operations incrementally after their corresponding checks and acceptance pass. Add another executor and local delegation before exposing A2A endpoints. PostgreSQL, distributed scheduling and parallel execution remain conditional follow-up decisions.
 
 ## Reference designs
 
