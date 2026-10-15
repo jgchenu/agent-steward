@@ -3,7 +3,7 @@
 Build a personal, self-hosted task coordinator. Reuse official agent runtimes; do not build a model proxy or extract subscription credentials.
 
 - Read README.md and docs/architecture.md before changing behavior.
-- Node 24, TypeScript, SQLite; keep one process and one active execution until requirements justify more.
+- Node 24, TypeScript, SQLite; keep one process, bounded task concurrency (default 2), and at most one code/Git execution. Never overlap the same task, topic or Codex session.
 - Run `npm run check`. Unit tests must not call providers or Feishu. `npm run smoke:codex` is an explicit live subscription check only.
 - Preserve owner checks, message idempotency, task/session ownership, one-shot approvals, and durable outbox semantics.
 - Reject unknown protocol permission requests. Never auto-approve an action on timeout or missing input.

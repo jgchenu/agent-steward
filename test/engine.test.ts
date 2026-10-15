@@ -82,7 +82,7 @@ test('cancellation aborts the executor and serial queue progresses', async () =>
     finally { active--; }
   } });
   try {
-    f.engine.receive(message('first')); f.engine.receive(message('second'));
+    f.engine.receive(message('/new demo first')); f.engine.receive(message('/new demo second'));
     await until(() => runs === 1);
     const [first, second] = f.store.list();
     f.engine.receive(message(`/cancel ${first.id}`));

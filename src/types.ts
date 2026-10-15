@@ -60,6 +60,7 @@ export interface DeliveryReport {
 export interface Config {
   /** Defaults to true. Historical name; false affects new-task intake only. */
   langGraphPilot?: boolean;
+  maxConcurrentTasks?: number;
   configFile?: string;
   modelSelection?: import('./models.js').ModelSelection;
   consoleUrl?: string;

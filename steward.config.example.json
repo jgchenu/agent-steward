@@ -3,6 +3,7 @@
   "codexCommand": "codex",
   "approvalsReviewer": "user",
   "maxRunMinutes": 60,
+  "maxConcurrentTasks": 2,
   "langGraphPilot": true,
   "projects": {}
 }

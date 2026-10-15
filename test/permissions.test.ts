@@ -40,6 +40,8 @@ test('console runtime status is a live heartbeat rather than a saved preference'
  const dir=mkdtempSync(join(tmpdir(),'steward-permission-runtime-'));
  try{assert.equal(readPermissionRuntime(dir).connected,false);writePermissionRuntime(dir,{permissionMode:'auto',active:true,activeMode:'ask'});
  assert.deepEqual(readPermissionRuntime(dir),{connected:true,permissionMode:'auto',active:true,activeMode:'ask'});
+ writePermissionRuntime(dir,{permissionMode:'auto',active:true,activeMode:'ask',activeCount:2});
+ assert.deepEqual(readPermissionRuntime(dir),{connected:true,permissionMode:'auto',active:true,activeMode:'ask',activeCount:2});
  const path=join(dir,'permission-runtime.json'),raw=JSON.parse(readFileSync(path,'utf8'));writeFileSync(path,JSON.stringify({...raw,updatedAt:Date.now()-6000}));assert.equal(readPermissionRuntime(dir).connected,false);
  writePermissionRuntime(dir,{permissionMode:'ask',active:false});clearPermissionRuntime(dir);assert.equal(readPermissionRuntime(dir).connected,false);
  }finally{rmSync(dir,{recursive:true,force:true});}

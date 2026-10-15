@@ -62,10 +62,12 @@ export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.
   if (raw.groupChats !== undefined && typeof raw.groupChats !== 'boolean') throw new Error('groupChats must be boolean.');
   if (raw.langGraphPilot !== undefined && typeof raw.langGraphPilot !== 'boolean') throw new Error('langGraphPilot must be boolean.');
   if (raw.approvalsReviewer !== undefined && !['user', 'auto_review'].includes(raw.approvalsReviewer)) throw new Error('approvalsReviewer must be user or auto_review.');
+  const maxConcurrentTasks = raw.maxConcurrentTasks ?? 2;
+  if (!Number.isInteger(maxConcurrentTasks) || maxConcurrentTasks < 1 || maxConcurrentTasks > 4) throw Error('maxConcurrentTasks must be an integer between 1 and 4.');
   const maxRunMinutes = raw.maxRunMinutes ?? 60;
   if (!Number.isFinite(maxRunMinutes) || maxRunMinutes < 1 || maxRunMinutes > 1440) {
     throw new Error('maxRunMinutes must be between 1 and 1440.');
   }
-  return { configFile: resolve(file), ownerId, projects, modelSelection:modelSelection(raw.modelSelection), ...(catalog ? {codexProjects:catalog} : {}), maxRunMinutes, permissionMode: permissionMode(raw), approvalsReviewer: raw.approvalsReviewer ?? 'user', defaultProject: raw.defaultProject, groupChats: raw.groupChats ?? false, stateDir: resolve(base, raw.stateDir ?? '.steward'),
+  return { configFile: resolve(file), ownerId, projects, modelSelection:modelSelection(raw.modelSelection), ...(catalog ? {codexProjects:catalog} : {}), maxRunMinutes, maxConcurrentTasks, permissionMode: permissionMode(raw), approvalsReviewer: raw.approvalsReviewer ?? 'user', defaultProject: raw.defaultProject, groupChats: raw.groupChats ?? false, stateDir: resolve(base, raw.stateDir ?? '.steward'),
     codexCommand: raw.codexCommand ?? 'codex', langGraphPilot: raw.langGraphPilot ?? true };
 }

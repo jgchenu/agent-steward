@@ -49,6 +49,13 @@ test('configuration fails closed for missing owner, unknown sandbox and invalid 
     assert.equal(loadConfig(path).projects.demo.sandbox, 'read-only');
     assert.equal(loadConfig(path).approvalsReviewer, 'user');
     assert.equal(loadConfig(path).langGraphPilot, true);
+    assert.equal(loadConfig(path).maxConcurrentTasks, 2);
+    for (const maxConcurrentTasks of [0, 5, 1.5, '2']) {
+      writeFileSync(path, JSON.stringify({ maxConcurrentTasks, projects: {} }));
+      assert.throws(() => loadConfig(path), /maxConcurrentTasks/);
+    }
+    writeFileSync(path, JSON.stringify({ maxConcurrentTasks: 1, projects: {} }));
+    assert.equal(loadConfig(path).maxConcurrentTasks, 1);
     for (const value of [false, true]) {
       writeFileSync(path, JSON.stringify({ langGraphPilot: value, projects: {} }));
       assert.equal(loadConfig(path).langGraphPilot, value);
