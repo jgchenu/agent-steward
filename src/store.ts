@@ -61,6 +61,9 @@ export class Store {
   consume(id: string): boolean {
     return this.db.prepare('INSERT OR IGNORE INTO inbox VALUES (?)').run(id).changes === 1;
   }
+  consumed(id: string): boolean {
+    return !!this.db.prepare('SELECT 1 FROM inbox WHERE id = ?').get(id);
+  }
   create(chatId: string, project: string, prompt: string, mode: Task['mode'] = 'read-only', conversation?: Conversation): Task {
     const id = randomUUID().slice(0, 8), now = new Date().toISOString();
     this.db.prepare('INSERT INTO tasks(id,chatId,project,prompt,status,createdAt,updatedAt,mode) VALUES (?,?,?,?,?,?,?,?)')
