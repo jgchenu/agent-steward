@@ -7,6 +7,7 @@ import { Store } from '../store.js';
 import { buildCard, viewKey } from './cards.js';
 import { readableFileReferences } from './file-references.js';
 import { loadMedia, releaseMedia } from './media.js';
+import { EditedMentionWatch } from './edited-mentions.js';
 
 export function parseCardAction(data: any): CardAction | undefined {
   const value = data?.action?.value;
@@ -51,6 +52,8 @@ export class FeishuChannel implements Channel {
   private ws: lark.WSClient;
   private botId?: string;
   private appId: string;
+  private editWatch?: EditedMentionWatch;
+  private editTimer?: ReturnType<typeof setInterval>;
   constructor(appId: string, appSecret: string, private store: Store, private config: Config) {
     this.appId = appId;
     // SDK errors may contain HTTP request configuration. Keep raw errors out of logs.
@@ -69,10 +72,21 @@ export class FeishuChannel implements Channel {
         this.botId = info.bot.open_id;
       } catch { console.warn('Group intake disabled: unable to resolve bot identity. Private chat remains available.'); }
     }
+    if (this.config.groupChats && this.botId) {
+      this.editWatch = new EditedMentionWatch(this.config.ownerId, this.botId,
+        id => this.client.request({ method: 'GET', url: `/open-apis/im/v1/messages/${encodeURIComponent(id)}`,
+          params: { user_id_type: 'open_id' }, timeout: 3000 }),
+        parseFeishuEvent, id => this.store.consumed(id), receive);
+      this.editTimer = setInterval(() => { void this.editWatch?.poll(); }, 15_000);
+      this.editTimer.unref();
+    }
     await this.ws.start({ eventDispatcher: new lark.EventDispatcher({}).register({
       'im.message.receive_v1': async data => {
         const message = parseFeishuEvent(data, this.botId);
-        if (message) receive(message); // No model/network work on the acknowledgement path.
+        if (message) {
+          receive(message); // No model/network work on the acknowledgement path.
+          this.editWatch?.observe(message);
+        }
       },
       'card.action.trigger': async (data: unknown) => {
         const message = parseCardAction(data);
@@ -175,7 +189,7 @@ export class FeishuChannel implements Channel {
     if (view?.fresh && result.data?.message_id) this.store.saveCardMessage(chatId, `delivery:${deliveryId}`, result.data.message_id);
     if (alertKey && result.data?.message_id) this.store.saveCardMessage(chatId, alertKey, result.data.message_id);
   }
-  close(): void { this.ws.close(); }
+  close(): void { clearInterval(this.editTimer); this.editWatch?.close(); this.ws.close(); }
 }
 
 
