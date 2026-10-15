@@ -1,3 +1,4 @@
+import { taskConcurrency } from './config.js';
 import { approveOperation, currentOperation, decideOperation, operationFailure, OperationWaiting } from './operations.js';
 import { viewKey } from './channels/cards.js';
 import { CONVERSATION, conversationProject } from './conversation.js';
@@ -40,12 +41,15 @@ export class Engine {
   private orchestrator?: TaskOrchestrator;
   constructor(readonly store: Store, readonly config: Config, private executor: Executor,
     private channel: Channel, private mergeRunner = mergePullRequest) {
+    config.maxConcurrentTasks = taskConcurrency(config.maxConcurrentTasks);
     store.pilotIntake = config.langGraphPilot !== false;
     // Intake policy must not strand persisted graph questions or recovery receipts.
     this.orchestrator = new TaskOrchestrator(store);
   }
 
-  updateProjects(next: Pick<Config, 'projects' | 'defaultProject' | 'codexProjects'> & Partial<Pick<Config, 'permissionMode' | 'approvalsReviewer' | 'modelSelection'>>): void {
+  updateProjects(next: Pick<Config, 'projects' | 'defaultProject' | 'codexProjects'> & Partial<Pick<Config, 'permissionMode' | 'approvalsReviewer' | 'modelSelection' | 'maxConcurrentTasks'>>): void {
+    const concurrency = taskConcurrency('maxConcurrentTasks' in next ? next.maxConcurrentTasks : this.config.maxConcurrentTasks);
+    this.config.maxConcurrentTasks = concurrency;
     const previous = this.config.projects;
     for (const task of this.store.list()) {
       const selection = this.store.projectSelection(task.id);
@@ -69,7 +73,7 @@ export class Engine {
     const runs = [...this.active.values()];
     const broadest = runs.map(r => r.task.permissionMode ?? 'ask').sort((a,b) => permissionRank(b)-permissionRank(a))[0];
     const selection = runs.length === 1 ? runs[0].task.modelSelection : undefined;
-    return { permissionMode: permissionMode(this.config), activeMode: broadest, active: runs.length > 0, activeCount: runs.length,
+    return { permissionMode: permissionMode(this.config), activeMode: broadest, active: runs.length > 0, activeCount: runs.length, maxConcurrentTasks: this.config.maxConcurrentTasks,
       ...(this.config.modelSelection ? {modelSelection:this.config.modelSelection} : {}), ...(selection ? {activeModelSelection:selection} : {}) };
   }
   start(): void {

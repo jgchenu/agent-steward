@@ -114,3 +114,25 @@ test('simultaneous runtime requests stay owner- and topic-bound and survive unre
     assert.deepEqual(decisions,['A:accept','B:accept']);
   }finally{await f.close();}
 });
+
+test('raising the live limit dispatches queued work; lowering drains active work without interruption',async()=>{
+  const f=fixture({maxConcurrentTasks:1});
+  try{
+    f.engine.start();
+    for(const topic of ['a','b','c','d'])f.send('work '+topic,topic);
+    await until(()=>f.running.size===1);
+    f.engine.updateProjects({...f.config,maxConcurrentTasks:3});await until(()=>f.running.size===3);
+    assert.equal(f.engine.permissionState().maxConcurrentTasks,3);assert.equal(f.task('d').status,'queued');
+    assert.throws(()=>f.engine.updateProjects({...f.config,maxConcurrentTasks:5}),/maxConcurrentTasks/);
+    assert.equal(f.engine.permissionState().maxConcurrentTasks,3);
+    f.engine.updateProjects({...f.config,maxConcurrentTasks:1});
+    assert.equal(f.engine.permissionState().activeCount,3);
+    f.running.get(f.task('a').id)!.finish('done');await until(()=>f.running.size===2);
+    assert.equal(f.task('d').status,'queued');
+    f.running.get(f.task('b').id)!.finish('done');await until(()=>f.running.size===1);
+    assert.equal(f.task('d').status,'queued');
+    f.running.get(f.task('c').id)!.finish('done');await until(()=>f.running.has(f.task('d').id));
+    assert.equal(f.running.size,1);
+    assert.equal(f.task('a').status,'review');assert.equal(f.task('b').status,'review');assert.equal(f.task('c').status,'review');
+  }finally{await f.close();}
+});
