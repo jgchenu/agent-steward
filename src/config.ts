@@ -5,6 +5,12 @@ import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { Config, Project } from './types.js';
 
+export function taskConcurrency(value: unknown): number {
+  if (value === undefined) return 2;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 4) throw Error('maxConcurrentTasks 必须是 1–4 之间的整数。');
+  return value;
+}
+
 export function projectAliases(value: unknown, name: string): string[] | undefined {
   if (value === undefined) return;
   if (!Array.isArray(value) || value.length > 10 || value.some(alias => typeof alias !== 'string' || !alias.trim() || alias.length > 40 || /[\r\n\0]/.test(alias))) throw new Error(`Invalid project aliases: ${name}`);
@@ -62,10 +68,11 @@ export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.
   if (raw.groupChats !== undefined && typeof raw.groupChats !== 'boolean') throw new Error('groupChats must be boolean.');
   if (raw.langGraphPilot !== undefined && typeof raw.langGraphPilot !== 'boolean') throw new Error('langGraphPilot must be boolean.');
   if (raw.approvalsReviewer !== undefined && !['user', 'auto_review'].includes(raw.approvalsReviewer)) throw new Error('approvalsReviewer must be user or auto_review.');
+  const maxConcurrentTasks = taskConcurrency(raw.maxConcurrentTasks);
   const maxRunMinutes = raw.maxRunMinutes ?? 60;
   if (!Number.isFinite(maxRunMinutes) || maxRunMinutes < 1 || maxRunMinutes > 1440) {
     throw new Error('maxRunMinutes must be between 1 and 1440.');
   }
-  return { configFile: resolve(file), ownerId, projects, modelSelection:modelSelection(raw.modelSelection), ...(catalog ? {codexProjects:catalog} : {}), maxRunMinutes, permissionMode: permissionMode(raw), approvalsReviewer: raw.approvalsReviewer ?? 'user', defaultProject: raw.defaultProject, groupChats: raw.groupChats ?? false, stateDir: resolve(base, raw.stateDir ?? '.steward'),
+  return { configFile: resolve(file), ownerId, projects, modelSelection:modelSelection(raw.modelSelection), ...(catalog ? {codexProjects:catalog} : {}), maxRunMinutes, maxConcurrentTasks, permissionMode: permissionMode(raw), approvalsReviewer: raw.approvalsReviewer ?? 'user', defaultProject: raw.defaultProject, groupChats: raw.groupChats ?? false, stateDir: resolve(base, raw.stateDir ?? '.steward'),
     codexCommand: raw.codexCommand ?? 'codex', langGraphPilot: raw.langGraphPilot ?? true };
 }

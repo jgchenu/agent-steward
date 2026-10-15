@@ -1,3 +1,4 @@
+import { taskConcurrency } from './config.js';
 import { approveOperation, currentOperation, decideOperation, operationFailure, OperationWaiting } from './operations.js';
 import { viewKey } from './channels/cards.js';
 import { CONVERSATION, conversationProject } from './conversation.js';
@@ -32,7 +33,7 @@ const HELP = `Agent Steward · 个人 Agent 分身（预览版）
 直接说需求即可开始；使用默认项目或唯一配置的项目，工作台是可选入口。`;
 
 export class Engine {
-  private active?: { task: Task; abort: AbortController; done: Promise<void> };
+  private active = new Map<string, { task: Task; abort: AbortController; done: Promise<void> }>();
   private pending = new Map<string, HumanRequest>();
   private timer?: ReturnType<typeof setInterval>;
   private flushPromise?: Promise<void>;
@@ -40,12 +41,15 @@ export class Engine {
   private orchestrator?: TaskOrchestrator;
   constructor(readonly store: Store, readonly config: Config, private executor: Executor,
     private channel: Channel, private mergeRunner = mergePullRequest) {
+    config.maxConcurrentTasks = taskConcurrency(config.maxConcurrentTasks);
     store.pilotIntake = config.langGraphPilot !== false;
     // Intake policy must not strand persisted graph questions or recovery receipts.
     this.orchestrator = new TaskOrchestrator(store);
   }
 
-  updateProjects(next: Pick<Config, 'projects' | 'defaultProject' | 'codexProjects'> & Partial<Pick<Config, 'permissionMode' | 'approvalsReviewer' | 'modelSelection'>>): void {
+  updateProjects(next: Pick<Config, 'projects' | 'defaultProject' | 'codexProjects'> & Partial<Pick<Config, 'permissionMode' | 'approvalsReviewer' | 'modelSelection' | 'maxConcurrentTasks'>>): void {
+    const concurrency = taskConcurrency('maxConcurrentTasks' in next ? next.maxConcurrentTasks : this.config.maxConcurrentTasks);
+    this.config.maxConcurrentTasks = concurrency;
     const previous = this.config.projects;
     for (const task of this.store.list()) {
       const selection = this.store.projectSelection(task.id);
@@ -55,18 +59,22 @@ export class Engine {
     if ('permissionMode' in next || 'approvalsReviewer' in next) {
       const mode = permissionMode(next);
       this.config.permissionMode = mode; this.config.approvalsReviewer = next.approvalsReviewer;
-      if (this.active && permissionRank(mode) < permissionRank(this.active.task.permissionMode ?? 'ask')) {
-        this.active.abort.abort(new Error('审批模式已收紧，本轮执行已停止；已有改动保留，请继续任务以应用新设置。'));
+      for (const run of this.active.values()) if (permissionRank(mode) < permissionRank(run.task.permissionMode ?? 'ask')) {
+        run.abort.abort(new Error('审批模式已收紧，本轮执行已停止；已有改动保留，请继续任务以应用新设置。'));
       }
     }
     this.config.codexProjects = next.codexProjects; this.config.projects = next.projects; this.config.defaultProject = next.defaultProject;
-    if (this.active) {
-      const t = this.active.task, p = next.projects[t.project];
-      if (t.project !== CONVERSATION && (!p || p.path !== previous[t.project]?.path || (t.mode === 'workspace-write' && p.sandbox !== 'workspace-write'))) this.active.abort.abort(new Error('项目授权已撤销或降为只读，执行已停止。'));
+    for (const run of this.active.values()) {
+      const t = run.task, p = next.projects[t.project];
+      if (t.project !== CONVERSATION && (!p || p.path !== previous[t.project]?.path || (t.mode === 'workspace-write' && p.sandbox !== 'workspace-write'))) run.abort.abort(new Error('项目授权已撤销或降为只读，执行已停止。'));
     }
   }
   permissionState() {
-    return { permissionMode: permissionMode(this.config), activeMode: this.active?.task.permissionMode, active: !!this.active, ...(this.config.modelSelection ? {modelSelection:this.config.modelSelection} : {}), ...(this.active?.task.modelSelection ? {activeModelSelection:this.active.task.modelSelection} : {}) };
+    const runs = [...this.active.values()];
+    const broadest = runs.map(r => r.task.permissionMode ?? 'ask').sort((a,b) => permissionRank(b)-permissionRank(a))[0];
+    const selection = runs.length === 1 ? runs[0].task.modelSelection : undefined;
+    return { permissionMode: permissionMode(this.config), activeMode: broadest, active: runs.length > 0, activeCount: runs.length, maxConcurrentTasks: this.config.maxConcurrentTasks,
+      ...(this.config.modelSelection ? {modelSelection:this.config.modelSelection} : {}), ...(selection ? {activeModelSelection:selection} : {}) };
   }
   start(): void {
     this.store.recover();
@@ -119,7 +127,7 @@ export class Engine {
           reply('任务不存在，请在对应话题查询。'); return;
         }
         const current = target && this.store.runtimeModel(target.id);
-        const scope = target ? (this.active?.task.id === target.id && (!target.nextAction || target.nextAction === 'execute') ? '当前执行参数' : '该任务最近一轮模型执行参数') : '当前没有可查询的模型执行';
+        const scope = target ? (this.active.has(target.id) && (!target.nextAction || target.nextAction === 'execute') ? '当前执行参数' : '该任务最近一轮模型执行参数') : '当前没有可查询的模型执行';
         reply(modelStatusText(current, this.config.modelSelection, scope), target ? {kind:'reply',taskId:target.id} : undefined); return;
       }
       if (['控制台','打开控制台','设置','/console'].includes(text)) {
@@ -136,7 +144,7 @@ export class Engine {
         reply('选择从哪个代码版本继续。原副本会保留。', { kind: 'baseline', taskId: bound.id, fresh: true }); return;
       }
       if (!match && !navigation && bound && projectSelection && projectAnswer(text)) {
-        if (this.active?.task.id === bound.id || bound.status !== 'review' || bound.project !== CONVERSATION
+        if (this.active.has(bound.id) || bound.status !== 'review' || bound.project !== CONVERSATION
           || this.store.requests(bound.id).length) { reply('当前执行尚未结束，请稍后回答项目选择。'); return; }
         this.store.clearProjectSelection(bound.id);
         if (projectAnswer(text) === 'no') { reply('已取消这次项目选择。请告诉我应使用哪个项目，或补充需求。'); return; }
@@ -188,7 +196,7 @@ export class Engine {
         const mode = command === '/edit' ? 'workspace-write' : !match ? this.config.projects[project]?.naturalMode ?? 'read-only' : 'read-only';
         const p = project === CONVERSATION ? conversationProject(this.config) : this.config.projects[project];
         if (mode === 'workspace-write' && (p.sandbox !== mode || !p.worktree)) { reply('该项目仅支持只读分析。'); return; }
-        if (bound && (this.active?.task.id === bound.id || !['review','completed','failed','cancelled','interrupted'].includes(bound.status))) {
+        if (bound && (this.active.has(bound.id) || !['review','completed','failed','cancelled','interrupted'].includes(bound.status))) {
           reply('我还在处理当前工作，完成或停止后才能切换项目。'); return;
         }
         if (bound && bound.project === project) {
@@ -215,7 +223,7 @@ export class Engine {
         const business = task && this.store.graphWait(task.id);
         const operation=task && currentOperation(this.store,task.id);
         if(operation?.requestId===id && req?.status==='pending' && operation.state==='pending'){
-          if(!task || task.status!=='waiting_approval' || task.nextAction!=='merge' || this.active?.task.id===task.id
+          if(!task || task.status!=='waiting_approval' || task.nextAction!=='merge' || this.active.has(task.id)
             || task.chatId!==message.chatId || task.conversation?.anchorId!==message.conversation?.anchorId
             || (bound && bound.id!==task.id) || operation.scope.ownerId!==message.senderId){reply('请在操作所属话题处理有效的确认。');return;}
           if(!['/approve','/deny'].includes(command)){reply('请明确允许或拒绝这项操作。');return;}
@@ -231,7 +239,7 @@ export class Engine {
         if (command === '/answer' && task && req?.kind === 'input' && req.status === 'pending' && business?.requestId === id) {
           if (task.chatId !== message.chatId || (message.conversation && task.conversation?.anchorId !== message.conversation.anchorId)) { reply('请在问题所在会话回答。'); return; }
           if (!this.orchestrator) { reply('编排运行时不可用，问题与任务已保留。'); return; }
-          if (task.status !== 'waiting_input' || this.active?.task.id === task.id || !body) { reply('请等待问题保存完成，并填写回答。'); return; }
+          if (task.status !== 'waiting_input' || this.active.has(task.id) || !body) { reply('请等待问题保存完成，并填写回答。'); return; }
           if (task.project !== CONVERSATION && !this.config.projects[task.project]) { reply('项目授权已撤销，任务尚未继续。'); return; }
           this.store.answerGraph(task.id,body);
           reply('收到，我会结合这条补充继续处理。',{kind:'reply',taskId:task.id}); return;
@@ -258,7 +266,7 @@ export class Engine {
       if (!task || task.chatId !== message.chatId || (message.conversation && task.conversation?.anchorId !== message.conversation.anchorId)) { reply('任务不存在，请重新选择。', { kind: 'home' }); return; }
       if (bound && bound.id !== task.id && !['/status', '/source'].includes(command)) { reply('这个话题已转到另一个项目，请直接在话题里说明当前需求。'); return; }
       if (command === '/baseline' || command === '/restart') {
-        if (this.active?.task.id === id || !['review','completed','failed','cancelled','interrupted'].includes(task.status)) { reply('请等任务结束或停止后再更换版本。'); return; }
+        if (this.active.has(id) || !['review','completed','failed','cancelled','interrupted'].includes(task.status)) { reply('请等任务结束或停止后再更换版本。'); return; }
         if (!this.store.workspace(id) || !this.config.projects[task.project]?.worktree) { reply('这个任务没有 Git 工作副本。'); return; }
         if (command === '/baseline') { reply('选择从哪个代码版本继续。', { kind: 'baseline', taskId: id, fresh: true }); return; }
         if (!validBaseRef(body)) { reply('请填写明确的 Git 分支或提交 SHA。'); return; }
@@ -268,7 +276,7 @@ export class Engine {
       }
       if (command === '/source') { reply(codeSourceDetails(this.store.delivery(id), this.config.projects[task.project], !!message.conversation), { kind: 'source', taskId: id, fresh: true }); return; }
       if (command === '/merge') {
-        if (this.active?.task.id===id || !['review','completed','failed','cancelled','interrupted'].includes(task.status)) {reply('请等当前执行结束后再合并。');return;}
+        if (this.active.has(id) || !['review','completed','failed','cancelled','interrupted'].includes(task.status)) {reply('请等当前执行结束后再合并。');return;}
         const project=this.config.projects[task.project];
         if(task.mode!=='workspace-write'||project?.sandbox!=='workspace-write'){reply('该任务没有修改项目的授权。');return;}
         const url=body||this.store.delivery(id)?.prUrl;
@@ -287,11 +295,11 @@ export class Engine {
           reply('任务当前未在执行。'); return;
         }
         this.store.set(id, 'cancelled'); this.store.expire(id, false);
-        effects.push(() => { if (this.active?.task.id === id) this.active.abort.abort(); });
+        effects.push(() => { if (this.active.has(id)) this.active.get(id)?.abort.abort(); });
         reply(`任务 ${id} 已取消；已有文件修改保留。`, { kind: 'task', taskId: id }); return;
       }
       if (command === '/continue') {
-        if (this.active?.task.id === id || !['review', 'completed', 'failed', 'cancelled', 'interrupted'].includes(task.status)) {
+        if (this.active.has(id) || !['review', 'completed', 'failed', 'cancelled', 'interrupted'].includes(task.status)) {
           reply('请等当前执行结束后再继续，或先 /cancel。'); return;
         }
         if (task.project !== CONVERSATION && !this.config.projects[task.project]) { reply('原项目已不在已授权的 Codex 项目中，请重新选择或授权；原任务记录和文件保留。'); return; }
@@ -326,7 +334,7 @@ export class Engine {
       const p = i.project && this.config.projects[i.project];
       if (!p || !i.prompt || !i.selectionKey || i.prompt.length > 16000) return fail('该项目已撤销授权，请重新派活。');
       if (current && (!task || current.id !== task.id || i.revision !== task.updatedAt
-        || this.active?.task.id === task.id || !['review','completed','failed','cancelled','interrupted'].includes(task.status))) return fail('话题状态已变化，请在话题里继续说明需求。');
+        || this.active.has(task.id) || !['review','completed','failed','cancelled','interrupted'].includes(task.status))) return fail('话题状态已变化，请在话题里继续说明需求。');
       if (i.taskId && !current) return fail('原话题已失效，请重新选择。');
       this.receive({ id: 'choice:' + i.selectionKey, senderId: action.senderId, senderType: 'user', chatId: action.chatId,
         chatType: i.conversation ? 'group' : 'p2p', botMentioned: !!i.conversation, conversation: i.conversation,
@@ -346,7 +354,7 @@ export class Engine {
       if (action.fields.mode === 'workspace-write' && (project?.sandbox !== 'workspace-write' || !project?.worktree)) return fail('请先选择已授权且支持修改的代码资源。');
     }
     if (i.op === 'publish') {
-      if (!task || this.active?.task.id === task.id || !['review', 'completed', 'failed'].includes(task.status)
+      if (!task || this.active.has(task.id) || !['review', 'completed', 'failed'].includes(task.status)
         || !canPublish(task, this.config.projects[task.project], this.store.delivery(task.id))) return fail('尚不具备 PR 交付条件，请检查文件与验证结果。');
       const report = this.store.delivery(task.id)!, project = this.config.projects[task.project];
       if (i.publicationKey !== publicationKey(task, project, report)) return fail('交付内容或目标已变化，请重新预览后确认。');
@@ -361,7 +369,7 @@ export class Engine {
       return { toast: { type: 'success', content: '已排队准备草稿 PR，不会自动合并。' } };
     }
     if (i.op === 'done' && task?.status !== 'review') return fail('该任务当前不需要验收。');
-    if (['continue', 'followup', 'baseline', 'restart'].includes(i.op) && (this.active?.task.id === task?.id ||
+    if (['continue', 'followup', 'baseline', 'restart'].includes(i.op) && ((!!task && this.active.has(task.id)) ||
       !['review', 'completed', 'failed', 'cancelled', 'interrupted'].includes(task?.status ?? ''))) return fail('请等当前执行结束后继续。');
     if (i.op === 'cancel' && !['queued', 'running', 'waiting_input', 'waiting_approval'].includes(task?.status ?? '')) return fail('任务已经停止。');
     if (['approve', 'deny', 'answer'].includes(i.op)) {
@@ -370,7 +378,7 @@ export class Engine {
       const operation = task && currentOperation(this.store, task.id);
       const operationWait = !!operation && ['approve','deny'].includes(i.op) && operation.requestId === i.requestId
         && operation.state === 'pending' && operation.expiresAt > Date.now() && operation.scope.ownerId === action.senderId
-        && task?.status === 'waiting_approval' && task.nextAction === 'merge' && this.active?.task.id !== task.id;
+        && task?.status === 'waiting_approval' && task.nextAction === 'merge' && !this.active.has(task.id);
       const durable = i.op === 'answer' && req?.kind === 'input' && business?.requestId === i.requestId && !!this.orchestrator && task?.status === 'waiting_input';
       if (!req || req.taskId !== task?.id || req.status !== 'pending' || (!runtime && !durable && !operationWait) ||
         (req.kind === 'input') !== (i.op === 'answer')) return fail('该请求已失效，未执行任何授权。');
@@ -415,19 +423,40 @@ export class Engine {
       : remaining.length ? 'waiting_input' : 'running';
     this.store.set(id, status);
   }
+  private canDispatch(task: Task): boolean {
+    if (this.active.size >= (this.config.maxConcurrentTasks ?? 2) || this.active.has(task.id)) return false;
+    for (const run of this.active.values()) {
+      // Keep all code/Git actions serial; general read-only conversations may overlap them.
+      if (task.project !== CONVERSATION && run.task.project !== CONVERSATION) return false;
+      if (task.conversation && run.task.conversation && task.chatId === run.task.chatId
+        && task.conversation.anchorId === run.task.conversation.anchorId) return false;
+      if (task.threadId && task.threadId === this.store.get(run.task.id)?.threadId) return false;
+    }
+    return true;
+  }
   private tick(): void {
     if (this.stopped) return;
     this.store.expireOperations();
-    if(this.active)return;
-    const queued = this.store.list().find(t => t.status === 'queued');
-    if (!queued) return;
-    const task = { ...queued, permissionMode: permissionMode(this.config), modelSelection: this.config.modelSelection ? {...this.config.modelSelection} : undefined };
-    const abort = new AbortController();
-    this.store.set(task.id, 'running');
-    if (!task.conversation || !this.channel.acknowledge) this.store.enqueue(task.chatId, `开始执行 ${task.id} · ${task.project === CONVERSATION ? '对话' : task.project}`, { kind: 'task', taskId: task.id });
-    // Defer execution so synchronous adapters cannot race active-run registration.
-    const done = Promise.resolve().then(() => this.run(task, abort));
-    this.active = { task, abort, done };
+    const queued = this.store.list().filter(t => t.status === 'queued').sort((a,b) => a.updatedAt.localeCompare(b.updatedAt));
+    for (const candidate of queued) {
+      if (!this.canDispatch(candidate)) {
+        if (candidate.conversation && this.channel.acknowledge) {
+          const notified = this.store.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='queue_wait' ORDER BY seq DESC LIMIT 1").get(candidate.id) as {body:string} | undefined;
+          if (notified?.body !== candidate.updatedAt) this.store.transaction(() => {
+            this.store.event(candidate.id,'queue_wait',candidate.updatedAt);
+            this.store.enqueue(candidate.chatId,'已收到，任务正在排队；有执行名额后会自动继续，无需重复发送。',{kind:'reply',taskId:candidate.id});
+          });
+        }
+        continue;
+      }
+      const task = { ...candidate, permissionMode: permissionMode(this.config), modelSelection: this.config.modelSelection ? {...this.config.modelSelection} : undefined };
+      const abort = new AbortController();
+      this.store.set(task.id, 'running');
+      if (!task.conversation || !this.channel.acknowledge) this.store.enqueue(task.chatId, `开始执行 ${task.id} · ${task.project === CONVERSATION ? '对话' : task.project}`, { kind: 'task', taskId: task.id });
+      // Register before invoking an adapter; each task owns its abort and completion.
+      const done = Promise.resolve().then(() => this.run(task, abort));
+      this.active.set(task.id,{ task, abort, done });
+    }
   }
   private async run(task: Task, abort: AbortController): Promise<void> {
     const timeout = setTimeout(() => abort.abort(new Error('执行超过配置时限')), this.config.maxRunMinutes * 60_000);
@@ -644,7 +673,7 @@ export class Engine {
       for (const id of this.pending.keys()) {
         if (this.store.getRequest(id)?.taskId === task.id) this.pending.delete(id);
       }
-      this.store.expire(task.id); this.active = undefined;
+      this.store.expire(task.id); this.active.delete(task.id);
       this.tick(); void this.flush();
     }
   }
@@ -662,8 +691,9 @@ export class Engine {
   }
   async stop(): Promise<void> {
     this.stopped = true; clearInterval(this.timer);
-    this.active?.abort.abort(new Error('服务停止'));
-    await this.active?.done;
+    const runs = [...this.active.values()];
+    for (const run of runs) run.abort.abort(new Error('服务停止'));
+    await Promise.all(runs.map(run => run.done));
     await this.flush();
     this.orchestrator?.close(); this.orchestrator = undefined;
   }

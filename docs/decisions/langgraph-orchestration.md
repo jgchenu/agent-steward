@@ -52,7 +52,7 @@ Persist an operation identity and attempt before externally visible effects. On 
 
 Treat clarification, requirement changes, permission decisions and acceptance as distinct task inputs. Record who supplied each input and which task or operation it addresses. Previously granted authority may be reused only within its actual scope and validity, subject to repository and operation-specific rules.
 
-Persist business-level waits so an inactive task can eventually release execution capacity. Keep one active executor. A saved graph interrupt cannot restore a live Codex RPC approval callback: the adapter must establish whether a session can reconnect or needs an explicit new turn. Existing process-bound permission requests still expire on restart until a separately reviewed implementation establishes a valid replacement flow.
+Persist business-level waits so an inactive task can eventually release execution capacity. Keep bounded execution concurrency: default two tasks, with all code/Git tasks still serial. A saved graph interrupt cannot restore a live Codex RPC approval callback: the adapter must establish whether a session can reconnect or needs an explicit new turn. Existing process-bound permission requests still expire on restart until a separately reviewed implementation establishes a valid replacement flow.
 
 Task completion continues to distinguish executor output, independent checks, publication, deployment and human acceptance. A graph reaching its end does not establish all of these outcomes.
 
@@ -60,7 +60,7 @@ Task completion continues to distinguish executor output, independent checks, pu
 
 Within one instance, delegate through explicit child tasks or subgraphs. Each delegation records its parent, responsible executor, goal, allowed capabilities, bounded context, artifact expectations and outcome. Preserve separate runtime sessions and workspaces. The parent must handle failed, cancelled and incomplete children and enforce a bounded delegation depth and work budget.
 
-An agent result is evidence for the parent to assess; it is not an instruction with the parent's authority. Start with serial delegation under the existing execution limit. Parallel execution requires separately tested workspace isolation, scheduling and cancellation behavior.
+An agent result is evidence for the parent to assess; it is not an instruction with the parent's authority. Start with serial delegation under the existing execution limit. General conversations may overlap code work under the bounded scheduler; parallel code execution still requires separately tested workspace isolation, scheduling and cancellation behavior.
 
 Across independent instances, use A2A after task delegation works locally. The receiving instance validates its own owner grants, caller identity and artifact visibility. Delegation does not propagate credentials or automatically extend authority. Internal calls do not need a network protocol merely to use multiple agents.
 
