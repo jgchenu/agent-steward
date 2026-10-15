@@ -8,7 +8,7 @@ export function codeSourceSummary(report?: DeliveryReport): string {
 export function codeSourceDetails(report: DeliveryReport | undefined, project: Project | undefined, group: boolean): string {
   if (!report) return [
     '尚未记录实际执行版本，不能根据项目配置认定本次使用的提交。',
-    project?.worktree ? `配置基准：${project.worktree.baseRef}（尚非执行证据）` : '此项目未配置 Git 独立副本，执行时使用授权目录；未记录 Git 版本。',
+    project?.workspaceMode === 'direct' ? '执行位置：原项目目录。直接编辑，不创建副本；未记录独立 Git 版本或 Steward 检查报告。' : project?.worktree ? `配置基准：${project.worktree.baseRef}（尚非执行证据）` : '此项目未配置 Git 独立副本，执行时使用授权目录；未记录 Git 版本。',
     ...(!group && project ? [`配置目录：${project.path}`] : []),
   ].join('\n');
   const w = report.workspace;

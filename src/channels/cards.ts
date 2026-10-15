@@ -73,7 +73,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
         text('本次工作方式'),
         { tag: 'select_static', name: 'mode', required: true, width: 'fill', initial_option: 'read-only',
           options: [{ text: plain('分析与内容整理'), value: 'read-only' },
-            ...(projects.some(([, p]) => p.sandbox === 'workspace-write' && p.worktree) ? [{ text: plain('允许修改 · 完成后自动验证'), value: 'workspace-write' }] : [])] },
+            ...(projects.some(([, p]) => p.sandbox === 'workspace-write' && (p.worktree || p.workspaceMode === 'direct')) ? [{ text: plain('编辑项目 · 按项目设置执行'), value: 'workspace-write' }] : [])] },
         { ...input('任务要求', '例如：归纳客服反馈，或整理这份报销说明'), ...(view.draft ? { default_value: view.draft.slice(0, 1000) } : {}) },
       ]),
       ...(projects.length ? [{ tag: 'collapsible_panel', expanded: false, header: { title: plain('可用代码资源') }, elements: projects.map(([name, p]) => text(`${projectLabel(name)}\n${p.description ?? '配置在这台电脑上的工作目录。'}${conversation ? '' : `\n本机位置：${p.path}`}`)) }] : []),

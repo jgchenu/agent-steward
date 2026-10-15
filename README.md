@@ -186,3 +186,5 @@ Contributions: [CONTRIBUTING.md](CONTRIBUTING.md). License: [MIT](LICENSE).
 
 
 Task concurrency is bounded by `maxConcurrentTasks` (1–4, default 2; configurable in the local console without restarting). Use 1 to restore global serial execution. A busy code task does not block an unrelated general conversation when capacity is available. Code/Git tasks remain serial even across projects; a task, bound topic or saved Codex session never runs twice concurrently. Queued group topics receive one durable waiting notice per queue transition. Runtime permission waits hold their own slot; business questions and merge confirmations release theirs. This does not introduce delegated agents or distributed workers.
+
+Project grants offer view-only access, direct editing of the original directory, or editing in an isolated copy. The copy option requires a Git root with a readable commit. Direct editing works without Git and keeps code tasks serial; automated PR delivery remains exclusive to isolated copies.
