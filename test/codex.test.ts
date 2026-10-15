@@ -451,3 +451,12 @@ test('pilot business questions are structured and validated before any operation
     }
   }
 });
+
+test('direct project execution uses the authorized directory and explains source edits without PR promises',async()=>{
+ const rpc=new FakeRpc(),{hooks,executor}=setup(rpc);rpc.onTurn=()=>rpc.finish();
+ await executor.run({...task,mode:'workspace-write'}, {path:'/tmp/direct-project',sandbox:'workspace-write',workspaceMode:'direct'},hooks,AbortSignal.timeout(1000));
+ const start=rpc.params['thread/start'];assert.equal(start.cwd,'/tmp/direct-project');assert.equal(start.sandbox,'workspace-write');
+ assert.match(start.developerInstructions,/directly in the original project directory/);
+ assert.match(start.developerInstructions,/No Steward automated PR delivery/);
+ assert.deepEqual(rpc.params['turn/start'].sandboxPolicy.writableRoots,['/tmp/direct-project']);
+});

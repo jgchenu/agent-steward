@@ -66,7 +66,7 @@ export class Engine {
     this.config.codexProjects = next.codexProjects; this.config.projects = next.projects; this.config.defaultProject = next.defaultProject;
     for (const run of this.active.values()) {
       const t = run.task, p = next.projects[t.project];
-      if (t.project !== CONVERSATION && (!p || p.path !== previous[t.project]?.path || (t.mode === 'workspace-write' && p.sandbox !== 'workspace-write'))) run.abort.abort(new Error('项目授权已撤销或降为只读，执行已停止。'));
+      if (t.project !== CONVERSATION && (!p || p.path !== previous[t.project]?.path || p.workspaceMode !== previous[t.project]?.workspaceMode || (t.mode === 'workspace-write' && p.sandbox !== 'workspace-write'))) run.abort.abort(new Error('项目授权或执行位置已变化，执行已停止；已有改动保留。'));
     }
   }
   permissionState() {
@@ -153,7 +153,7 @@ export class Engine {
           reply('项目授权或任务已变化，旧项目选择已失效。请明确要使用的项目。'); return;
         }
         const mode = selected.naturalMode ?? 'read-only';
-        if (mode === 'workspace-write' && (selected.sandbox !== mode || !selected.worktree)) { reply('该项目当前没有可用的修改工作区，请在控制台检查授权。'); return; }
+        if (mode === 'workspace-write' && (selected.sandbox !== mode || (!selected.worktree && selected.workspaceMode !== 'direct'))) { reply('该项目当前没有可用的修改工作区，请在控制台检查授权。'); return; }
         const prompt = `${this.store.ownerRequirements(bound.id)}\n\n主人已确认代码资源：${selected.label ?? projectSelection.project}\n主人本次回答：${text}`;
         const next = this.store.handoff(bound, projectSelection.project, prompt, mode, message.conversation);
         this.store.event(next.id, 'project_confirmed', JSON.stringify({fromTaskId:bound.id,project:projectSelection.project,messageId:message.id}));
@@ -195,7 +195,7 @@ export class Engine {
         if (project !== CONVERSATION && !Object.hasOwn(this.config.projects, project)) { reply('未配置该项目，请用 /projects 查询。'); return; }
         const mode = command === '/edit' ? 'workspace-write' : !match ? this.config.projects[project]?.naturalMode ?? 'read-only' : 'read-only';
         const p = project === CONVERSATION ? conversationProject(this.config) : this.config.projects[project];
-        if (mode === 'workspace-write' && (p.sandbox !== mode || !p.worktree)) { reply('该项目仅支持只读分析。'); return; }
+        if (mode === 'workspace-write' && (p.sandbox !== mode || (!p.worktree && p.workspaceMode !== 'direct'))) { reply('该项目仅支持只读分析。'); return; }
         if (bound && (this.active.has(bound.id) || !['review','completed','failed','cancelled','interrupted'].includes(bound.status))) {
           reply('我还在处理当前工作，完成或停止后才能切换项目。'); return;
         }
@@ -267,7 +267,7 @@ export class Engine {
       if (bound && bound.id !== task.id && !['/status', '/source'].includes(command)) { reply('这个话题已转到另一个项目，请直接在话题里说明当前需求。'); return; }
       if (command === '/baseline' || command === '/restart') {
         if (this.active.has(id) || !['review','completed','failed','cancelled','interrupted'].includes(task.status)) { reply('请等任务结束或停止后再更换版本。'); return; }
-        if (!this.store.workspace(id) || !this.config.projects[task.project]?.worktree) { reply('这个任务没有 Git 工作副本。'); return; }
+        if (this.config.projects[task.project]?.workspaceMode === 'direct' || !this.store.workspace(id) || !this.config.projects[task.project]?.worktree) { reply('这个任务没有 Git 工作副本。'); return; }
         if (command === '/baseline') { reply('选择从哪个代码版本继续。', { kind: 'baseline', taskId: id, fresh: true }); return; }
         if (!validBaseRef(body)) { reply('请填写明确的 Git 分支或提交 SHA。'); return; }
         this.store.queueBaseline(id, body);
@@ -279,6 +279,7 @@ export class Engine {
         if (this.active.has(id) || !['review','completed','failed','cancelled','interrupted'].includes(task.status)) {reply('请等当前执行结束后再合并。');return;}
         const project=this.config.projects[task.project];
         if(task.mode!=='workspace-write'||project?.sandbox!=='workspace-write'){reply('该任务没有修改项目的授权。');return;}
+        if(project.workspaceMode==='direct'){reply('直接编辑项目的任务不提供自动 PR 合并，请在 Git 工具中处理。');return;}
         const url=body||this.store.delivery(id)?.prUrl;
         if(!url || !/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9]\d*$/.test(url)){reply('请提供要合并的 PR 链接，例如“合并 PR https://github.com/组织/仓库/pull/123”。我会先核对版本和检查结果，再请你确认。');return;}
         this.store.queueMerge(id,url);
@@ -351,7 +352,7 @@ export class Engine {
     if (i.op === 'new') {
       if (action.fields.mode !== undefined && !['read-only', 'workspace-write'].includes(String(action.fields.mode))) return fail('请选择有效的工作模式。');
       const project = this.config.projects[String(action.fields.project)];
-      if (action.fields.mode === 'workspace-write' && (project?.sandbox !== 'workspace-write' || !project?.worktree)) return fail('请先选择已授权且支持修改的代码资源。');
+      if (action.fields.mode === 'workspace-write' && (project?.sandbox !== 'workspace-write' || (!project?.worktree && project?.workspaceMode !== 'direct'))) return fail('请先选择已授权且支持修改的代码资源。');
     }
     if (i.op === 'publish') {
       if (!task || this.active.has(task.id) || !['review', 'completed', 'failed'].includes(task.status)
@@ -468,6 +469,9 @@ export class Engine {
       if (!task.nextAction || task.nextAction === 'execute') this.store.event(task.id,'runtime_model',JSON.stringify({model:null,effort:null}));
       const project = task.project === CONVERSATION ? conversationProject(this.config) : this.config.projects[task.project];
       if (!project) throw new Error('项目配置已移除。');
+      const directDirectory = this.store.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='direct_directory' ORDER BY seq LIMIT 1").get(task.id) as {body:string}|undefined;
+      if ((project.workspaceMode === 'direct' && this.store.workspace(task.id)) || (directDirectory && (project.workspaceMode !== 'direct' || project.path !== directDirectory.body))) throw Error('任务执行位置已变化，请新建任务；原任务改动保留。');
+      if (project.workspaceMode === 'direct' && task.nextAction && task.nextAction !== 'execute') throw Error('直接编辑项目不支持独立副本的交付或版本操作。');
       const previousReport = this.store.delivery(task.id);
       let proposed: {project: string; grantKey: string} | undefined;
       let publication: PublicationTarget | undefined;
@@ -478,7 +482,7 @@ export class Engine {
       const resourceGrants = Object.fromEntries(Object.entries(this.config.projects).map(([id,p]) => [id,projectGrantKey(p)]));
       const hooks: RunHooks = {
         ...(task.nextAction==='merge'?{approveOperation:proposal=>{abort.signal.throwIfAborted();approveOperation(this.store,task.id,proposal);}}:{}),
-        ...(task.project !== CONVERSATION && task.mode === 'workspace-write' && project.sandbox === 'workspace-write'
+        ...(task.project !== CONVERSATION && task.mode === 'workspace-write' && project.sandbox === 'workspace-write' && project.workspaceMode !== 'direct'
           && (!task.nextAction || task.nextAction === 'execute') ? {proposeMerge:(request:MergeProposal)=>{
             abort.signal.throwIfAborted();merge=parseMergeProposal(request);
           }} : {}),
@@ -486,11 +490,11 @@ export class Engine {
           abort.signal.throwIfAborted();
           this.store.event(task.id,'runtime_model',JSON.stringify(model));
         },
-        ...(task.project !== CONVERSATION && task.mode === 'workspace-write' && project.sandbox === 'workspace-write' && project.worktree
+        ...(task.project !== CONVERSATION && task.mode === 'workspace-write' && project.sandbox === 'workspace-write' && project.workspaceMode !== 'direct' && project.worktree
           && (!task.nextAction || task.nextAction === 'execute') ? {proposeBaseline:(request:BaselineProposal)=>{
             abort.signal.throwIfAborted();baseline=parseBaselineProposal(request);
           }} : {}),
-        ...(task.project !== CONVERSATION && task.mode === 'workspace-write' && project.sandbox === 'workspace-write'
+        ...(task.project !== CONVERSATION && task.mode === 'workspace-write' && project.sandbox === 'workspace-write' && project.workspaceMode !== 'direct'
           && (!task.nextAction || task.nextAction === 'execute') ? { proposePublication: (target: PublicationTarget) => {
             abort.signal.throwIfAborted();
             publication = { ...target };
@@ -609,7 +613,7 @@ export class Engine {
         this.store.set(task.id, 'review', result);
         if (automaticallySelected) {
           const selected = this.config.projects[automaticallySelected], mode = selected.naturalMode ?? 'read-only';
-          if (mode === 'workspace-write' && (selected.sandbox !== mode || !selected.worktree)) throw Error('该代码资源没有可用的修改工作目录。');
+          if (mode === 'workspace-write' && (selected.sandbox !== mode || (!selected.worktree && selected.workspaceMode !== 'direct'))) throw Error('该代码资源没有可用的修改工作目录。');
           const next = this.store.handoff(this.store.get(task.id)!,automaticallySelected,
             `${this.store.ownerRequirements(task.id)}\n\n模型判断需要使用主人已明确指定的代码资源：${selected.label ?? automaticallySelected}`,mode,task.conversation);
           this.store.event(next.id,'resource_bound',JSON.stringify({fromTaskId:task.id,resource:{kind:'code-project',id:automaticallySelected},source:'owner-named-model-proposal'}));

@@ -44,6 +44,7 @@ export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.
     if (p.naturalMode !== undefined && (!['read-only', 'workspace-write'].includes(p.naturalMode) || (p.naturalMode === 'workspace-write' && sandbox !== 'workspace-write'))) throw new Error(`Invalid naturalMode: ${name}`);
     const path = realpathSync(resolve(base, p.path));
     if (!statSync(path).isDirectory()) throw new Error(`Project is not a directory: ${name}`);
+    if (p.workspaceMode !== undefined && !['direct','isolated'].includes(p.workspaceMode)) throw Error(`Invalid workspaceMode: ${name}`);
     let worktree: Project['worktree'];
     if (p.worktree !== undefined) {
       const w = p.worktree;
@@ -60,9 +61,9 @@ export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.
         || w.baseRef !== `origin/${w.github.baseBranch}`)) throw new Error(`Invalid GitHub target: ${name}`);
       worktree = { baseRef: w.baseRef, checks: w.checks, ...(w.github ? { github: w.github } : {}) };
     }
-    if (sandbox === 'workspace-write' && !worktree) throw new Error(`workspace-write requires an isolated worktree: ${name}`);
+    if (sandbox === 'workspace-write' && !worktree && p.workspaceMode !== 'direct') throw new Error(`workspace-write requires an isolated worktree: ${name}`);
     if (p.codexProjectId !== undefined && typeof p.codexProjectId !== 'string') throw Error('Invalid Codex project identity');
-    projects[name] = { path, sandbox, ...(p.codexProjectId ? { codexProjectId: p.codexProjectId } : {}), ...(aliases ? { aliases } : {}), ...(p.naturalMode ? { naturalMode: p.naturalMode } : {}), ...(p.label ? { label: p.label.trim() } : {}), ...(p.description ? { description: p.description.trim() } : {}), ...(worktree ? { worktree } : {}) };
+    projects[name] = { path, sandbox, ...(p.codexProjectId ? { codexProjectId: p.codexProjectId } : {}), ...(aliases ? { aliases } : {}), ...(p.naturalMode ? { naturalMode: p.naturalMode } : {}), ...(p.label ? { label: p.label.trim() } : {}), ...(p.description ? { description: p.description.trim() } : {}), ...(p.workspaceMode ? { workspaceMode:p.workspaceMode } : {}), ...(worktree ? { worktree } : {}) };
   }
   if (raw.defaultProject !== undefined && (typeof raw.defaultProject !== 'string' || !Object.hasOwn(projects, raw.defaultProject))) throw new Error('defaultProject must name a configured project.');
   if (raw.groupChats !== undefined && typeof raw.groupChats !== 'boolean') throw new Error('groupChats must be boolean.');

@@ -17,7 +17,7 @@ function workspaceBase(path: string, label: string): string {
   // An unborn branch cannot seed a worktree. A detached checkout can: pin its commit.
   let commit: string;
   try { commit = git(path, ['rev-parse', '--verify', 'HEAD^{commit}']); }
-  catch { throw Error(`${label} 无法读取当前提交，请先确认仓库至少有一次提交且可以访问。`); }
+  catch { throw Error(`${label} 无法读取当前提交，请先确认仓库至少有一次提交且可以访问；也可选择“直接编辑项目”“仅查看”或“未授权”，再保存其他设置。`); }
   try { return git(path, ['symbolic-ref', '--quiet', '--short', 'HEAD']); }
   catch (error) {
     if ((error as { status?: number }).status === 1) return commit;
@@ -30,11 +30,12 @@ export class WorkspaceRegistry {
   state() {
     const text = readFileSync(this.file, 'utf8'), raw = JSON.parse(text), catalog = this.catalog();
     const projects = projectBindings(raw.projects ?? {}, catalog, dirname(this.file)).map(({codex, id, project}) => {
-      const path = codex.roots[0]; let available = false, gitRepository = false;
+      const path = codex.roots[0]; let available = false, gitRepository = false, hasCommit = false;
       try { available = statSync(path).isDirectory(); gitRepository = available && realpathSync(git(path, ['rev-parse','--show-toplevel'])) === realpathSync(path); } catch {}
+      if (gitRepository) { try { git(path, ['rev-parse','--verify','HEAD^{commit}']); hasCommit = true; } catch {} }
       const aliases = project?.aliases ?? raw.projectPreferences?.[codex.id]?.aliases ?? [];
-      return { id, codexProjectId: codex.id, label: codex.name, path, roots: codex.roots, available, gitRepository,
-        aliases, mode: project?.sandbox ?? 'none', baseRef: project?.worktree?.baseRef };
+      return { id, codexProjectId: codex.id, label: codex.name, path, roots: codex.roots, available, gitRepository, hasCommit,
+        aliases, mode: project?.sandbox === 'workspace-write' && project.workspaceMode === 'direct' ? 'direct-write' : project?.sandbox ?? 'none', baseRef: project?.worktree?.baseRef };
     });
     return { maxConcurrentTasks:taskConcurrency(raw.maxConcurrentTasks), modelSelection:modelSelection(raw.modelSelection), revision: digest(text + JSON.stringify(catalog)), projects, permissionMode: permissionMode(raw),
       runtime: readPermissionRuntime(resolve(dirname(this.file), raw.stateDir ?? '.steward')) };
@@ -51,16 +52,18 @@ export class WorkspaceRegistry {
     const raw = this.raw(), projects: Record<string, any> = Object.create(null), preferences: Record<string, any> = Object.create(null), seen = new Set<string>();
     for (const grant of input.grants) {
       const item = state.projects.find(p => p.id === grant.id);
-      if (!item || seen.has(grant.id) || !['none','read-only','workspace-write'].includes(grant.mode)) throw Error('无效的项目授权。');
+      if (!item || seen.has(grant.id) || !['none','read-only','workspace-write','direct-write'].includes(grant.mode)) throw Error('无效的项目授权。');
       seen.add(grant.id);
       const aliases = projectAliases(grant.aliases ?? item.aliases, item.label);
       preferences[item.codexProjectId] = {aliases};
       if (grant.mode === 'none') continue;
       if (!item.available) throw Error(`${item.label} 目录不可用。`);
       const previous = raw.projects?.[grant.id];
-      const p: any = { ...previous, codexProjectId: item.codexProjectId, path:item.path, label:item.label, aliases, sandbox:grant.mode, naturalMode:grant.mode };
+      const p: any = { ...previous, codexProjectId: item.codexProjectId, path:item.path, label:item.label, aliases, sandbox:grant.mode === 'direct-write' ? 'workspace-write' : grant.mode, naturalMode:grant.mode === 'direct-write' ? 'workspace-write' : grant.mode };
+      if (grant.mode === 'direct-write') p.workspaceMode = 'direct';
+      else if (grant.mode === 'workspace-write') delete p.workspaceMode;
       if (grant.mode === 'workspace-write' && !p.worktree) {
-        if (!item.gitRepository) throw Error(`${item.label} 不是 Git 仓库根目录，当前只能只读授权。`);
+        if (!item.gitRepository) throw Error(`${item.label} 不是 Git 仓库根目录，无法创建独立副本；请选择“直接编辑项目”或“仅查看”。`);
         p.worktree = {baseRef:workspaceBase(item.path,item.label),checks:[]};
       }
       projects[grant.id] = p;

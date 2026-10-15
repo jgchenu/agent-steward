@@ -23,12 +23,19 @@ test('detached workspace grants pin HEAD and can create an isolated worktree wit
  }finally{store.close();if(owner===undefined)delete process.env.STEWARD_OWNER_ID;else process.env.STEWARD_OWNER_ID=owner;rmSync(f.dir,{recursive:true,force:true})}
 });
 test('an unborn repository reports an actionable error and leaves all grants unchanged',()=>{
- const f=fixture();try{
+ const f=fixture(),owner=process.env.STEWARD_OWNER_ID;process.env.STEWARD_OWNER_ID='owner';try{
   execFileSync('git',['-C',join(f.dir,'code'),'init','-b','feature/new'],{stdio:'ignore'});
   const r=new WorkspaceRegistry(f.file,()=>f.catalog);f.catalog.push({id:'code-codex',name:'空项目',roots:[join(f.dir,'code')]});const s=r.state(),before=readFileSync(f.file,'utf8');
   assert.throws(()=>r.apply({revision:s.revision,grants:s.projects.map(p=>({id:p.id,mode:p.id==='general'?'read-only':'workspace-write'}))}),/空项目.*至少有一次提交/);
   assert.equal(readFileSync(f.file,'utf8'),before);
- }finally{rmSync(f.dir,{recursive:true,force:true})}
+  const empty=s.projects.find(p=>p.label==='空项目')!;assert.equal(empty.gitRepository,true);assert.equal(empty.hasCommit,false);
+  r.apply({revision:s.revision,maxConcurrentTasks:3,grants:s.projects.map(p=>({id:p.id,mode:'read-only'}))});
+  assert.equal(loadConfig(f.file).maxConcurrentTasks,3);assert.equal(loadConfig(f.file).projects[empty.id].sandbox,'read-only');
+  execFileSync('git',['-C',join(f.dir,'code'),'-c','user.name=Test','-c','user.email=test@example.invalid','commit','--allow-empty','-m','initial'],{stdio:'ignore'});
+  const ready=r.state();assert.equal(ready.projects.find(p=>p.id===empty.id)!.hasCommit,true);
+  r.apply({revision:ready.revision,grants:ready.projects.map(p=>({id:p.id,mode:p.id===empty.id?'workspace-write':p.mode}))});
+  assert.equal(loadConfig(f.file).projects[empty.id].worktree!.baseRef,'feature/new');
+ }finally{if(owner===undefined)delete process.env.STEWARD_OWNER_ID;else process.env.STEWARD_OWNER_ID=owner;rmSync(f.dir,{recursive:true,force:true})}
 });
 test('workspace catalog is not authorization; grants use the current branch, preserve settings, reject stale saves and retain revoked entries',()=>{
  const f=fixture(),owner=process.env.STEWARD_OWNER_ID;process.env.STEWARD_OWNER_ID='owner';

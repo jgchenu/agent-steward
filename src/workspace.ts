@@ -92,6 +92,7 @@ export class TargetBranchMoved extends Error {
   }
 }
 export function publicationBlocker(task: Task, project: Project | undefined, report: DeliveryReport | undefined, requested?: PublicationTarget): string | undefined {
+  if (project?.workspaceMode === 'direct') return '直接编辑项目的改动保留在原目录；自动创建 PR 仅支持独立副本任务。';
   if (task.mode !== 'workspace-write' || project?.sandbox !== 'workspace-write') return '本次为只读分析，没有可发布的修改权限。';
   if (!project.worktree?.github) return '项目尚未配置 GitHub 仓库和 PR 目标分支，需要先在本机配置交付目标。';
   const target = project.worktree.github;
@@ -190,7 +191,16 @@ export class WorkspaceExecutor implements Executor {
   async run(task: Task, project: Project, hooks: RunHooks, signal: AbortSignal): Promise<string> {
     if (task.nextAction === 'publish') return publish(this.store, this.config, task, project, signal, this.gh);
     const mode = task.mode ?? 'read-only';
-    if (mode === 'workspace-write' && (project.sandbox !== mode || !project.worktree)) throw new Error('项目不允许修改或未配置隔离工作目录。');
+    if (mode === 'workspace-write' && (project.sandbox !== mode || (!project.worktree && project.workspaceMode !== 'direct'))) throw new Error('项目不允许修改或未配置隔离工作目录。');
+    const direct = this.store.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='direct_directory' ORDER BY seq LIMIT 1").get(task.id) as {body:string}|undefined;
+    if (project.workspaceMode === 'direct') {
+      const path = realpathSync(project.path);
+      if (this.store.workspace(task.id) || (direct && direct.body !== path)) throw Error('任务的执行目录已变化，请新建任务；原任务的改动保留。');
+      if (!direct) this.store.event(task.id,'direct_directory',path);
+      hooks.progress(mode === 'workspace-write' ? '正在直接编辑项目，改动保存到原目录；本机代码任务依次执行。' : '正在原项目目录中查看。');
+      return this.inner.run({...task,deliveryContext:JSON.stringify({workspaceMode:'direct',path,publication:'manual',independentChecks:false})}, {...project,path,sandbox:mode}, hooks, signal);
+    }
+    if (direct) throw Error('任务原本直接编辑项目，不能切换到独立副本继续；请新建任务，原目录改动保留。');
     if (!project.worktree) return this.inner.run(task, { ...project, sandbox: 'read-only' }, hooks, signal);
     hooks.progress('正在准备独立工作目录。');
     const workspace = await prepareWorkspace(this.store, this.config.stateDir, task, project, signal);
