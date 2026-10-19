@@ -4,134 +4,126 @@ import { setTimeout as pause } from 'node:timers/promises';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { previewDeliverySetup } from '../src/delivery-preparation.js';
+import { baselinePreview } from '../src/baseline.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { buildCard, viewKey } from '../src/channels/cards.js';
-import { submission, type Submission } from '../src/submissions.js';
 import { trustedRequesters, loadConfig } from '../src/config.js';
 import { startWorkspaceConsole } from '../src/workspace-console.js';
 import { FeishuChannel } from '../src/channels/feishu.js';
 import { writePermissionRuntime } from '../src/permission-runtime.js';
-import type { Config, Executor, Incoming, View } from '../src/types.js';
+import type { Config, Executor, Incoming, View, Intent } from '../src/types.js';
 
 let seq = 0;
 const input = (text: string, more: Partial<Incoming> = {}): Incoming => ({id:'msg-'+(++seq),senderId:'ou_guest',chatId:'guest-dm',senderType:'user',chatType:'p2p',text,...more});
-const config = (): Config => ({ownerId:'ou_owner',trustedRequesters:[{openId:'ou_guest',name:'Guest'},{openId:'ou_other',name:'Other'}],stateDir:'.',codexCommand:'codex',maxRunMinutes:1,groupChats:true,projects:{secret:{path:process.cwd(),sandbox:'read-only',label:'Secret project'}}});
-async function until(fn: () => boolean) { for (let n=0;n<200;n++){if(fn())return;await pause(5)}assert.fail('condition not reached'); }
+const group = {chatType:'group' as const,chatId:'group',botMentioned:true,conversation:{anchorId:'topic',sourceId:'message',scope:'thread' as const,threadId:'thread'}};
+const config = (): Config => ({ownerId:'ou_owner',trustedRequesters:[{openId:'ou_guest',name:'Guest'},{openId:'ou_other',name:'Other'}],stateDir:'.',codexCommand:'codex',maxRunMinutes:1,groupChats:true,projects:{
+  read:{path:process.cwd(),sandbox:'read-only',label:'Read project'},write:{path:process.cwd(),sandbox:'workspace-write',workspaceMode:'direct',label:'Write project'}
+}});
+async function until(fn: () => boolean) { for (let n=0;n<300;n++){if(fn())return;await pause(5)}assert.fail('condition not reached'); }
 function setup(executor: Executor, path=':memory:') {
   const store=new Store(path), c=config(), sent:Array<{chat:string;text:string;view?:View}>=[];
-  const engine=new Engine(store,c,executor,{send:async(chat,text,_id,view)=>{sent.push({chat,text,view});}});
+  const engine=new Engine(store,c,executor,{send:async(chat,text,_id,view)=>{sent.push({chat,text,view});},context:async()=>assert.fail('delegated tasks must not load group history')});
   return {store,c,sent,engine,close:async()=>{await engine.stop();store.close()}};
 }
-function pending(store:Store): Submission {return store.db.prepare("SELECT * FROM submissions WHERE status='pending' ORDER BY rowid DESC LIMIT 1").get() as unknown as Submission;}
-function act(f:ReturnType<typeof setup>, id:string, accept=true, overrides:Record<string,unknown>={}) {
-  buildCard(f.store,f.c,'ou_owner',{kind:'submission',submissionId:id});
-  const actions=f.store.db.prepare('SELECT id,intent FROM card_actions ORDER BY rowid DESC').all() as Array<{id:string;intent:string}>;
-  const a=actions.find(x=>{const i=JSON.parse(x.intent);return i.submissionId===id&&i.op===(accept?'accept-submission':'reject-submission')})!;
-  assert.ok(a);
-  f.store.saveCardMessage('ou_owner',viewKey({kind:'submission',submissionId:id}),'card-'+id);
-  return f.engine.handleAction({id:'callback-'+(++seq),actionId:a.id,senderId:'ou_owner',chatId:'owner-dm',messageId:'card-'+id,fields:{},...overrides});
+function action(f:ReturnType<typeof setup>,taskId:string,op:Intent['op'],senderId='ou_guest',fields:Record<string,unknown>={}) {
+  const task=f.store.get(taskId)!;buildCard(f.store,f.c,task.chatId,{kind:'task',taskId});
+  const rows=f.store.db.prepare('SELECT id,intent FROM card_actions ORDER BY rowid DESC').all() as Array<{id:string;intent:string}>;
+  const found=rows.find(r=>{const i=JSON.parse(r.intent);return i.op===op&&i.taskId===taskId});assert.ok(found);
+  return {id:'callback-'+(++seq),actionId:found.id,senderId,chatId:task.chatId,messageId:'card',fields};
 }
 
-test('default remains owner-only; self identity command grants no access; bot events stay ignored',async()=>{
+test('default remains owner-only; self identity discovery grants no access; bot events ignored',async()=>{
   const f=setup({run:async()=>assert.fail('must not run')});f.c.trustedRequesters=[];
-  try {f.engine.receive(input('do work'));f.engine.receive(input('/whoami',{senderType:'app'}));await f.engine.flush();assert.equal(f.sent.length,0);
-    f.engine.receive(input('/whoami'));await f.engine.flush();assert.equal(f.sent.length,1);assert.match(f.sent[0].text,/ou_guest/);assert.equal(f.store.list().length,0);
-    assert.equal(f.store.db.prepare('SELECT count(*) AS n FROM submissions').get()!.n,0);
+  try {f.engine.receive(input('work'));f.engine.receive(input('/whoami',{senderType:'app'}));await f.engine.flush();assert.equal(f.sent.length,0);
+    f.engine.receive(input('/whoami'));await f.engine.flush();assert.match(f.sent[0].text,/ou_guest/);assert.equal(f.store.list().length,0);
   }finally{await f.close()}
 });
 
-test('allowlisted guest submits but cannot run commands, inspect owner tasks, or approve; duplicate intake and decisions are idempotent',async()=>{
-  let calls=0;const f=setup({run:async task=>{calls++;assert.equal(task.chatId,'owner-dm');assert.equal(task.requesterId,'ou_guest');assert.equal(task.projectCandidates,undefined);assert.deepEqual(JSON.parse(task.routingContext!).availableProjects,[]);return 'guest answer'}});
-  try {
-    for(const text of ['/approve hidden','/list','/status hidden','/edit secret edit','/console'])f.engine.receive(input(text));
-    assert.equal(f.store.list().length,0);assert.equal(pending(f.store),undefined);
-    const m=input('summarize this text');f.engine.receive(m);f.engine.receive(m);const s=pending(f.store);assert.ok(s);assert.equal(calls,0);
-    assert.equal(act(f,s.id,true,{senderId:'ou_guest'}).toast.type,'error');assert.equal(act(f,s.id,true,{messageId:'wrong'}).toast.type,'error');assert.equal(calls,0);
-    assert.equal(act(f,s.id).toast.type,'success');await until(()=>f.store.list()[0]?.status==='review');await f.engine.flush();
-    assert.equal(calls,1);assert.equal(submission(f.store,s.id)?.status,'completed');
-    assert.ok(f.sent.some(x=>x.chat==='guest-dm'&&x.text==='guest answer'&&x.view?.kind==='requester-reply'));
-    assert.equal(act(f,s.id).toast.type,'error');assert.equal(calls,1);
-    assert.ok(f.sent.filter(x=>x.chat==='guest-dm').every(x=>x.view?.kind==='requester-reply'));
+test('allowlisted person starts immediately, continues own DM, and receives own result without owner approval',async()=>{
+  const seen:Array<{id:string;thread:string|null}>=[];const f=setup({run:async(t,_p,h)=>{seen.push({id:t.id,thread:t.threadId});h.thread('session-'+t.id);assert.ok(t.projectCandidates?.includes('write'));return 'answer'}});
+  try {const m=input('first');f.engine.receive(m);f.engine.receive(m);await until(()=>f.store.list()[0]?.status==='review');const task=f.store.list()[0];
+    assert.equal(seen.length,1);assert.equal(task.requesterId,'ou_guest');assert.equal(task.chatId,'guest-dm');
+    f.engine.receive(input('follow up'));await until(()=>seen.length===2&&f.store.get(task.id)?.status==='review');assert.equal(seen[1].id,task.id);assert.equal(seen[1].thread,'session-'+task.id);
+    await f.engine.flush();assert.ok(f.sent.some(x=>x.chat==='guest-dm'&&x.view&&'taskId' in x.view&&x.view.taskId===task.id));assert.ok(!f.sent.some(x=>x.chat==='ou_owner'));
   }finally{await f.close()}
 });
 
-test('shared group guests never reuse another guest or owner session; only explicit mentions submit',async()=>{
-  const sessions:string[]=[];const f=setup({run:async(task,_p,hooks)=>{assert.equal(task.threadId,null);sessions.push(task.id);hooks.thread('codex-'+task.id);return 'answer'}});
-  const group={chatType:'group' as const,chatId:'group',botMentioned:true,conversation:{anchorId:'topic',sourceId:'message',scope:'thread' as const,threadId:'thread'}};
-  try {
-    const own=f.store.create('group','__conversation__','owner secret','read-only',group.conversation);f.store.thread(own.id,'private-session');f.store.set(own.id,'review');
-    f.engine.receive(input('not addressed',{...group,botMentioned:false}));assert.equal(pending(f.store),undefined);
-    for(const senderId of ['ou_guest','ou_other']){f.engine.receive(input('hello',{...group,senderId}));assert.equal(act(f,pending(f.store).id).toast.type,'success');await until(()=>sessions.length===(senderId==='ou_guest'?1:2)&&f.store.list().filter(t=>t.requesterId).every(t=>t.status==='review'));}
-    assert.equal(new Set(sessions).size,2);assert.equal(f.store.conversationTask('group',group.conversation)?.id,own.id);
-    await f.engine.flush();assert.equal(f.sent.filter(x=>x.chat==='group'&&x.text==='answer').length,2);
-    assert.ok(f.sent.filter(x=>x.chat==='group').every(x=>x.view?.conversation?.anchorId==='topic'));
+test('delegates can read and edit authorized projects but cannot upgrade read-only or access console configuration',async()=>{
+  const seen:Array<{project:string;mode:string}>=[];const f=setup({run:async t=>{seen.push({project:t.project,mode:t.mode ?? 'read-only'});return 'code result'}});
+  try {f.engine.receive(input('/edit read change'));f.engine.receive(input('/edit unknown change'));assert.equal(f.store.list().length,0);
+    f.engine.receive(input('/new read inspect'));await until(()=>seen.length===1&&f.store.list().every(t=>t.status==='review'));
+    f.engine.receive(input('/edit write change'));await until(()=>seen.length===2&&f.store.list().every(t=>t.status==='review'));assert.deepEqual(seen,[{project:'read',mode:'read-only'},{project:'write',mode:'workspace-write'}]);
+    f.c.consoleUrl='http://private-control.example/';f.engine.receive(input('/console'));await f.engine.flush();assert.ok(f.sent.some(x=>x.text.includes('由机器人主人管理')));assert.ok(!f.sent.some(x=>x.text.includes(f.c.consoleUrl!)));
   }finally{await f.close()}
 });
 
-test('approved guest continuation reuses only its own thread; owner private continuation prevents later reuse',async()=>{
-  const seen:Array<{id:string;thread:string|null;prompt:string}>=[];const f=setup({run:async(task,_p,h)=>{seen.push({id:task.id,thread:task.threadId,prompt:task.prompt});h.thread('session-'+task.id);return 'answer-'+seen.length}});
+test('same group topic separates owner and delegates, including bindings, lists and callbacks',async()=>{
+  const seen:string[]=[];const f=setup({run:async(t,_p,h)=>{assert.equal(t.threadId,null);seen.push(t.id);h.thread('s-'+t.id);return 'done'}});
   try {
-    f.engine.receive(input('first'));act(f,pending(f.store).id);await until(()=>seen.length===1&&f.store.list()[0].status==='review');const first=seen[0].id;
-    f.engine.receive(input('follow up'));act(f,pending(f.store).id);await until(()=>seen.length===2&&f.store.get(first)?.status==='review');assert.equal(seen[1].id,first);assert.equal(seen[1].thread,'session-'+first);
-    f.engine.receive(input('/continue '+first+' private owner input',{senderId:'ou_owner',chatId:'owner-dm'}));await until(()=>seen.length===3&&f.store.get(first)?.status==='review');await f.engine.flush();assert.ok(!f.sent.some(x=>x.chat==='guest-dm'&&x.text==='answer-3'));
-    f.engine.receive(input('another guest request'));act(f,pending(f.store).id);await until(()=>seen.length===4);assert.notEqual(seen[3].id,first);assert.equal(seen[3].thread,null);
+    const owner=f.store.create('group','__conversation__','owner private task','read-only',group.conversation);f.store.thread(owner.id,'owner-session');f.store.set(owner.id,'review');
+    f.engine.receive(input('not mentioned',{...group,botMentioned:false}));assert.equal(f.store.list().length,1);
+    for(const senderId of ['ou_guest','ou_other']){f.engine.receive(input('my task',{...group,senderId}));await until(()=>f.store.list().filter(t=>t.requesterId).length===(senderId==='ou_guest'?1:2)&&f.store.list().every(t=>t.status==='review'));}
+    assert.equal(new Set(seen).size,2);assert.equal(f.store.conversationTask('group',group.conversation)?.id,owner.id);
+    const guest=f.store.conversationTask('group',group.conversation,'ou_guest')!,other=f.store.conversationTask('group',group.conversation,'ou_other')!;assert.notEqual(guest.id,other.id);
+    await f.engine.flush();f.sent.length=0;
+    for(const target of [owner,other])for(const cmd of ['status','continue','cancel','model','source','publish','done'])f.engine.receive(input('/'+cmd+' '+target.id+' attempt',{...group}));
+    f.engine.receive(input('/list',{...group}));await f.engine.flush();assert.ok(!f.sent.some(x=>x.text.includes('owner private task')||x.text.includes(other.id)));
+    const list=JSON.stringify(buildCard(f.store,f.c,'group',{kind:'list',requesterId:'ou_guest',conversation:group.conversation}));assert.ok(!list.includes(owner.id));assert.ok(!list.includes(other.id));const targets=[...list.matchAll(/"actionId":"([^"]+)"/g)].map(m=>f.store.getAction(m[1])!.intent.taskId).filter(Boolean);assert.deepEqual(targets,[guest.id]);
+    const cb=action(f,other.id,'result');assert.equal(f.engine.handleAction(cb).toast.type,'error');assert.equal(f.store.get(other.id)?.status,'review');
+    assert.notEqual(viewKey({kind:'home',requesterId:'ou_guest',conversation:group.conversation}),viewKey({kind:'home',requesterId:'ou_other',conversation:group.conversation}));
   }finally{await f.close()}
 });
 
-test('business clarification replies need owner confirmation; runtime permission replies never accept guest text',async()=>{
-  let calls=0;const f=setup({run:async(_task,_p,h)=>{calls++;if(calls===1){h.askClarification!('Which city?');return 'need detail'}return 'weather'}});
-  try {
-    f.engine.receive(input('weather'));act(f,pending(f.store).id);await until(()=>f.store.list()[0]?.status==='waiting_input');await f.engine.flush();
-    assert.ok(f.sent.some(x=>x.chat==='guest-dm'&&x.text.includes('Which city?')));
-    f.engine.receive(input('Shenzhen'));assert.equal(calls,1);act(f,pending(f.store).id);await until(()=>f.store.list()[0]?.status==='review');assert.equal(calls,2);
-  }finally{await f.close()}
-  let requestId='',answer='';const g=setup({run:async(_task,_p,h)=>new Promise(resolve=>{requestId=h.request({kind:'approval',description:'private permission request',resolve:a=>{answer=a;resolve('done')}})})});
-  try {
-    g.engine.receive(input('task'));act(g,pending(g.store).id);await until(()=>!!requestId);await g.engine.flush();assert.ok(!g.sent.some(x=>x.chat==='guest-dm'&&x.text.includes('private permission')));
-    g.engine.receive(input('/approve '+requestId));assert.equal(answer,'');
-    g.engine.receive(input('/approve '+requestId,{senderId:'ou_owner',chatId:'owner-dm'}));await until(()=>answer==='accept');
-  }finally{await g.close()}
-});
-
-test('revoking a requester cancels execution and blocks pending approvals and undelivered replies',async()=>{
-  let began=false;const f=setup({run:async(_t,_p,_h,signal)=>{began=true;return new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(Error('cancelled')),{once:true}))}});
-  try {
-    f.engine.receive(input('first'));act(f,pending(f.store).id);await until(()=>began);const task=f.store.list()[0];
-    f.engine.receive(input('second'));const s=pending(f.store);buildCard(f.store,f.c,'ou_owner',{kind:'submission',submissionId:s.id});
-    f.engine.updateProjects({projects:f.c.projects,trustedRequesters:[]});assert.equal(f.store.get(task.id)?.status,'cancelled');
-    assert.equal(act(f,s.id).toast.type,'error');assert.equal(submission(f.store,s.id)?.status,'revoked');
-    const before=f.sent.filter(x=>x.chat==='guest-dm').length;
-    f.store.enqueue('guest-dm','private late reply',{kind:'requester-reply',requesterId:'ou_guest'});await f.engine.flush();assert.equal(f.sent.filter(x=>x.chat==='guest-dm').length,before);
-    f.store.enqueue('guest-dm','delayed reply',{kind:'requester-reply',requesterId:'ou_guest'});
-    f.store.db.prepare('UPDATE outbox SET due=? WHERE sent=0').run(Date.now()+60_000);
-    f.engine.updateProjects({projects:f.c.projects,trustedRequesters:[]});
-    f.engine.updateProjects({projects:f.c.projects,trustedRequesters:[{openId:'ou_guest',name:'Guest'}]});
-    f.store.db.prepare('UPDATE outbox SET due=0').run();await f.engine.flush();
-    assert.ok(!f.sent.some(x=>x.text==='delayed reply'));assert.equal(act(f,s.id).toast.type,'error');
+test('permission approvals require the initiating actor and current card; duplicate acceptance cannot run twice',async()=>{
+  let requestId='',answer='';const f=setup({run:async(_t,_p,h)=>new Promise(resolve=>{requestId=h.request({kind:'approval',description:'tool permission',resolve:a=>{answer=a;resolve('done')}})} )});
+  try {f.engine.receive(input('/edit write change',{...group}));await until(()=>!!requestId);const task=f.store.list()[0];const cb=action(f,task.id,'approve');
+    assert.equal(f.engine.handleAction({...cb,senderId:'ou_other'}).toast.type,'error');assert.equal(answer,'');
+    f.engine.receive(input('/approve '+requestId,{...group,senderId:'ou_other'}));assert.equal(answer,'');
+    assert.equal(f.engine.handleAction(cb).toast.type,'success');await until(()=>answer==='accept'&&f.store.get(task.id)?.status==='review');
+    assert.equal(f.engine.handleAction(cb).toast.type,'error');
+    assert.ok(f.store.db.prepare("SELECT body FROM events WHERE kind='response_actor'").all().some(r=>String(r.body).includes('ou_guest')));
   }finally{await f.close()}
 });
 
-test('owner cancellation notifies requester without private task details',async()=>{
-  let began=false;const f=setup({run:async(_t,_p,_h,signal)=>{began=true;return new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(Error('private failure')),{once:true}))}});
-  try {
-    f.engine.receive(input('task'));const s=pending(f.store);act(f,s.id);await until(()=>began);const task=f.store.list()[0];
-    f.engine.receive(input('/cancel '+task.id,{senderId:'ou_owner',chatId:'owner-dm'}));await f.engine.flush();
-    assert.equal(submission(f.store,s.id)?.status,'completed');
-    assert.ok(f.sent.some(x=>x.chat==='guest-dm'&&x.text==='主人已停止这次任务。'));
-    assert.ok(!f.sent.some(x=>x.chat==='guest-dm'&&x.text.includes('private failure')));
+test('business clarification resumes directly from the same requester',async()=>{
+  let calls=0;const f=setup({run:async(_t,_p,h)=>{calls++;if(calls===1){h.askClarification!('Which city?');return 'need detail'}return 'weather'}});
+  try {f.engine.receive(input('weather'));await until(()=>f.store.list()[0]?.status==='waiting_input');f.engine.receive(input('Shenzhen'));await until(()=>f.store.list()[0]?.status==='review');assert.equal(calls,2);assert.equal(f.store.list().length,1);
   }finally{await f.close()}
 });
 
-test('pending approvals persist across restart, expire, and reject safely without model execution',async()=>{
-  const dir=mkdtempSync(join(tmpdir(),'steward-requesters-')),path=join(dir,'store.sqlite');let f=setup({run:async()=>assert.fail('not approved')},path);
-  try {
-    f.engine.receive(input('pending'));const id=pending(f.store).id;await f.close();f=setup({run:async()=>assert.fail('must not execute rejected')},path);f.engine.start();
-    assert.equal(submission(f.store,id)?.status,'pending');assert.equal(act(f,id,false).toast.type,'success');assert.equal(submission(f.store,id)?.status,'rejected');
-    f.engine.receive(input('expires'));const s=pending(f.store);buildCard(f.store,f.c,'ou_owner',{kind:'submission',submissionId:s.id});f.store.db.prepare('UPDATE submissions SET expiresAt=0 WHERE id=?').run(s.id);assert.equal(act(f,s.id).toast.type,'error');
-  }finally{await f.close();rmSync(dir,{recursive:true,force:true})}
+test('revocation cancels active work and invalidates old approvals, replies and topic sessions even after re-add',async()=>{
+  let requestId='';const f=setup({run:async(_t,_p,h)=>new Promise(resolve=>{requestId=h.request({kind:'approval',description:'approve',resolve:()=>resolve('done')})})});
+  try {f.engine.receive(input('work',{...group}));await until(()=>!!requestId);const task=f.store.list()[0],cb=action(f,task.id,'approve');await f.engine.flush();
+    f.store.enqueue('group','late reply',{kind:'reply',taskId:task.id});f.store.db.prepare('UPDATE outbox SET due=? WHERE sent=0').run(Date.now()+60_000);
+    f.engine.updateProjects({projects:f.c.projects,trustedRequesters:[]});assert.equal(f.store.get(task.id)?.status,'cancelled');assert.equal(f.store.get(task.id)?.requesterRevoked,1);
+    f.engine.updateProjects({projects:f.c.projects,trustedRequesters:[{name:'Guest',openId:'ou_guest'}]});assert.equal(f.engine.handleAction(cb).toast.type,'error');
+    f.store.db.prepare('UPDATE outbox SET due=0').run();await f.engine.flush();assert.ok(!f.sent.some(x=>x.text==='late reply'));
+    f.store.enqueue('group','late after re-add',{kind:'reply',taskId:task.id});await f.engine.flush();assert.ok(!f.sent.some(x=>x.text==='late after re-add'));assert.equal(f.store.conversationTask('group',group.conversation,'ou_guest'),undefined);
+    f.engine.receive(input('/continue '+task.id+' revive',{...group}));assert.equal(f.store.get(task.id)?.status,'cancelled');
+    const next=f.store.create('group','__conversation__','fresh','read-only',group.conversation,'ou_guest');assert.equal(f.store.conversationTask('group',group.conversation,'ou_guest')?.id,next.id);
+  }finally{await f.close()}
 });
 
+test('requester ownership survives database restart and project handoff',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'steward-delegate-')),path=join(dir,'store.sqlite');let store=new Store(path);
+  try {const task=store.create('group','__conversation__','text','read-only',group.conversation,'ou_guest');store.set(task.id,'review');
+    const next=store.handoff(task,'write','code','workspace-write',group.conversation);assert.equal(next.requesterId,'ou_guest');store.close();store=new Store(path);
+    assert.equal(store.conversationTask('group',group.conversation,'ou_guest')?.id,next.id);assert.equal(store.conversationTask('group',group.conversation),undefined);
+  }finally{store.close();rmSync(dir,{recursive:true,force:true})}
+});
+
+test('delegated card navigation remains actor-bound in original DM and group deliveries',async()=>{
+  const f=setup({run:async()=>''}),channel=new FeishuChannel('fake','fake',f.store,f.c),created:any[]=[],replied:any[]=[];
+  (channel as any).client={im:{message:{create:async(p:any)=>{created.push(p);return {code:0,data:{message_id:'created-'+created.length}}},reply:async(p:any)=>{replied.push(p);return {code:0,data:{message_id:'reply-'+replied.length}}}}}};
+  try {
+    await channel.send('guest-dm','home','a',{kind:'home',requesterId:'ou_guest'});assert.equal(created[0].params.receive_id_type,'chat_id');assert.equal(created[0].data.receive_id,'guest-dm');
+    const rows=f.store.db.prepare('SELECT intent FROM card_actions').all() as Array<{intent:string}>;assert.ok(rows.length);assert.ok(rows.every(r=>JSON.parse(r.intent).requesterId==='ou_guest'));
+    const task=f.store.create('group','read','task','read-only',group.conversation,'ou_guest');await channel.send('group','result','b',{kind:'reply',taskId:task.id,requesterId:'ou_guest'});
+    await channel.send('group','result','b',{kind:'reply',taskId:task.id,requesterId:'ou_guest'});assert.equal(replied.length,1);assert.equal(replied[0].path.message_id,'topic');
+  }finally{channel.close();await f.close()}
+});
 test('trusted requester config is explicit, bounded and identity based',()=>{
   assert.deepEqual(trustedRequesters(undefined),[]);assert.deepEqual(trustedRequesters([{openId:'ou_a',name:' A '}]),[{openId:'ou_a',name:'A'}]);
   for(const value of [null,{},['ou_a'],[{openId:'*',name:'everyone'}],[{openId:'ou_a',name:''}],[{openId:'ou_a',name:'A'},{openId:'ou_a',name:'B'}],Array.from({length:51},(_,i)=>({openId:'ou_'+i,name:'A'}))])assert.throws(()=>trustedRequesters(value));
@@ -142,7 +134,7 @@ test('console saves and removes identity grants atomically; old clients preserve
   const dir=mkdtempSync(join(tmpdir(),'steward-people-console-')),file=join(dir,'config.json');const owner=process.env.STEWARD_OWNER_ID;process.env.STEWARD_OWNER_ID='ou_owner';
   writeFileSync(file,JSON.stringify({projects:{},stateDir:dir}));const app=await startWorkspaceConsole(file,0,async()=>[],async()=>[]);
   try {
-    const html=await(await fetch(app.url)).text(),token=html.match(/<script nonce="([^"]+)"/)![1];assert.ok(html.includes('谁可以向分身提交任务'));new Function(html.match(/<script nonce="[^"]+">([\s\S]*)<\/script>/)![1]);
+    const html=await(await fetch(app.url)).text(),token=html.match(/<script nonce="([^"]+)"/)![1];assert.ok(html.includes('谁可以使用分身'));new Function(html.match(/<script nonce="[^"]+">([\s\S]*)<\/script>/)![1]);
     const headers={'X-Steward-Console':token,Origin:app.url.slice(0,-1),'Content-Type':'application/json'};
     const state=async()=>await(await fetch(app.url+'api/state',{headers})).json() as any;
     const save=(body:unknown,h=headers)=>fetch(app.url+'api/grants',{method:'POST',headers:h,body:JSON.stringify(body)});
@@ -157,16 +149,28 @@ test('console saves and removes identity grants atomically; old clients preserve
   }finally{await new Promise<void>(resolve=>app.server.close(()=>resolve()));if(owner===undefined)delete process.env.STEWARD_OWNER_ID;else process.env.STEWARD_OWNER_ID=owner;rmSync(dir,{recursive:true,force:true})}
 });
 
-test('Feishu owner review uses open_id privately, while guest replies use original chat or topic with stable dedupe',async()=>{
-  const f=setup({run:async()=>assert.fail('not approved')}),channel=new FeishuChannel('fake','fake',f.store,f.c),created:any[]=[],replied:any[]=[];
-  (channel as any).client={im:{message:{create:async(p:any)=>{created.push(p);return {code:0,data:{message_id:'created-'+created.length,chat_id:'owner-dm'}}},reply:async(p:any)=>{replied.push(p);return {code:0,data:{message_id:'reply-'+replied.length}}}}}};
-  try {
-    f.engine.receive(input('work'));const s=pending(f.store);
-    await channel.send('ou_owner','pending','delivery-a',{kind:'submission',submissionId:s.id});
-    assert.equal(created[0].params.receive_id_type,'open_id');assert.equal(created[0].data.receive_id,'ou_owner');assert.equal(f.store.cardMessage('ou_owner','submission:'+s.id),'created-1');
-    await channel.send('guest-dm','answer','delivery-b',{kind:'requester-reply',requesterId:'ou_guest'});await channel.send('guest-dm','answer','delivery-b',{kind:'requester-reply',requesterId:'ou_guest'});
-    assert.equal(created.length,2);assert.equal(created[1].params.receive_id_type,'chat_id');assert.equal(created[1].data.msg_type,'post');assert.ok(!created[1].data.content.includes('actionId'));
-    await channel.send('group','group answer','delivery-c',{kind:'requester-reply',requesterId:'ou_guest',conversation:{anchorId:'source-topic',sourceId:'source',scope:'thread'}});
-    assert.equal(replied[0].path.message_id,'source-topic');assert.equal(replied[0].data.reply_in_thread,true);
-  }finally{channel.close();await f.close()}
+
+test('owner can stop delegated work even when the same group topic has an owner task',async()=>{
+  let started=false;const f=setup({run:async(_t,_p,_h,signal)=>new Promise((_,reject)=>{started=true;signal.addEventListener('abort',()=>reject(Error('stopped')),{once:true})})});
+  try {const own=f.store.create('group','__conversation__','owner task','read-only',group.conversation);f.store.set(own.id,'review');
+    f.engine.receive(input('guest task',{...group}));await until(()=>started);const task=f.store.list().find(t=>t.requesterId)!;
+    f.engine.receive(input('/cancel '+task.id,{...group,senderId:'ou_owner'}));assert.equal(f.store.get(task.id)?.status,'cancelled');assert.equal(f.store.get(own.id)?.status,'review');
+  }finally{await f.close()}
+});
+
+test('queued delegated group work cannot run when group mode is disabled',async()=>{
+  let calls=0;const f=setup({run:async()=>{calls++;return 'unexpected'}});f.c.groupChats=false;
+  try {const task=f.store.create('group','__conversation__','queued','read-only',group.conversation,'ou_guest');f.engine.start();await until(()=>f.store.get(task.id)?.status==='failed');assert.equal(calls,0);
+  }finally{await f.close()}
+});
+
+
+test('delegated baseline proposals cannot rewrite global delivery configuration',async()=>{
+  const f=setup({run:async()=>''});
+  try {const task=f.store.create('guest-dm','write','code','workspace-write',undefined,'ou_guest');
+    const proposal={ref:'origin/main',migrateChanges:false,delivery:{repository:'test/repo',baseBranch:'main',checks:[{name:'check',command:'node',args:['--version'],timeoutSeconds:10}]}};
+    await assert.rejects(previewDeliverySetup(f.c,task,f.c.projects.write,proposal,new AbortController().signal),/仅由机器人主人/);
+    await assert.rejects(baselinePreview(f.store,{...task,baselineOptions:proposal},f.c.projects.write,'origin/main',new AbortController().signal,f.c),/不能修改/);
+    assert.equal(f.c.projects.write.worktree,undefined);
+  }finally{await f.close()}
 });

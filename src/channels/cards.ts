@@ -1,5 +1,4 @@
 import { CONVERSATION } from '../conversation.js';
-import { submission, requesterAllowed } from '../submissions.js';
 import { codeSourceSummary, codeSourceDetails, configuredCheckSummary } from '../code-source.js';
 import type { Config, Intent, Status, View } from '../types.js';
 import { Store } from '../store.js';
@@ -32,12 +31,14 @@ const badge = (state: Status): Element => {
 };
 const taskHeading = (prompt: string): Element => ({ tag: 'div', text: { ...plain(prompt), text_size: 'heading-3', lines: 2 } });
 export function viewKey(view: View): string {
-  const key = 'submissionId' in view ? `submission:${view.submissionId}` : 'taskId' in view ? `${view.kind}:${view.taskId}` : view.kind;
+  const base = 'taskId' in view ? `${view.kind}:${view.taskId}` : view.kind;
+  const key = view.requesterId ? `requester:${view.requesterId}:${base}` : base;
   return view.conversation ? `group:${view.conversation.anchorId}:${key}` : key;
 }
 export function buildCard(store: Store, config: Config, chatId: string, view?: View, notice = ''): Record<string, unknown> {
   const conversation = view?.conversation ?? (view && 'taskId' in view ? store.get(view.taskId)?.conversation : undefined);
-  const action = (intent: Intent) => store.action(chatId, { ...intent, ...(conversation ? { conversation } : {}) });
+  const requesterId = view?.requesterId ?? (view && 'taskId' in view ? store.get(view.taskId)?.requesterId ?? undefined : undefined);
+  const action = (intent: Intent) => store.action(chatId, { ...intent, ...(requesterId ? {requesterId} : {}), ...(conversation ? { conversation } : {}) });
   const button = (label: string, intent: Intent, primary = false, confirm?: string): Element => ({
     tag: 'button', text: plain(label), type: primary ? 'primary_filled' : 'default', width: 'fill',
     behaviors: [{ type: 'callback', value: { actionId: action(intent) } }],
@@ -56,17 +57,6 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   });
   const projectLabel = (name: string) => name === CONVERSATION ? '通用任务' : config.projects[name]?.label ?? name;
   const homeButton = (primary = false) => button('派新任务', { op: 'home' }, primary);
-  if (view?.kind === 'submission') {
-    const s = submission(store,view.submissionId);
-    if (!s) return card('任务申请不可用','请私聊发送 /requests','grey',[]);
-    const pending = s.status === 'pending' && s.expiresAt > Date.now() && requesterAllowed(config,s.requesterId) && (!s.conversation || config.groupChats);
-    return card(pending ? '是否接受这次文字任务？' : '任务申请已处理或失效',s.name,'blue',[
-      text(`请求者：${s.name}（${s.requesterId}）\n结果接收位置：${s.conversation ? '原群话题，群成员可见' : '请求者私聊'}${s.taskId ? '\n这是原任务的补充。' : ''}`),
-      text(s.prompt),
-      caption('仅处理上面的文字，不读取群历史或附件，不开放你的代码项目。使用你的 Codex 订阅；普通结果和澄清问题会返回请求者，权限请求仍由你处理。确认有效期为 24 小时。'),
-      ...(pending ? [row(button('接受并执行',{op:'accept-submission',submissionId:s.id},true),button('拒绝',{op:'reject-submission',submissionId:s.id}))] : []),
-    ]);
-  }
   if (view?.kind === 'requester-reply') return card('Agent Steward','文字任务','blue',[text(notice)]);
   if (!view || view.kind === 'notice') return card('Agent Steward', '工作动态', 'blue', [box(notice), homeButton()]);
   if (view.kind === 'choose-project') return card('这次处理哪个项目？', '选一下就开始，不用重新填写需求', 'blue', [
@@ -78,7 +68,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     const projects = Object.entries(config.projects);
     return card('交给我来做', 'Agent Steward · 你的 Agent 分身', 'blue', [
       box('直接说需求就能开始，群里请 @我。默认无需选择空间；只有需要代码时才使用已授权的代码资源。'),
-      ...(conversation ? [caption(`自动读取${conversation.scope === 'thread' ? '当前话题' : '当前群最近讨论'}作为参考；结果会回复到对应话题，仅主人可操作。`)] : []),
+      ...(conversation ? [caption(requesterId ? '使用你提交的文字执行；结果与审批显示在原群话题，由你操作，群成员可见。' : `自动读取${conversation.scope === 'thread' ? '当前话题' : '当前群最近讨论'}作为参考；结果会回复到对应话题，仅主人可操作。`)] : []),
       form('开始处理', { op: 'new' }, [
         text('任务资源'),
         { tag: 'select_static', name: 'project', required: true, width: 'fill', initial_option: CONVERSATION,
@@ -94,8 +84,8 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     ]);
   }
   if (view.kind === 'list') {
-    const bound = conversation ? store.conversationTask(chatId, conversation) : undefined;
-    const tasks = conversation ? (bound ? [bound] : []) : store.list(chatId), page = Math.min(Math.max(0, view.page ?? 0), Math.max(0, Math.ceil(tasks.length / 3) - 1));
+    const bound = conversation ? store.conversationTask(chatId, conversation,requesterId) : undefined;
+    const tasks = conversation ? (bound ? [bound] : []) : store.list(chatId,requesterId ?? null), page = Math.min(Math.max(0, view.page ?? 0), Math.max(0, Math.ceil(tasks.length / 3) - 1));
     const items = tasks.slice(page * 3, page * 3 + 3).map(t => ({
       tag: 'interactive_container', width: 'fill', has_border: true, corner_radius: '8px',
       border_color: `${status[t.status][1]}-100`, background_style: `${status[t.status][1]}-50`,
@@ -110,7 +100,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     return card('我的任务', `最近 ${tasks.length} 项 · 第 ${page + 1} 页 · 点击任务查看详情`, 'grey', [...(items.length ? items : [box('还没有任务。从一个小任务开始吧。')]), row(...nav)]);
   }
   const task = store.get(view.taskId);
-  if (!task || task.chatId !== chatId) return card('任务不可用', '请重新打开任务列表', 'grey', [box('找不到当前会话中的任务。'), homeButton()]);
+  if (!task || task.chatId !== chatId || (requesterId && (task.requesterId !== requesterId || task.requesterRevoked))) return card('任务不可用', '请重新打开任务列表', 'grey', [box('找不到当前会话中的任务。'), homeButton()]);
   const [label, color] = status[task.status];
   const merged = task.nextAction === 'merge' ? store.mergeReceipt(task.id) : undefined;
   const contextSummary = store.context(task.id)?.summary;

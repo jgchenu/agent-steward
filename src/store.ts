@@ -31,7 +31,7 @@ export class Store {
     if (!columns.some(c => c.name === 'view')) this.db.exec('ALTER TABLE outbox ADD COLUMN view TEXT');
     const taskColumns = this.db.prepare('PRAGMA table_info(tasks)').all() as Array<{ name: string }>;
     if (!taskColumns.some(c => c.name === 'requesterId')) this.db.exec('ALTER TABLE tasks ADD COLUMN requesterId TEXT');
-    if (!taskColumns.some(c => c.name === 'submissionId')) this.db.exec('ALTER TABLE tasks ADD COLUMN submissionId TEXT');
+    if (!taskColumns.some(c => c.name === 'requesterRevoked')) this.db.exec('ALTER TABLE tasks ADD COLUMN requesterRevoked INTEGER NOT NULL DEFAULT 0');
     if (!taskColumns.some(c => c.name === 'mode')) this.db.exec("ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'read-only'");
     if (!taskColumns.some(c => c.name === 'nextAction')) this.db.exec("ALTER TABLE tasks ADD COLUMN nextAction TEXT NOT NULL DEFAULT 'execute'");
     if (!taskColumns.some(c => c.name === 'baselineRef')) this.db.exec('ALTER TABLE tasks ADD COLUMN baselineRef TEXT');
@@ -53,11 +53,6 @@ export class Store {
         scope TEXT NOT NULL, state TEXT NOT NULL, phase TEXT NOT NULL, expiresAt INTEGER NOT NULL,
         actorId TEXT, result TEXT, current INTEGER NOT NULL DEFAULT 1);
       CREATE UNIQUE INDEX IF NOT EXISTS operations_current ON operations(taskId) WHERE current=1;
-      CREATE TABLE IF NOT EXISTS submissions (
-        id TEXT PRIMARY KEY, requesterId TEXT NOT NULL, name TEXT NOT NULL, chatId TEXT NOT NULL,
-        scopeKey TEXT NOT NULL, conversation TEXT, prompt TEXT NOT NULL, status TEXT NOT NULL,
-        createdAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL, taskId TEXT);
-      CREATE INDEX IF NOT EXISTS submissions_scope ON submissions(requesterId,chatId,scopeKey,createdAt);
       PRAGMA user_version=11;`);
   }
   transaction<T>(fn: () => T): T {
@@ -68,10 +63,10 @@ export class Store {
   consume(id: string): boolean {
     return this.db.prepare('INSERT OR IGNORE INTO inbox VALUES (?)').run(id).changes === 1;
   }
-  create(chatId: string, project: string, prompt: string, mode: Task['mode'] = 'read-only', conversation?: Conversation): Task {
+  create(chatId: string, project: string, prompt: string, mode: Task['mode'] = 'read-only', conversation?: Conversation, requesterId?: string): Task {
     const id = randomUUID().slice(0, 8), now = new Date().toISOString();
-    this.db.prepare('INSERT INTO tasks(id,chatId,project,prompt,status,createdAt,updatedAt,mode) VALUES (?,?,?,?,?,?,?,?)')
-      .run(id, chatId, project, prompt, 'queued', now, now, mode);
+    this.db.prepare('INSERT INTO tasks(id,chatId,project,prompt,status,createdAt,updatedAt,mode,requesterId) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(id, chatId, project, prompt, 'queued', now, now, mode, requesterId ?? null);
     // Enrollment is task-based; resources are optional. Existing tasks retain their runtime.
     if (this.pilotIntake) this.db.prepare("UPDATE tasks SET orchestration='langgraph-v1',orchestrationRunId=? WHERE id=?").run(randomUUID(), id);
     if (conversation) this.saveConversation(id, conversation);
@@ -82,8 +77,8 @@ export class Store {
     const task = this.db.prepare('SELECT * FROM tasks WHERE id=?').get(id) as unknown as Task | undefined;
     return task && this.hydrate(task);
   }
-  list(chatId?: string): Task[] {
-    return ((chatId ? this.db.prepare('SELECT * FROM tasks WHERE chatId=? ORDER BY createdAt DESC LIMIT 20').all(chatId)
+  list(chatId?: string, requesterId?: string | null): Task[] {
+    return ((chatId && requesterId !== undefined ? this.db.prepare('SELECT * FROM tasks WHERE chatId=? AND requesterId IS ? ORDER BY createdAt DESC LIMIT 20').all(chatId,requesterId) : chatId ? this.db.prepare('SELECT * FROM tasks WHERE chatId=? ORDER BY createdAt DESC LIMIT 20').all(chatId)
       : this.db.prepare('SELECT * FROM tasks ORDER BY createdAt').all()) as unknown as Task[]).map(task => this.hydrate(task));
   }
   private hydrate(task: Task): Task {
@@ -99,10 +94,13 @@ export class Store {
   }
   bindConversation(chatId: string, key: string, taskId: string): void {
     // Late deliveries from a previous execution must still lead to the topic's current task.
-    const anchor = this.get(taskId)?.conversation?.anchorId;
-    const active = anchor && this.db.prepare('SELECT taskId FROM conversation_bindings WHERE chatId=? AND messageKey=?').get(chatId, anchor) as { taskId: string } | undefined;
+    if (this.get(taskId)?.requesterRevoked) return;
+    const task = this.get(taskId), requesterId = task?.requesterId ?? undefined;
+    const scoped = (value: string) => requesterId ? `requester:${requesterId}:${value}` : value;
+    const anchor = task?.conversation?.anchorId;
+    const active = anchor && this.db.prepare('SELECT taskId FROM conversation_bindings WHERE chatId=? AND messageKey=?').get(chatId, scoped(anchor)) as { taskId: string } | undefined;
     if (active) taskId = active.taskId;
-    this.db.prepare('INSERT OR IGNORE INTO conversation_bindings VALUES (?,?,?)').run(chatId, key, taskId);
+    this.db.prepare('INSERT OR IGNORE INTO conversation_bindings VALUES (?,?,?)').run(chatId, scoped(key), taskId);
   }
   originalPrompt(id: string): string {
     return (this.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='created' ORDER BY seq LIMIT 1").get(id) as {body:string} | undefined)?.body ?? this.get(id)!.prompt;
@@ -129,7 +127,7 @@ export class Store {
   }
   handoff(from: Task, project: string, prompt: string, mode: Task['mode'], conversation?: Conversation): Task {
     if (!['review','completed','failed','cancelled','interrupted'].includes(this.get(from.id)?.status ?? '')) throw Error('当前任务仍在执行，无法切换项目。');
-    const next = this.create(from.chatId, project, prompt, mode, conversation);
+    const next = this.create(from.chatId, project, prompt, mode, conversation,from.requesterId ?? undefined);
     this.clearProjectSelection(from.id);
     this.db.prepare('UPDATE conversation_bindings SET taskId=? WHERE chatId=? AND taskId=?').run(next.id, from.chatId, from.id);
     this.expire(from.id);
@@ -140,15 +138,16 @@ export class Store {
     if (pending.length) this.event(from.id,'followups_consumed',`Transferred to ${next.id}`);
     return next;
   }
-  conversationTask(chatId: string, conversation?: Conversation): Task | undefined {
+  conversationTask(chatId: string, conversation?: Conversation, requesterId?: string): Task | undefined {
     if (!conversation) return;
     const tasks = new Set<string>();
     for (const key of [conversation.anchorId, conversation.threadId, conversation.parentId]) {
       if (!key) continue;
-      const row = this.db.prepare('SELECT taskId FROM conversation_bindings WHERE chatId=? AND messageKey=?').get(chatId, key) as { taskId: string } | undefined;
+      const row = this.db.prepare('SELECT taskId FROM conversation_bindings WHERE chatId=? AND messageKey=?').get(chatId, requesterId ? `requester:${requesterId}:${key}` : key) as { taskId: string } | undefined;
       if (row) tasks.add(row.taskId);
     }
-    return tasks.size === 1 ? this.get([...tasks][0]) : undefined;
+    const task = tasks.size === 1 ? this.get([...tasks][0]) : undefined;
+    return task?.requesterRevoked ? undefined : task;
   }
   isOwnMessage(chatId: string, messageId?: string): boolean {
     return !!messageId && !!this.db.prepare("SELECT 1 FROM card_messages WHERE chatId=? AND messageId=? AND viewKey NOT LIKE 'reaction:%' LIMIT 1").get(chatId, messageId);
@@ -181,7 +180,7 @@ export class Store {
     }
     this.clearProjectSelection(id);
     this.db.prepare('DELETE FROM context_snapshots WHERE taskId=?').run(id);
-    this.db.prepare("UPDATE tasks SET prompt=?, result=NULL, nextAction='execute', baselineOptions=NULL, submissionId=NULL WHERE id=?").run(prompt, id);
+    this.db.prepare("UPDATE tasks SET prompt=?, result=NULL, nextAction='execute', baselineOptions=NULL WHERE id=?").run(prompt, id);
     const report = this.delivery(id);
     if (report) this.saveDelivery(id, { ...report, ready: false });
     this.set(id, 'queued');
@@ -336,7 +335,10 @@ export class Store {
     });
   }
   enqueue(chatId: string, text: string, view?: View): void {
-    if (view && 'taskId' in view && !view.conversation) view = { ...view, conversation: this.get(view.taskId)?.conversation };
+    if (view && 'taskId' in view) {
+      const task = this.get(view.taskId);
+      view = {...view,conversation:view.conversation ?? task?.conversation,requesterId:task?.requesterId ?? view.requesterId};
+    }
     if (view) {
       this.db.prepare('INSERT INTO outbox(id,chatId,text,view) VALUES (?,?,?,?)')
         .run(randomUUID(), chatId, text, JSON.stringify(view));

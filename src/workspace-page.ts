@@ -8,10 +8,10 @@ export function workspacePage(nonce: string): string { return `<!doctype html>
 <section class="permission-panel" aria-labelledby="model-title"><div class="permission-heading"><div><h2 id="model-title">用什么模型思考？</h2><p>使用你已登录的 Codex 订阅。</p></div><span class="pill">Codex</span></div>
 <div class="model-controls"><label>模型<select id="model" aria-label="推理模型" disabled></select></label><label>思考强度<select id="effort" aria-label="思考强度" disabled></select></label></div>
 <p id="model-runtime" role="status"></p><p id="model-status" role="status">正在读取 Codex 模型…</p><button id="retry-models" hidden>重新读取模型</button><p class="fine">保存后从下一轮开始使用，新任务和继续对话都适用；当前执行不受影响。强度越高通常等待越久。可用性以 Codex 账号为准。</p></section>
-<section class="permission-panel" aria-labelledby="requesters-title"><div class="permission-heading"><div><h2 id="requesters-title">谁可以向分身提交任务？</h2><p>默认仅你自己。添加的人可以私聊或在群中 @机器人提交文字任务，每次由你确认后执行。</p></div><span class="pill">你来审批</span></div>
+<section class="permission-panel" aria-labelledby="requesters-title"><div class="permission-heading"><div><h2 id="requesters-title">谁可以使用分身？</h2><p>默认仅你自己。添加可信人员后，对方可直接派活、使用已授权的代码项目，并审批自己任务的操作，无需你逐次确认。</p></div><span class="pill">指定人员直接使用</span></div>
 <div id="requesters"></div><button id="add-requester" type="button">添加人员</button><p id="requesters-runtime" class="runtime-status" role="status" aria-live="polite"></p>
 <p class="fine">请对方先私聊此机器人发送 /whoami，把返回的 open_id 发给你。备注仅用于识别，授权按此机器人的 open_id 匹配。最多 50 人。</p>
-<p class="fine">审批私聊发给你，也可私聊机器人发送 /requests 查看。结果返回请求者原会话；群话题结果对群成员可见。暂仅处理文字，不读取附件、群历史或你的代码项目；对方不能操作你的任务和权限。保存删除人员后，待处理申请失效，相关执行停止。</p></section>
+<p class="fine">支持私聊和群内 @机器人。结果与审批回到发起人的原会话；群话题内容对群成员可见。对方只能操作自己的任务，不能修改控制台授权。代码读写、工作目录和工具权限沿用你的设置；PR 发布、合并等仍需发起人确认，仓库保护规则不变。暂不自动读取群历史或附件。删除人员并保存后，相关执行停止，旧审批失效。</p></section>
 <section class="permission-panel" aria-labelledby="concurrency-title"><div class="permission-heading"><div><h2 id="concurrency-title">同时处理几个任务？</h2><p>不同话题的普通问答可以与代码任务同时处理。</p></div><span class="pill">最多 4 个</span></div>
 <div class="model-controls"><label for="concurrency">并行任务数<select id="concurrency" aria-label="并行任务数"><option value="1">1 个 · 串行</option><option value="2">2 个 · 默认</option><option value="3">3 个</option><option value="4">4 个</option></select></label></div>
 <p id="concurrency-runtime" class="runtime-status" role="status" aria-live="polite"></p><p class="fine">保存后自动生效，无需重启。调低上限不会中断正在处理的任务；空出名额后再接下一项。代码任务、同一话题与同一会话始终串行。</p></section>
@@ -64,7 +64,7 @@ remove.type='button';remove.setAttribute('aria-label','删除人员 '+(index+1))
 if(!data.trustedRequesters?.length)by('requesters').append(el('p','未添加其他人员，仅你本人可以派发任务。','fine'));by('add-requester').disabled=(data.trustedRequesters?.length||0)>=50;renderRequesterStatus()}
 function renderRequesterStatus(){const saved=JSON.parse(savedRequestersKey),draft=JSON.stringify(data.trustedRequesters||[])!==savedRequestersKey,r=data.runtime;
 const applied=r?.connected&&JSON.stringify([...(r.trustedRequesterIds||[])].sort())===JSON.stringify(saved.map(p=>p.openId).sort())&&Array.isArray(r.trustedRequesterIds);
-by('requesters-runtime').textContent=(draft?'未保存。 ':'')+(applied?'已生效：':'已保存，等待应用：')+(saved.length?'允许 '+saved.length+' 人提交文字任务，每次需你确认。':'仅你本人。')}
+by('requesters-runtime').textContent=(draft?'未保存。 ':'')+(applied?'已生效：':'已保存，等待应用：')+(saved.length?'允许 '+saved.length+' 人直接派活、访问已授权项目并审批自己的任务。':'仅你本人。')}
 by('add-requester').onclick=()=>{data.trustedRequesters??=[];data.trustedRequesters.push({name:'',openId:''});dirty=true;renderRequesters();summary();by('requesters').querySelector('div:last-child input')?.focus()};
 let models=[];const effortLabels={none:'不额外思考',minimal:'最低',low:'轻量',medium:'适中',high:'深入',xhigh:'更深入',max:'最高',ultra:'极高'};
 function renderModels(){const select=by('model'),effort=by('effort'),current=data.modelSelection;select.replaceChildren();effort.replaceChildren();

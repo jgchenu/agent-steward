@@ -18,7 +18,7 @@ export interface Attachment {
 export type PermissionMode = 'ask' | 'auto' | 'sandbox-auto' | 'full-access';
 export interface ResourceBinding { kind: 'code-project'; id: string }
 export interface Task {
-  requesterId?: string | null; submissionId?: string | null;
+  requesterId?: string | null; requesterRevoked?: number;
   resources?: ResourceBinding[];
   orchestration?: 'legacy' | 'langgraph-v1'; orchestrationRunId?: string | null;
   baselineOptions?: BaselineOptions | null;
@@ -102,7 +102,7 @@ export interface CommitAuthor { name: string; email: string }
 export interface PublicationTarget { repository: string; baseBranch: string }
 export interface BaselineOptions { migrateChanges: boolean; delivery: (PublicationTarget & {checks: Check[]}) | null }
 export interface BaselineProposal extends BaselineOptions { ref: string }
-export type View = ({ kind: 'submission'; submissionId: string } | { kind: 'requester-reply' } | { kind: 'evidence'; taskId: string; evidenceIds: string[] } | { kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string; fromTaskId?: string; revision?: string } | { kind: 'list'; page?: number }
+export type View = ({ kind: 'requester-reply' } | { kind: 'evidence'; taskId: string; evidenceIds: string[] } | { kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string; fromTaskId?: string; revision?: string } | { kind: 'list'; page?: number }
   | { kind: 'reply' | 'task' | 'followup' | 'result' | 'delivery' | 'publication' | 'baseline' | 'source'; taskId: string; page?: number })
   & { requesterId?: string; targetMessageId?: string; fresh?: boolean; conversation?: Conversation; draft?: string; publicationTarget?: PublicationTarget };
 export interface CardAction {
@@ -110,8 +110,8 @@ export interface CardAction {
   fields: Record<string, unknown>;
 }
 export interface Intent {
-  submissionId?: string;
-  op: 'accept-submission' | 'reject-submission' | 'dispatch' | 'home' | 'list' | 'status' | 'result' | 'followup' | 'new' | 'continue' | 'done' | 'cancel' | 'approve' | 'deny' | 'answer'
+  requesterId?: string;
+  op: 'dispatch' | 'home' | 'list' | 'status' | 'result' | 'followup' | 'new' | 'continue' | 'done' | 'cancel' | 'approve' | 'deny' | 'answer'
     | 'delivery' | 'publication' | 'publish' | 'baseline' | 'restart' | 'source';
   conversation?: Conversation; project?: string; prompt?: string; selectionKey?: string; taskId?: string; requestId?: string; revision?: string; page?: number; publicationKey?: string;
 }

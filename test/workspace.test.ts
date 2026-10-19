@@ -235,25 +235,31 @@ test('publication rejects wrong origin, changed target, and closed PR before pus
     assert.equal(pushes, 0);
   } finally { f.close(); }
 });
-test('write form cannot escalate read-only project; publication confirmation is owner-bound and single-use', async () => {
+test('write form respects project grants; owner and delegate publication confirmations are actor-bound and single-use', async () => {
+  for (const actorId of ['owner','ou_guest']) {
   const f = fixture(); let runs = 0;
+  const requesterId = actorId === 'owner' ? undefined : actorId;
+  f.config.trustedRequesters=[{openId:'ou_guest',name:'Guest'},{openId:'ou_other',name:'Other'}];
+  if(requesterId){f.task.requesterId=requesterId;f.store.db.prepare('UPDATE tasks SET requesterId=? WHERE id=?').run(requesterId,f.task.id);}
   const engine = new Engine(f.store, f.config, { run: async t => { runs++; assert.equal(t.nextAction, 'publish'); return 'published'; } }, { send: async () => {} });
   try {
     await f.executor.run(f.task, f.project, hooks, signal()); f.store.set(f.task.id, 'review', 'done');
     const t = f.store.get(f.task.id)!;
     const card = JSON.stringify(buildCard(f.store, f.config, 'dm', { kind: 'publication', taskId: t.id }));
     assert.match(card, /test\/repo/); assert.match(card, /content check: passed/);
-    const action = { id: 'click', senderId: 'owner', chatId: 'dm', messageId: 'message', fields: {},
-      actionId: f.store.action('dm', { op: 'publish', taskId: t.id, revision: t.updatedAt, publicationKey: publicationKey(t, f.project, f.store.delivery(t.id)!) }) };
+    const action = { id: 'click', senderId: actorId, chatId: 'dm', messageId: 'message', fields: {},
+      actionId: f.store.action('dm', { op: 'publish', requesterId, taskId: t.id, revision: t.updatedAt, publicationKey: publicationKey(t, f.project, f.store.delivery(t.id)!) }) };
     assert.equal(engine.handleAction({ ...action, senderId: 'stranger' }).toast.type, 'error');
+    assert.equal(engine.handleAction({ ...action, senderId: 'ou_other' }).toast.type, 'error');
     assert.equal(engine.handleAction(action).toast.type, 'success');
     assert.equal(engine.handleAction({ ...action, id: 'again' }).toast.type, 'error');
     await new Promise(r => setTimeout(r, 20)); assert.equal(runs, 1);
     f.project.sandbox = 'read-only';
-    const form = { ...action, id: 'form', actionId: f.store.action('dm', { op: 'new' }), fields: { body: 'work', project: 'test', mode: 'workspace-write' } };
+    const form = { ...action, id: 'form', actionId: f.store.action('dm', { op: 'new', requesterId }), fields: { body: 'work', project: 'test', mode: 'workspace-write' } };
     assert.equal(engine.handleAction(form).toast.type, 'error');
     assert.equal(f.store.list().length, 1);
   } finally { await engine.stop(); f.close(); }
+  }
 });
 test('schema v2 migration preserves old tasks and makes them explicitly read-only', () => {
   const root = mkdtempSync(join(tmpdir(), 'steward-migrate-')), path = join(root, 'state.sqlite');
