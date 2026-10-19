@@ -5,6 +5,18 @@ import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { Config, Project } from './types.js';
 
+export function trustedRequesters(value: unknown): NonNullable<Config['trustedRequesters']> {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 50) throw Error('可提交任务的人员最多 50 位。');
+  const seen = new Set<string>();
+  return value.map(p => {
+    if (!p || typeof p.openId !== 'string' || !/^ou_[a-zA-Z0-9_-]{1,128}$/.test(p.openId)
+      || typeof p.name !== 'string' || !p.name.trim() || p.name.length > 40 || /[\r\n\0]/.test(p.name)
+      || seen.has(p.openId)) throw Error('请填写不重复的飞书 open_id 和 1–40 字的备注名称。');
+    seen.add(p.openId); return {openId:p.openId,name:p.name.trim()};
+  });
+}
+
 export function taskConcurrency(value: unknown): number {
   if (value === undefined) return 2;
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 4) throw Error('maxConcurrentTasks 必须是 1–4 之间的整数。');
@@ -74,6 +86,6 @@ export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.
   if (!Number.isFinite(maxRunMinutes) || maxRunMinutes < 1 || maxRunMinutes > 1440) {
     throw new Error('maxRunMinutes must be between 1 and 1440.');
   }
-  return { configFile: resolve(file), ownerId, projects, modelSelection:modelSelection(raw.modelSelection), ...(catalog ? {codexProjects:catalog} : {}), maxRunMinutes, maxConcurrentTasks, permissionMode: permissionMode(raw), approvalsReviewer: raw.approvalsReviewer ?? 'user', defaultProject: raw.defaultProject, groupChats: raw.groupChats ?? false, stateDir: resolve(base, raw.stateDir ?? '.steward'),
+  return { configFile: resolve(file), ownerId, trustedRequesters:trustedRequesters(raw.trustedRequesters), projects, modelSelection:modelSelection(raw.modelSelection), ...(catalog ? {codexProjects:catalog} : {}), maxRunMinutes, maxConcurrentTasks, permissionMode: permissionMode(raw), approvalsReviewer: raw.approvalsReviewer ?? 'user', defaultProject: raw.defaultProject, groupChats: raw.groupChats ?? false, stateDir: resolve(base, raw.stateDir ?? '.steward'),
     codexCommand: raw.codexCommand ?? 'codex', langGraphPilot: raw.langGraphPilot ?? true };
 }

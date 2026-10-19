@@ -30,6 +30,8 @@ export class Store {
     const columns = this.db.prepare('PRAGMA table_info(outbox)').all() as Array<{ name: string }>;
     if (!columns.some(c => c.name === 'view')) this.db.exec('ALTER TABLE outbox ADD COLUMN view TEXT');
     const taskColumns = this.db.prepare('PRAGMA table_info(tasks)').all() as Array<{ name: string }>;
+    if (!taskColumns.some(c => c.name === 'requesterId')) this.db.exec('ALTER TABLE tasks ADD COLUMN requesterId TEXT');
+    if (!taskColumns.some(c => c.name === 'submissionId')) this.db.exec('ALTER TABLE tasks ADD COLUMN submissionId TEXT');
     if (!taskColumns.some(c => c.name === 'mode')) this.db.exec("ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'read-only'");
     if (!taskColumns.some(c => c.name === 'nextAction')) this.db.exec("ALTER TABLE tasks ADD COLUMN nextAction TEXT NOT NULL DEFAULT 'execute'");
     if (!taskColumns.some(c => c.name === 'baselineRef')) this.db.exec('ALTER TABLE tasks ADD COLUMN baselineRef TEXT');
@@ -51,7 +53,12 @@ export class Store {
         scope TEXT NOT NULL, state TEXT NOT NULL, phase TEXT NOT NULL, expiresAt INTEGER NOT NULL,
         actorId TEXT, result TEXT, current INTEGER NOT NULL DEFAULT 1);
       CREATE UNIQUE INDEX IF NOT EXISTS operations_current ON operations(taskId) WHERE current=1;
-      PRAGMA user_version=10;`);
+      CREATE TABLE IF NOT EXISTS submissions (
+        id TEXT PRIMARY KEY, requesterId TEXT NOT NULL, name TEXT NOT NULL, chatId TEXT NOT NULL,
+        scopeKey TEXT NOT NULL, conversation TEXT, prompt TEXT NOT NULL, status TEXT NOT NULL,
+        createdAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL, taskId TEXT);
+      CREATE INDEX IF NOT EXISTS submissions_scope ON submissions(requesterId,chatId,scopeKey,createdAt);
+      PRAGMA user_version=11;`);
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -174,7 +181,7 @@ export class Store {
     }
     this.clearProjectSelection(id);
     this.db.prepare('DELETE FROM context_snapshots WHERE taskId=?').run(id);
-    this.db.prepare("UPDATE tasks SET prompt=?, result=NULL, nextAction='execute', baselineOptions=NULL WHERE id=?").run(prompt, id);
+    this.db.prepare("UPDATE tasks SET prompt=?, result=NULL, nextAction='execute', baselineOptions=NULL, submissionId=NULL WHERE id=?").run(prompt, id);
     const report = this.delivery(id);
     if (report) this.saveDelivery(id, { ...report, ready: false });
     this.set(id, 'queued');

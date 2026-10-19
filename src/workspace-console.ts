@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync, renameSync, existsSync, realpathSync, stat
 import { resolve, dirname } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { loadConfig, projectAliases, taskConcurrency } from './config.js';
+import { loadConfig, projectAliases, taskConcurrency, trustedRequesters } from './config.js';
 import { workspacePage } from './workspace-page.js';
 
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -37,11 +37,12 @@ export class WorkspaceRegistry {
       return { id, codexProjectId: codex.id, label: codex.name, path, roots: codex.roots, available, gitRepository, hasCommit,
         aliases, mode: project?.sandbox === 'workspace-write' && project.workspaceMode === 'direct' ? 'direct-write' : project?.sandbox ?? 'none', baseRef: project?.worktree?.baseRef };
     });
-    return { maxConcurrentTasks:taskConcurrency(raw.maxConcurrentTasks), modelSelection:modelSelection(raw.modelSelection), revision: digest(text + JSON.stringify(catalog)), projects, permissionMode: permissionMode(raw),
+    return { trustedRequesters:trustedRequesters(raw.trustedRequesters), maxConcurrentTasks:taskConcurrency(raw.maxConcurrentTasks), modelSelection:modelSelection(raw.modelSelection), revision: digest(text + JSON.stringify(catalog)), projects, permissionMode: permissionMode(raw),
       runtime: readPermissionRuntime(resolve(dirname(this.file), raw.stateDir ?? '.steward')) };
   }
-  apply(input: { revision: string; grants: Array<{id: string; mode: string; aliases?: string[]}>; permissionMode?: PermissionMode; confirmFullAccess?: boolean; maxConcurrentTasks?: number; modelSelection?: ModelSelection }, models: CodexModel[] = []) {
+  apply(input: { revision: string; trustedRequesters?: unknown; grants: Array<{id: string; mode: string; aliases?: string[]}>; permissionMode?: PermissionMode; confirmFullAccess?: boolean; maxConcurrentTasks?: number; modelSelection?: ModelSelection }, models: CodexModel[] = []) {
     const state = this.state();
+    const people = trustedRequesters(input.trustedRequesters === undefined ? state.trustedRequesters : input.trustedRequesters);
     const concurrency = taskConcurrency(input.maxConcurrentTasks === undefined ? state.maxConcurrentTasks : input.maxConcurrentTasks);
     const selected = modelSelection(input.modelSelection);
     if (selected && JSON.stringify(selected) !== JSON.stringify(state.modelSelection)) validateSelection(selected, models);
@@ -68,7 +69,7 @@ export class WorkspaceRegistry {
       }
       projects[grant.id] = p;
     }
-    const next = {...raw, maxConcurrentTasks:concurrency, ...(selected ? {modelSelection:selected} : {}), ...(input.permissionMode ? {permissionMode:input.permissionMode} : {}), projects, projectPreferences:preferences};
+    const next = {...raw, trustedRequesters:people, maxConcurrentTasks:concurrency, ...(selected ? {modelSelection:selected} : {}), ...(input.permissionMode ? {permissionMode:input.permissionMode} : {}), projects, projectPreferences:preferences};
     delete next.defaultProject;
     const temp = this.file + '.' + randomUUID() + '.tmp';
     try {

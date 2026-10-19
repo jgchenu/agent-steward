@@ -8,6 +8,10 @@ export function workspacePage(nonce: string): string { return `<!doctype html>
 <section class="permission-panel" aria-labelledby="model-title"><div class="permission-heading"><div><h2 id="model-title">用什么模型思考？</h2><p>使用你已登录的 Codex 订阅。</p></div><span class="pill">Codex</span></div>
 <div class="model-controls"><label>模型<select id="model" aria-label="推理模型" disabled></select></label><label>思考强度<select id="effort" aria-label="思考强度" disabled></select></label></div>
 <p id="model-runtime" role="status"></p><p id="model-status" role="status">正在读取 Codex 模型…</p><button id="retry-models" hidden>重新读取模型</button><p class="fine">保存后从下一轮开始使用，新任务和继续对话都适用；当前执行不受影响。强度越高通常等待越久。可用性以 Codex 账号为准。</p></section>
+<section class="permission-panel" aria-labelledby="requesters-title"><div class="permission-heading"><div><h2 id="requesters-title">谁可以向分身提交任务？</h2><p>默认仅你自己。添加的人可以私聊或在群中 @机器人提交文字任务，每次由你确认后执行。</p></div><span class="pill">你来审批</span></div>
+<div id="requesters"></div><button id="add-requester" type="button">添加人员</button><p id="requesters-runtime" class="runtime-status" role="status" aria-live="polite"></p>
+<p class="fine">请对方先私聊此机器人发送 /whoami，把返回的 open_id 发给你。备注仅用于识别，授权按此机器人的 open_id 匹配。最多 50 人。</p>
+<p class="fine">审批私聊发给你，也可私聊机器人发送 /requests 查看。结果返回请求者原会话；群话题结果对群成员可见。暂仅处理文字，不读取附件、群历史或你的代码项目；对方不能操作你的任务和权限。保存删除人员后，待处理申请失效，相关执行停止。</p></section>
 <section class="permission-panel" aria-labelledby="concurrency-title"><div class="permission-heading"><div><h2 id="concurrency-title">同时处理几个任务？</h2><p>不同话题的普通问答可以与代码任务同时处理。</p></div><span class="pill">最多 4 个</span></div>
 <div class="model-controls"><label for="concurrency">并行任务数<select id="concurrency" aria-label="并行任务数"><option value="1">1 个 · 串行</option><option value="2">2 个 · 默认</option><option value="3">3 个</option><option value="4">4 个</option></select></label></div>
 <p id="concurrency-runtime" class="runtime-status" role="status" aria-live="polite"></p><p class="fine">保存后自动生效，无需重启。调低上限不会中断正在处理的任务；空出名额后再接下一项。代码任务、同一话题与同一会话始终串行。</p></section>
@@ -24,14 +28,14 @@ export function workspacePage(nonce: string): string { return `<!doctype html>
 <p class="fine">项目来源：本机 Codex。列表定期同步；设置需要保存后生效。多目录项目当前只授权显示的主目录，关联目录不自动授权。撤销权限会停止不再被允许的执行，已有文件保留。</p><div id="status" role="status" aria-live="polite"></div></main>
 <div class="footer"><div class="footer-info" id="selection"></div><button id="reload">重新加载</button><button id="save" class="primary">保存设置</button></div>
 <script nonce="${nonce}">
-const token=${JSON.stringify(nonce)};let data,dirty=false,busy=false,savedMode,savedConcurrency,savedModelKey='null',fullConfirmed=false;const modeLabels={'ask':'需要额外权限时询问','auto':'自动审查权限请求','sandbox-auto':'限定目录内执行','full-access':'不限制写入目录'};const by=id=>document.getElementById(id);
+const token=${JSON.stringify(nonce)};let data,dirty=false,busy=false,savedMode,savedConcurrency,savedModelKey='null',savedRequestersKey='[]',fullConfirmed=false;const modeLabels={'ask':'需要额外权限时询问','auto':'自动审查权限请求','sandbox-auto':'限定目录内执行','full-access':'不限制写入目录'};const by=id=>document.getElementById(id);
 function el(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n}
 async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:{'X-Steward-Console':token,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});const d=await r.json();if(!r.ok)throw Error(d.error||'请求失败');return d}
 function status(text,error=false){by('status').textContent=text;by('status').className=error?'error':''}
 function summary(){const enabled=data.projects.filter(p=>p.mode!=='none');by('selection').textContent='已授权 '+enabled.length+' 个 Codex 项目 · '+modeLabels[data.permissionMode]+(dirty?' · 未保存':' · 设置已保存');by('save').disabled=busy||!dirty||(data.permissionMode==='full-access'&&savedMode!=='full-access'&&!fullConfirmed);by('reload').disabled=busy}
 const projectModeLabels={'none':'未授权','read-only':'仅查看','direct-write':'编辑原目录','workspace-write':'编辑独立副本'};
 function render(){
-by('concurrency').value=String(data.maxConcurrentTasks);renderModels();renderPermissions();
+by('concurrency').value=String(data.maxConcurrentTasks);renderModels();renderRequesters();renderPermissions();
 const q=by('search').value.toLowerCase();by('count').textContent=data.projects.length+' 个 Codex 项目';by('projects').replaceChildren();
 for(const p of data.projects.filter(p=>(p.label+' '+p.path).toLowerCase().includes(q))){
 const canCopy=p.available&&p.gitRepository&&p.hasCommit;
@@ -49,6 +53,19 @@ select.value=p.mode;select.onchange=()=>{p.mode=select.value;dirty=true;status('
 }
 if(!by('projects').children.length)by('projects').append(el('div','没有匹配的 Codex 项目。请在 Codex 中添加项目；普通聊天仍可使用。','empty'));summary()
 }
+function renderRequesters(){by('requesters').replaceChildren();
+for(const [index,p] of (data.trustedRequesters||[]).entries()){
+const row=el('div',undefined,'model-controls'),nameLabel=el('label','备注名称'),idLabel=el('label','飞书 open_id'),name=el('input'),id=el('input'),remove=el('button','删除');
+name.type=id.type='text';name.value=p.name;id.value=p.openId;name.maxLength=40;id.maxLength=131;name.placeholder='例如：项目同事';id.placeholder='ou_…';name.setAttribute('aria-label','人员 '+(index+1)+' 的备注名称');id.setAttribute('aria-label','人员 '+(index+1)+' 的 open_id');
+for(const input of [name,id])input.style.cssText='width:100%;padding:10px;border:1px solid #dce4df;border-radius:8px';
+name.oninput=()=>{p.name=name.value;dirty=true;renderRequesterStatus();summary()};id.oninput=()=>{p.openId=id.value.trim();dirty=true;renderRequesterStatus();summary()};
+remove.type='button';remove.setAttribute('aria-label','删除人员 '+(index+1));remove.onclick=()=>{data.trustedRequesters.splice(index,1);dirty=true;renderRequesters();summary()};nameLabel.append(name);idLabel.append(id);row.append(nameLabel,idLabel,remove);by('requesters').append(row)
+}
+if(!data.trustedRequesters?.length)by('requesters').append(el('p','未添加其他人员，仅你本人可以派发任务。','fine'));by('add-requester').disabled=(data.trustedRequesters?.length||0)>=50;renderRequesterStatus()}
+function renderRequesterStatus(){const saved=JSON.parse(savedRequestersKey),draft=JSON.stringify(data.trustedRequesters||[])!==savedRequestersKey,r=data.runtime;
+const applied=r?.connected&&JSON.stringify([...(r.trustedRequesterIds||[])].sort())===JSON.stringify(saved.map(p=>p.openId).sort())&&Array.isArray(r.trustedRequesterIds);
+by('requesters-runtime').textContent=(draft?'未保存。 ':'')+(applied?'已生效：':'已保存，等待应用：')+(saved.length?'允许 '+saved.length+' 人提交文字任务，每次需你确认。':'仅你本人。')}
+by('add-requester').onclick=()=>{data.trustedRequesters??=[];data.trustedRequesters.push({name:'',openId:''});dirty=true;renderRequesters();summary();by('requesters').querySelector('div:last-child input')?.focus()};
 let models=[];const effortLabels={none:'不额外思考',minimal:'最低',low:'轻量',medium:'适中',high:'深入',xhigh:'更深入',max:'最高',ultra:'极高'};
 function renderModels(){const select=by('model'),effort=by('effort'),current=data.modelSelection;select.replaceChildren();effort.replaceChildren();
 const placeholder=el('option',current&&!models.some(m=>m.model===current.model)?current.model+'（暂不可用）':'未指定 · 沿用 Codex 会话设置');placeholder.value=current?.model||'';placeholder.disabled=true;if(!current||!models.some(m=>m.model===current.model))select.append(placeholder);
@@ -68,16 +85,16 @@ else{text=(r.maxConcurrentTasks===savedConcurrency?'已生效：最多 '+savedCo
 by('concurrency-runtime').textContent=draft+text;}
 function modelLabel(selection){return selection?selection.model+' · '+(effortLabels[selection.effort]||selection.effort):'沿用 Codex 会话设置'}
 function renderRuntime(){
-renderConcurrencyStatus();const r=data.runtime,modelDraft=JSON.stringify(data.modelSelection??null)!==savedModelKey;
+renderConcurrencyStatus();renderRequesterStatus();const r=data.runtime,modelDraft=JSON.stringify(data.modelSelection??null)!==savedModelKey;
 let modelState=!r?.connected?'已保存，等待应用（服务未连接）。':JSON.stringify(r.modelSelection??null)!==savedModelKey?'已保存，等待应用；当前生效：'+modelLabel(r.modelSelection):'已生效：'+modelLabel(r.modelSelection);
 by('model-runtime').textContent=(modelDraft?'未保存：'+modelLabel(data.modelSelection)+'。 ':'')+modelState+(r?.active?'；正在执行的任务保留本轮模型设置。':'');
 by('saved-mode').textContent=data.permissionMode!==savedMode?'未保存 · '+modeLabels[data.permissionMode]:(r?.connected&&r.permissionMode===savedMode?'已生效 · ':'已保存，等待应用 · ')+modeLabels[savedMode];
 by('runtime-status').textContent=!r?.connected?'已保存，等待应用（服务未连接）。':r.permissionMode!==savedMode?'已保存，等待应用；当前生效：'+modeLabels[r.permissionMode]:'已生效 · '+modeLabels[r.permissionMode]+(r.active?' · 执行中 '+(r.activeCount??1)+' 个任务 · 本轮最高权限：'+modeLabels[r.activeMode]:' · 当前空闲');
 }
 by('confirm-full').onchange=()=>{fullConfirmed=by('confirm-full').checked;summary()};
-setInterval(async()=>{if(!data||busy)return;try{const next=await api('/api/state');if(!dirty&&next.revision!==data.revision){data=next;savedMode=next.permissionMode;savedModelKey=JSON.stringify(next.modelSelection??null);savedConcurrency=next.maxConcurrentTasks;fullConfirmed=false;render()}else{data.runtime=next.runtime;renderRuntime()}}catch(e){by('runtime-status').textContent=e.message;status(e.message,true)}},2000);
-async function load(){try{data=await api('/api/state');savedMode=data.permissionMode;savedModelKey=JSON.stringify(data.modelSelection??null);savedConcurrency=data.maxConcurrentTasks;fullConfirmed=false;dirty=false;render();status('')}catch(e){status(e.message,true)}}
+setInterval(async()=>{if(!data||busy)return;try{const next=await api('/api/state');if(!dirty&&next.revision!==data.revision){data=next;savedMode=next.permissionMode;savedRequestersKey=JSON.stringify(next.trustedRequesters||[]);savedModelKey=JSON.stringify(next.modelSelection??null);savedConcurrency=next.maxConcurrentTasks;fullConfirmed=false;render()}else{data.runtime=next.runtime;renderRuntime()}}catch(e){by('runtime-status').textContent=e.message;status(e.message,true)}},2000);
+async function load(){try{data=await api('/api/state');savedMode=data.permissionMode;savedRequestersKey=JSON.stringify(data.trustedRequesters||[]);savedModelKey=JSON.stringify(data.modelSelection??null);savedConcurrency=data.maxConcurrentTasks;fullConfirmed=false;dirty=false;render();status('')}catch(e){status(e.message,true)}}
 by('search').oninput=()=>{if(data)render()};by('reload').onclick=load;
-by('save').onclick=async()=>{busy=true;document.querySelector('main').inert=true;summary();try{data=await api('/api/grants',{revision:data.revision,maxConcurrentTasks:data.maxConcurrentTasks,modelSelection:data.modelSelection,permissionMode:data.permissionMode,confirmFullAccess:fullConfirmed,grants:data.projects.map(p=>({id:p.id,mode:p.mode,aliases:p.aliases||[]}))});savedMode=data.permissionMode;savedModelKey=JSON.stringify(data.modelSelection??null);savedConcurrency=data.maxConcurrentTasks;fullConfirmed=false;dirty=false;status('设置已保存，生效状态见上方；你可以继续在飞书里 @分身。')}catch(e){status(e.message,true)}finally{busy=false;document.querySelector('main').inert=false;render()}};
+by('save').onclick=async()=>{busy=true;document.querySelector('main').inert=true;summary();try{data=await api('/api/grants',{revision:data.revision,trustedRequesters:data.trustedRequesters||[],maxConcurrentTasks:data.maxConcurrentTasks,modelSelection:data.modelSelection,permissionMode:data.permissionMode,confirmFullAccess:fullConfirmed,grants:data.projects.map(p=>({id:p.id,mode:p.mode,aliases:p.aliases||[]}))});savedMode=data.permissionMode;savedRequestersKey=JSON.stringify(data.trustedRequesters||[]);savedModelKey=JSON.stringify(data.modelSelection??null);savedConcurrency=data.maxConcurrentTasks;fullConfirmed=false;dirty=false;status('设置已保存，生效状态见上方；你可以继续在飞书里 @分身。')}catch(e){status(e.message,true)}finally{busy=false;document.querySelector('main').inert=false;render()}};
 window.addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue=''}});load();loadModels();
 </script></body></html>`; }

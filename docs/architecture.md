@@ -69,7 +69,7 @@ When several requests are pending, approvals take display precedence over questi
 
 ## Invariants
 
-1. Reject non-owner and non-human inputs before creating work or disclosing task state. Group mode is opt-in and requires an exact bot mention or a previously bound topic.
+1. Reject non-human inputs; non-owner inputs only enter the explicitly allowlisted text-submission path and require owner confirmation before creating work. Never disclose owner task state to requesters. Group mode is opt-in and requires an exact bot mention or a previously bound topic.
 2. Deduplicate inbound messages in the same SQLite transaction as command effects and response enqueueing. Acknowledge the event without waiting for a model or outbound API call.
 3. Use an exact project alias, never an arbitrary path supplied by a message.
 4. Respect `maxConcurrentTasks` (default 2, validated 1–4). Code/Git tasks remain mutually exclusive; the same task, topic or saved Codex session never overlaps. The state-directory instance lock prevents ordinary duplicate launches.
@@ -327,3 +327,12 @@ Project write access can explicitly set `workspaceMode: "direct"`. Omitted mode 
 WorkspaceExecutor uses the canonical original directory and the task's existing read/write sandbox. It records a durable `direct_directory` event before invoking the adapter; subsequent runs cannot move this session to another directory or a worktree. Existing isolated tasks likewise cannot resume in direct mode. Engine configuration refresh cancels affected active tasks when execution location changes. All code tasks remain globally serial, including aliases of the same directory, while unrelated general conversations can use other slots. This does not coordinate writes by external editors.
 
 Direct edits preserve unrelated files and do not initialize Git or produce an isolated delivery report. Automated baseline, publication and merge handoffs remain available only to isolated tasks. The adapter explains that edits affect the original directory and reports its actual checks without claiming Steward independent validation or automatic rollback. Tests use real temporary directories and a simulated executor; they do not establish live provider or Feishu acceptance.
+
+
+## Trusted requester submissions
+
+Schema v11 adds `submissions` and nullable `tasks.requesterId` / `tasks.submissionId`. Non-owner intake is separate from command parsing: exact configured open IDs may submit bounded text in DMs or bot-addressed groups. A persisted submission binds the immutable text, requester, source chat/topic and optional prior task. Its approval is a single-use owner-only card sent privately via open_id, with a 24-hour expiry and a `/requests` recovery entry. Identity discovery returns only the sender's own app-scoped ID. No model runs before acceptance.
+
+Approval and task mutation commit together. Execution takes place in the owner's DM for private control/permission routing, with a separate general read-only directory/session and no code-resource catalog or project proposal hook. No group history or attachments are loaded. Approved follow-ups reuse only the same requester's task in the same source scope; business answers still pass through owner confirmation. Results and business questions return as plain post messages to the recorded source; no owner task controls or raw internal errors are forwarded. Owner-private continuation clears submissionId and disables external result delivery and subsequent guest session reuse.
+
+Removing a requester invalidates pending submissions, cancels approved queued/running/waiting work, and suppresses unsent requester outbox entries. Re-adding the identity cannot revive revoked approvals. Existing in-flight network sends cannot be recalled. Credentials and inherited executor tools retain their existing boundaries; these are trusted, owner-reviewed requests, not an untrusted multi-tenant sandbox. Simulated tests cover isolated intake, requester/topic isolation, callback authorization, duplicate decisions, restart, expiry, revocation and output routing. Live dual-account Feishu acceptance is a separate deployment gate.

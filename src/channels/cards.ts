@@ -1,4 +1,5 @@
 import { CONVERSATION } from '../conversation.js';
+import { submission, requesterAllowed } from '../submissions.js';
 import { codeSourceSummary, codeSourceDetails, configuredCheckSummary } from '../code-source.js';
 import type { Config, Intent, Status, View } from '../types.js';
 import { Store } from '../store.js';
@@ -31,7 +32,7 @@ const badge = (state: Status): Element => {
 };
 const taskHeading = (prompt: string): Element => ({ tag: 'div', text: { ...plain(prompt), text_size: 'heading-3', lines: 2 } });
 export function viewKey(view: View): string {
-  const key = 'taskId' in view ? `${view.kind}:${view.taskId}` : view.kind;
+  const key = 'submissionId' in view ? `submission:${view.submissionId}` : 'taskId' in view ? `${view.kind}:${view.taskId}` : view.kind;
   return view.conversation ? `group:${view.conversation.anchorId}:${key}` : key;
 }
 export function buildCard(store: Store, config: Config, chatId: string, view?: View, notice = ''): Record<string, unknown> {
@@ -55,6 +56,18 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   });
   const projectLabel = (name: string) => name === CONVERSATION ? '通用任务' : config.projects[name]?.label ?? name;
   const homeButton = (primary = false) => button('派新任务', { op: 'home' }, primary);
+  if (view?.kind === 'submission') {
+    const s = submission(store,view.submissionId);
+    if (!s) return card('任务申请不可用','请私聊发送 /requests','grey',[]);
+    const pending = s.status === 'pending' && s.expiresAt > Date.now() && requesterAllowed(config,s.requesterId) && (!s.conversation || config.groupChats);
+    return card(pending ? '是否接受这次文字任务？' : '任务申请已处理或失效',s.name,'blue',[
+      text(`请求者：${s.name}（${s.requesterId}）\n结果接收位置：${s.conversation ? '原群话题，群成员可见' : '请求者私聊'}${s.taskId ? '\n这是原任务的补充。' : ''}`),
+      text(s.prompt),
+      caption('仅处理上面的文字，不读取群历史或附件，不开放你的代码项目。使用你的 Codex 订阅；普通结果和澄清问题会返回请求者，权限请求仍由你处理。确认有效期为 24 小时。'),
+      ...(pending ? [row(button('接受并执行',{op:'accept-submission',submissionId:s.id},true),button('拒绝',{op:'reject-submission',submissionId:s.id}))] : []),
+    ]);
+  }
+  if (view?.kind === 'requester-reply') return card('Agent Steward','文字任务','blue',[text(notice)]);
   if (!view || view.kind === 'notice') return card('Agent Steward', '工作动态', 'blue', [box(notice), homeButton()]);
   if (view.kind === 'choose-project') return card('这次处理哪个项目？', '选一下就开始，不用重新填写需求', 'blue', [
     box(view.draft), ...view.choices.filter(name => Object.hasOwn(config.projects, name)).map(project =>

@@ -18,6 +18,7 @@ export interface Attachment {
 export type PermissionMode = 'ask' | 'auto' | 'sandbox-auto' | 'full-access';
 export interface ResourceBinding { kind: 'code-project'; id: string }
 export interface Task {
+  requesterId?: string | null; submissionId?: string | null;
   resources?: ResourceBinding[];
   orchestration?: 'legacy' | 'langgraph-v1'; orchestrationRunId?: string | null;
   baselineOptions?: BaselineOptions | null;
@@ -59,6 +60,7 @@ export interface DeliveryReport {
   ready: boolean; validationKey?: string; authorizedKey?: string; prUrl?: string; publishedSha?: string; targetBefore?: string; error?: string;
 }
 export interface Config {
+  trustedRequesters?: Array<{ openId: string; name: string }>;
   /** Defaults to true. Historical name; false affects new-task intake only. */
   langGraphPilot?: boolean;
   maxConcurrentTasks?: number;
@@ -100,15 +102,16 @@ export interface CommitAuthor { name: string; email: string }
 export interface PublicationTarget { repository: string; baseBranch: string }
 export interface BaselineOptions { migrateChanges: boolean; delivery: (PublicationTarget & {checks: Check[]}) | null }
 export interface BaselineProposal extends BaselineOptions { ref: string }
-export type View = ({ kind: 'evidence'; taskId: string; evidenceIds: string[] } | { kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string; fromTaskId?: string; revision?: string } | { kind: 'list'; page?: number }
+export type View = ({ kind: 'submission'; submissionId: string } | { kind: 'requester-reply' } | { kind: 'evidence'; taskId: string; evidenceIds: string[] } | { kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string; fromTaskId?: string; revision?: string } | { kind: 'list'; page?: number }
   | { kind: 'reply' | 'task' | 'followup' | 'result' | 'delivery' | 'publication' | 'baseline' | 'source'; taskId: string; page?: number })
-  & { targetMessageId?: string; fresh?: boolean; conversation?: Conversation; draft?: string; publicationTarget?: PublicationTarget };
+  & { requesterId?: string; targetMessageId?: string; fresh?: boolean; conversation?: Conversation; draft?: string; publicationTarget?: PublicationTarget };
 export interface CardAction {
   id: string; senderId: string; chatId: string; actionId: string; messageId: string;
   fields: Record<string, unknown>;
 }
 export interface Intent {
-  op: 'dispatch' | 'home' | 'list' | 'status' | 'result' | 'followup' | 'new' | 'continue' | 'done' | 'cancel' | 'approve' | 'deny' | 'answer'
+  submissionId?: string;
+  op: 'accept-submission' | 'reject-submission' | 'dispatch' | 'home' | 'list' | 'status' | 'result' | 'followup' | 'new' | 'continue' | 'done' | 'cancel' | 'approve' | 'deny' | 'answer'
     | 'delivery' | 'publication' | 'publish' | 'baseline' | 'restart' | 'source';
   conversation?: Conversation; project?: string; prompt?: string; selectionKey?: string; taskId?: string; requestId?: string; revision?: string; page?: number; publicationKey?: string;
 }

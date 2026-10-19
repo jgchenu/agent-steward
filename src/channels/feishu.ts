@@ -122,7 +122,7 @@ export class FeishuChannel implements Channel {
       }
       return;
     }
-    if (view?.kind === 'reply' || (view?.kind === 'notice' && view.conversation)) {
+    if (view?.kind === 'reply' || view?.kind === 'requester-reply' || (view?.kind === 'notice' && view.conversation)) {
       const workspace = scopedTask && this.store.workspace(scopedTask.id);
       const roots = [workspace?.path, workspace?.source, scopedTask && this.config.projects[scopedTask.project]?.path]
         .filter((path): path is string => typeof path === 'string');
@@ -164,7 +164,7 @@ export class FeishuChannel implements Channel {
     const result = view?.conversation
       ? await this.client.im.message.reply({ path: { message_id: view.conversation.anchorId },
         data: { msg_type: 'interactive', content, uuid: deliveryId, reply_in_thread: true } })
-      : await this.client.im.message.create({ params: { receive_id_type: 'chat_id' },
+      : await this.client.im.message.create({ params: { receive_id_type: view?.kind === 'submission' && chatId === this.config.ownerId ? 'open_id' : 'chat_id' },
         data: { receive_id: chatId, msg_type: 'interactive', content, uuid: deliveryId } });
     if (result.code !== 0) throw new Error(`Feishu delivery error ${result.code}`);
     if (scopedTask?.conversation && result.data?.message_id) {

@@ -6,7 +6,7 @@
 
 Send work from Feishu. Steward keeps the task, runs Codex on your machine, brings permission requests back to you, and returns the result for review. Each person deploys their own instance with their own account, projects and data.
 
-**Status: early preview, v0.1.** A runnable owner-only vertical slice with opt-in group threads, not a production service. Codex is the only implemented real executor. Claude Code, domestic coding plans and agent-to-agent delegation are planned.
+**Status: early preview, v0.1.** A runnable owner-controlled vertical slice with opt-in group threads and allowlisted text submissions, not a production service. Codex is the only implemented real executor. Claude Code, domestic coding plans and agent-to-agent delegation are planned.
 
 ```text
 Feishu DM / local terminal
@@ -132,7 +132,7 @@ Enable `card.action.trigger` under the application’s **callback configuration*
 
 ## Group conversations
 
-With group mode enabled, owner @mentions directly start tasks using an explicitly named authorized project, or no project for ordinary conversation. Ambiguous requests get a one-click project choice without retyping. An OnIt reaction acknowledges execution before inference; results and human questions reply in the thread. Replies within a bound topic continue the same task and Codex session. Cards retain their originating topic, and results are posted as thread replies. Steward reads bounded text/rich-text/card context from that group or topic before inference; missing permissions stop execution explicitly. Other members cannot control tasks. Group results and human requests are visible to group participants.
+With group mode enabled, owner @mentions directly start tasks using an explicitly named authorized project, or no project for ordinary conversation. Ambiguous requests get a one-click project choice without retyping. An OnIt reaction acknowledges execution before inference; results and human questions reply in the thread. Replies within a bound topic continue the same task and Codex session. Cards retain their originating topic, and results are posted as thread replies. Steward reads bounded text/rich-text/card context from that group or topic before inference; missing permissions stop execution explicitly. Other members cannot control tasks. Allowlisted people can submit separate text requests for owner confirmation; see [trusted requesters](docs/requesters.md). Group results and human requests are visible to group participants.
 
 ## What survives a restart
 
@@ -151,7 +151,7 @@ For LangGraph tasks, business questions survive restarts and release the executi
 
 ## Boundaries
 
-- Only the configured owner can control this release. Set `groupChats: true` to enable owner @mentions, thread replies and group cards; other members contribute reference context but cannot dispatch or approve. See [group setup](docs/group-context.md). Bot-authored events never dispatch tasks.
+- Only the configured owner can control tasks and approvals. Optional [trusted requester submissions](docs/requesters.md) let named people submit text in DMs or addressed group messages for owner approval; they cannot run owner commands or access code projects. Set `groupChats: true` to enable owner @mentions, thread replies and group cards; unlisted members contribute reference context but cannot submit tasks or approve. See [group setup](docs/group-context.md). Bot-authored events never dispatch tasks.
 - Project aliases are configured locally; message text cannot supply an arbitrary working directory.
 - Credentials, private config and runtime state are gitignored. Never share them with a deployment template.
 - Run on a trusted machine. Steward is not a security boundary against a malicious local user or process. Codex's configured tools, MCP servers, plugins and repository instructions still matter.

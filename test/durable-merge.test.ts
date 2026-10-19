@@ -186,7 +186,7 @@ test('v9 database migration preserves tasks and process-bound runtime approvals 
     const task=store.create('dm','p','old work');store.set(task.id,'waiting_approval');
     const req=store.request(task.id,'approval','live tool approval');
     store.db.exec('DROP TABLE operations; PRAGMA user_version=9');store.close();store=new Store(path);store.recover();
-    assert.equal(store.db.prepare('PRAGMA user_version').get()!.user_version,10);
+    assert.equal(store.db.prepare('PRAGMA user_version').get()!.user_version,11);
     assert.equal(store.get(task.id)?.prompt,'old work');assert.equal(store.get(task.id)?.status,'interrupted');
     assert.equal(store.getRequest(req)?.status,'expired');
   }finally{store.close();rmSync(dir,{recursive:true,force:true});}
