@@ -122,7 +122,7 @@ export class FeishuChannel implements Channel {
       }
       return;
     }
-    if (view?.kind === 'reply' || (view?.kind === 'notice' && view.conversation)) {
+    if (view?.kind === 'reply' || view?.kind === 'requester-reply' || (view?.kind === 'notice' && view.conversation)) {
       const workspace = scopedTask && this.store.workspace(scopedTask.id);
       const roots = [workspace?.path, workspace?.source, scopedTask && this.config.projects[scopedTask.project]?.path]
         .filter((path): path is string => typeof path === 'string');

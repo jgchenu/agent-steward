@@ -1,3 +1,4 @@
+import { requesterAllowed } from './requesters.js';
 import { currentOperation, operationAttempt, draftReady, operationSucceeded, type MergeScope } from './operations.js';
 import { projectGrantKey } from './routing.js';
 import type { Config, Project, RunHooks, Task, MergeReceipt } from './types.js';
@@ -72,6 +73,7 @@ export async function mergePullRequest(store:Store,config:Config,task:Task,proje
   const projectKey=JSON.stringify(project);
   const currentGrant=()=>{
     signal.throwIfAborted();
+    if(task.requesterId && (!requesterAllowed(config,task.requesterId) || store.get(task.id)?.requesterRevoked))throw Error('发起人授权已撤销，不能合并。');
     if(JSON.stringify(config.projects[task.project])!==projectKey)throw Error('项目授权或配置已变化，请重新确认合并。');
   };
   const origin=await repoGit(cwd,['remote','get-url','origin'],signal);
@@ -84,7 +86,7 @@ export async function mergePullRequest(store:Store,config:Config,task:Task,proje
     return p;
   };
   const operation=currentOperation(store,task.id);
-  if(operation && (operation.scope.ownerId!==config.ownerId || operation.scope.project!==task.project
+  if(operation && (operation.scope.ownerId!==(task.requesterId ?? config.ownerId) || operation.scope.project!==task.project
     || operation.scope.grantKey!==projectGrantKey(project) || operation.scope.url!==url))throw Error('操作授权或目标已变化，请核验原操作后重新预览。');
   const preview=await read();
   const completed=()=>{
@@ -102,7 +104,7 @@ export async function mergePullRequest(store:Store,config:Config,task:Task,proje
   const key=JSON.stringify([url,preview.headRefName,preview.headRefOid,preview.baseRefName,preview.baseRefOid]);
   store.event(task.id,'merge_preview',key);
   const description=`确认代你合并 [PR #${number}](${url})？\n来源：${preview.headRefName} @ ${preview.headRefOid}\n目标：${preview.baseRefName} @ ${preview.baseRefOid}\n范围：${preview.changedFiles} 个文件，+${preview.additions}/-${preview.deletions}；当前提交的 ${preview.statusCheckRollup.length} 项远端检查满足合并条件（成功 ${preview.statusCheckRollup.filter(c=>c.conclusion==='SUCCESS'||c.state==='SUCCESS').length}，跳过 ${preview.statusCheckRollup.filter(c=>c.conclusion==='SKIPPED').length}，中立 ${preview.statusCheckRollup.filter(c=>c.conclusion==='NEUTRAL').length}），GitHub 显示可合并。\n方式：squash${preview.isDraft?'，先将草稿转为待审阅':''}。只合并上述提交；分支或检查变化会停止。本地工作副本不会推送或重置，也不会删除分支。目标分支的现有 CI/CD 可能随合并触发。`;
-  const scope:MergeScope={ownerId:config.ownerId,project:task.project,grantKey:projectGrantKey(project),url,
+  const scope:MergeScope={ownerId:task.requesterId ?? config.ownerId,project:task.project,grantKey:projectGrantKey(project),url,
     headRefName:preview.headRefName,headRefOid:preview.headRefOid,baseRefName:preview.baseRefName,baseRefOid:preview.baseRefOid,isDraft:preview.isDraft};
   let accepted=true;
   if(hooks.approveOperation)hooks.approveOperation({kind:'merge',scope,description});

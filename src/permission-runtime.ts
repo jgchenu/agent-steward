@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { PERMISSION_MODES } from './permissions.js';
 import type { PermissionMode } from './types.js';
-type State = { modelSelection?: ModelSelection; activeModelSelection?: ModelSelection; permissionMode: PermissionMode; activeMode?: PermissionMode; active: boolean; activeCount?: number; maxConcurrentTasks?: number };
+type State = { trustedRequesterIds?: string[]; modelSelection?: ModelSelection; activeModelSelection?: ModelSelection; permissionMode: PermissionMode; activeMode?: PermissionMode; active: boolean; activeCount?: number; maxConcurrentTasks?: number };
 const file = (stateDir: string) => join(stateDir, 'permission-runtime.json');
 export function writePermissionRuntime(stateDir: string, state: State) {
   const target = file(stateDir), temp = `${target}.${process.pid}.tmp`;
@@ -22,8 +22,9 @@ export function readPermissionRuntime(stateDir: string): (State & { connected: t
       || (s.active && !PERMISSION_MODES.includes(s.activeMode))
       || (s.activeCount !== undefined && (!Number.isInteger(s.activeCount) || s.activeCount < 0 || s.activeCount > 4 || (s.activeCount > 0) !== s.active))) throw Error('Invalid runtime');
     if (s.maxConcurrentTasks !== undefined) taskConcurrency(s.maxConcurrentTasks);
+    if (s.trustedRequesterIds !== undefined && (!Array.isArray(s.trustedRequesterIds) || s.trustedRequesterIds.length > 50 || s.trustedRequesterIds.some((id: unknown) => typeof id !== 'string'))) throw Error('Invalid requesters');
     process.kill(s.pid,0);
     const selected = modelSelection(s.modelSelection), activeSelected = modelSelection(s.activeModelSelection);
-    return {...(selected ? {modelSelection:selected} : {}), ...(s.active && activeSelected ? {activeModelSelection:activeSelected} : {}), ...(s.maxConcurrentTasks !== undefined ? {maxConcurrentTasks:s.maxConcurrentTasks} : {}), connected:true, permissionMode:s.permissionMode, active:s.active, ...(s.activeCount !== undefined ? {activeCount:s.activeCount} : {}), ...(s.active ? {activeMode:s.activeMode} : {})};
+    return {...(s.trustedRequesterIds !== undefined ? {trustedRequesterIds:s.trustedRequesterIds} : {}), ...(selected ? {modelSelection:selected} : {}), ...(s.active && activeSelected ? {activeModelSelection:activeSelected} : {}), ...(s.maxConcurrentTasks !== undefined ? {maxConcurrentTasks:s.maxConcurrentTasks} : {}), connected:true, permissionMode:s.permissionMode, active:s.active, ...(s.activeCount !== undefined ? {activeCount:s.activeCount} : {}), ...(s.active ? {activeMode:s.activeMode} : {})};
   } catch { return {connected:false}; }
 }

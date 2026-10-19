@@ -8,6 +8,7 @@ import type { Store } from './store.js';
 
 export const validBaseRef = (ref: string) => /^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,199}$/.test(ref) && !ref.includes('..');
 export async function baselinePreview(store: Store, task: Task, project: Project, ref: string, signal: AbortSignal, config?: Config) {
+  if (task.requesterId && task.baselineOptions?.delivery) throw Error('指定人员只能更换本任务的代码版本，不能修改后续任务的交付配置。');
   if (!validBaseRef(ref)) throw Error('请填写明确的 Git 分支或提交 SHA，不能使用表达式。');
   if (task.mode === 'workspace-write' && project.sandbox !== 'workspace-write') throw Error('项目修改权限已撤销，不能沿用修改模式。');
   const old = store.workspace(task.id);
@@ -25,6 +26,7 @@ export async function baselinePreview(store: Store, task: Task, project: Project
   return { old, before, ref, sha, setup, migrateChanges:options?.migrateChanges===true, configuration: JSON.stringify(project), description };
 }
 export async function restartAtBaseline(store: Store, config: Config, task: Task, preview: Awaited<ReturnType<typeof baselinePreview>>, signal: AbortSignal) {
+  if (task.requesterId && preview.setup) throw Error('指定人员不能修改后续任务的交付配置。');
   const project = config.projects[task.project];
   if (JSON.stringify(project) !== preview.configuration) throw Error('项目配置或权限已变化，请重新选择代码版本。');
   const current = await inventory(preview.old, signal);
@@ -45,7 +47,7 @@ export async function restartAtBaseline(store: Store, config: Config, task: Task
     const next=store.transaction(() => {
       store.set(task.id, 'review');
       const next = task.conversation ? store.handoff(store.get(task.id)!, task.project, prompt, task.mode, task.conversation)
-        : store.create(task.chatId, task.project, prompt, task.mode);
+        : store.create(task.chatId, task.project, prompt, task.mode,undefined,task.requesterId ?? undefined);
       if (!task.conversation) { store.expire(task.id); store.event(task.id, 'handoff_to', next.id); }
       store.saveWorkspace({ taskId: next.id, source: preview.old.source, path: join(realpathSync(resolve(config.stateDir, 'worktrees')), next.id),
         branch: `steward/${next.id}`, baseSha: preview.sha, baseRef: preview.ref, configBaseRef: nextProject.worktree!.baseRef });

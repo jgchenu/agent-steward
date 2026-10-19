@@ -30,7 +30,8 @@ New tasks use LangGraph by default. An explicit legacy intake override leaves ex
 - [x] Resource-free durable business questions, restart and continuation through LangGraph
 - [ ] Knowledge-base and business-system resource connectors with actor-scoped grants
 - [ ] Operational tasks for customer support, operations and finance with inspectable business artifacts
-- [ ] Scoped human collaboration: requester, participant and approver roles
+- [x] Allowlisted delegates in DMs and groups: direct dispatch, existing code grants and approvals scoped to their own tasks
+- [ ] Live dual-account requester/owner acceptance and broader participant roles
 - [x] Durable scoped PR merge decisions, slot release and conservative external-attempt recovery
 - [ ] Extend operation contracts and receipts to publication, baseline and business actions
 

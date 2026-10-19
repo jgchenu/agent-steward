@@ -14,12 +14,12 @@ import type { Config, Incoming, CardAction, Executor } from '../src/types.js';
 
 const head='a'.repeat(40),base='b'.repeat(40),commit='c'.repeat(40),url='https://github.com/test/repo/pull/12';
 async function until(fn:()=>boolean){for(let i=0;i<200;i++){if(fn())return;await setTimeout(5);}assert.fail('condition not reached');}
-function fixture(){
+function fixture(requesterId?:string){
   const dir=mkdtempSync(join(tmpdir(),'steward-durable-merge-')),db=join(dir,'state.db');
   let store=new Store(db),engine:Engine,seq=0,executions=0,putMode:'ok'|'lost'|'unknown'='ok';
-  const config:Config={ownerId:'owner',stateDir:dir,codexCommand:'unused',maxRunMinutes:1,groupChats:true,projects:{p:{path:dir,sandbox:'workspace-write'}}};
+  const config:Config={ownerId:'owner',stateDir:dir,codexCommand:'unused',maxRunMinutes:1,groupChats:true,trustedRequesters:[{openId:'ou_guest',name:'Guest'},{openId:'ou_other',name:'Other'}],projects:{p:{path:dir,sandbox:'workspace-write'}}};
   const conversation={anchorId:'root',sourceId:'root',scope:'thread' as const};
-  const task=store.create('group','p','work','workspace-write',conversation);store.set(task.id,'review');
+  const task=store.create('group','p','work','workspace-write',conversation,requesterId);store.set(task.id,'review');
   const pr={number:12,url,title:'Feature',body:'Change behavior',state:'OPEN',isDraft:true,headRefName:'feature',headRefOid:head,
     baseRefName:'main',baseRefOid:base,isCrossRepository:false,mergeable:'MERGEABLE',mergeStateStatus:'CLEAN',reviewDecision:'',
     statusCheckRollup:[{name:'CI',status:'COMPLETED',conclusion:'SUCCESS'}],changedFiles:2,additions:4,deletions:1,mergeCommit:null as {oid:string}|null};
@@ -40,7 +40,7 @@ function fixture(){
   const make=()=>new Engine(store,config,{run:(...args)=>executor.run(...args)},{send:async()=>{},context:async()=>({summary:'',capturedAt:'',truncated:false,messages:[]})},
     (s,c,t,p,h,signal)=>mergePullRequest(s,c,t,p,h,signal,gh,async()=> 'git@github.com:test/repo.git'));
   engine=make();
-  const send=(text:string,extra:Partial<Incoming>={})=>engine.receive({id:'event-'+ ++seq,text,senderId:'owner',senderType:'user',chatId:'group',chatType:'group',botMentioned:true,conversation,...extra});
+  const send=(text:string,extra:Partial<Incoming>={})=>engine.receive({id:'event-'+ ++seq,text,senderId:requesterId ?? 'owner',senderType:'user',chatId:'group',chatType:'group',botMentioned:true,conversation,...extra});
   return {
     config,task,pr,calls,send,get store(){return store;},get engine(){return engine;},get executions(){return executions;},
     get op(){return currentOperation(store,task.id)!;},get effects(){return calls.filter(a=>a.includes('PUT')||a[1]==='ready');},
@@ -186,7 +186,7 @@ test('v9 database migration preserves tasks and process-bound runtime approvals 
     const task=store.create('dm','p','old work');store.set(task.id,'waiting_approval');
     const req=store.request(task.id,'approval','live tool approval');
     store.db.exec('DROP TABLE operations; PRAGMA user_version=9');store.close();store=new Store(path);store.recover();
-    assert.equal(store.db.prepare('PRAGMA user_version').get()!.user_version,10);
+    assert.equal(store.db.prepare('PRAGMA user_version').get()!.user_version,11);
     assert.equal(store.get(task.id)?.prompt,'old work');assert.equal(store.get(task.id)?.status,'interrupted');
     assert.equal(store.getRequest(req)?.status,'expired');
   }finally{store.close();rmSync(dir,{recursive:true,force:true});}
@@ -255,4 +255,24 @@ test('expiry or grant revocation during the final remote check blocks the first 
       assert.equal(f.effects.length,0);assert.equal(f.op.state,'failed');
     }finally{await f.close();}
   }
+});
+
+
+test('delegated merge confirmation is requester-bound, durable, and revoked before any external mutation',async()=>{
+  const f=fixture('ou_guest');
+  try {
+    const op=await f.preview();assert.equal(op.scope.ownerId,'ou_guest');
+    f.send('/approve '+op.requestId,{senderId:'ou_other'});assert.equal(f.op.state,'pending');
+    f.send('/approve '+op.requestId,{senderId:'owner'});assert.equal(f.op.state,'pending');
+    await f.restart();const cb={...approvalCard(f.store,f.config,f.task.id),senderId:'ou_guest'};
+    assert.equal(f.engine.handleAction(cb).toast.type,'success');
+    await until(()=>f.op.state==='succeeded');assert.equal(f.op.actorId,'ou_guest');assert.equal(f.effects.filter(a=>a.includes('PUT')).length,1);
+  }finally{await f.close();}
+  const g=fixture('ou_guest');
+  try {
+    await g.preview();const cb={...approvalCard(g.store,g.config,g.task.id),senderId:'ou_guest'};
+    g.engine.updateProjects({projects:g.config.projects,trustedRequesters:[]});
+    g.engine.updateProjects({projects:g.config.projects,trustedRequesters:[{openId:'ou_guest',name:'Guest'}]});
+    assert.equal(g.engine.handleAction(cb).toast.type,'error');assert.equal(g.effects.length,0);
+  }finally{await g.close();}
 });

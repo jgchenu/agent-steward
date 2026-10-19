@@ -37,6 +37,7 @@ export const baselineProposalSchema = {anyOf:[{type:'null'},{type:'object',prope
 },required:['ref','migrateChanges','delivery'],additionalProperties:false}]};
 
 export async function previewDeliverySetup(config: Config, task: Task, project: Project, proposal: BaselineProposal, signal: AbortSignal) {
+  if (task.requesterId) throw Error('交付配置仅由机器人主人管理，请联系主人设置检查命令和交付目标。');
   const delivery=proposal.delivery!;
   if (!config.configFile) throw Error('当前运行器没有可写的交付配置入口，未修改配置；请在本机设置交付目标和检查命令。');
   const file=realpathSync(config.configFile), before=readFileSync(file,'utf8'), raw=JSON.parse(before);

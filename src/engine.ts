@@ -1,4 +1,5 @@
 import { taskConcurrency } from './config.js';
+import { requesterAllowed, canControlTask, revokeRequesters } from './requesters.js';
 import { approveOperation, currentOperation, decideOperation, operationFailure, OperationWaiting } from './operations.js';
 import { viewKey } from './channels/cards.js';
 import { CONVERSATION, conversationProject } from './conversation.js';
@@ -16,6 +17,7 @@ import { TaskOrchestrator } from './orchestration.js';
 import type { BaselineProposal, CardAction, Channel, Config, ContextSnapshot, Executor, HumanRequest, Incoming, PublicationTarget, RunHooks, Status, Task, View } from './types.js';
 
 const HELP = `Agent Steward · 个人 Agent 分身（预览版）
+/whoami — 查看本机器人下的飞书身份 ID
 /projects — 可用代码资源
 /new <项目> <任务要求> — 只读分析
 /edit <项目> <任务要求> — 在独立目录修改并验证
@@ -47,9 +49,11 @@ export class Engine {
     this.orchestrator = new TaskOrchestrator(store);
   }
 
-  updateProjects(next: Pick<Config, 'projects' | 'defaultProject' | 'codexProjects'> & Partial<Pick<Config, 'permissionMode' | 'approvalsReviewer' | 'modelSelection' | 'maxConcurrentTasks'>>): void {
+  updateProjects(next: Pick<Config, 'projects' | 'defaultProject' | 'codexProjects'> & Partial<Pick<Config, 'trustedRequesters' | 'permissionMode' | 'approvalsReviewer' | 'modelSelection' | 'maxConcurrentTasks'>>): void {
     const concurrency = taskConcurrency('maxConcurrentTasks' in next ? next.maxConcurrentTasks : this.config.maxConcurrentTasks);
     this.config.maxConcurrentTasks = concurrency;
+    if ('trustedRequesters' in next) this.config.trustedRequesters = next.trustedRequesters;
+    for (const id of this.store.transaction(() => revokeRequesters(this.store,this.config))) this.active.get(id)?.abort.abort(new Error('来访者授权已撤销'));
     const previous = this.config.projects;
     for (const task of this.store.list()) {
       const selection = this.store.projectSelection(task.id);
@@ -73,7 +77,7 @@ export class Engine {
     const runs = [...this.active.values()];
     const broadest = runs.map(r => r.task.permissionMode ?? 'ask').sort((a,b) => permissionRank(b)-permissionRank(a))[0];
     const selection = runs.length === 1 ? runs[0].task.modelSelection : undefined;
-    return { permissionMode: permissionMode(this.config), activeMode: broadest, active: runs.length > 0, activeCount: runs.length, maxConcurrentTasks: this.config.maxConcurrentTasks,
+    return { trustedRequesterIds:(this.config.trustedRequesters ?? []).map(p=>p.openId).sort(), permissionMode: permissionMode(this.config), activeMode: broadest, active: runs.length > 0, activeCount: runs.length, maxConcurrentTasks: this.config.maxConcurrentTasks,
       ...(this.config.modelSelection ? {modelSelection:this.config.modelSelection} : {}), ...(selection ? {activeModelSelection:selection} : {}) };
   }
   start(): void {
@@ -83,16 +87,26 @@ export class Engine {
   }
   // Durable receipt + command mutation + notification are committed before acknowledging Feishu.
   receive(message: Incoming, actionId?: string): void {
-    if (this.stopped || message.senderId !== this.config.ownerId || message.senderType !== 'user') return;
+    if (this.stopped || message.senderType !== 'user') return;
+    if (message.text.trim() === '/whoami' && (message.chatType === 'p2p' || (this.config.groupChats && message.botMentioned && message.conversation))) {
+      this.store.transaction(() => {
+        if (this.store.consume(message.id)) this.store.enqueue(message.chatId,`你在本机器人下的飞书 open_id：${message.senderId}\n请把它发给主人，由主人在本机控制台添加。此命令不会授予权限。`,{kind:'requester-reply',conversation:message.conversation});
+      }); void this.flush();return;
+    }
+    if (message.senderId !== this.config.ownerId && !requesterAllowed(this.config,message.senderId)) return;
+    const requesterId = message.senderId === this.config.ownerId ? undefined : message.senderId;
+    const ownTasks = () => this.store.list(message.chatId,requesterId ?? null).filter(t => !requesterId || !t.requesterRevoked);
+    const accessible = (task: Task | undefined) => canControlTask(this.config,message.senderId,task);
     const dmWaits = message.chatType === 'p2p' && !message.text.trim().startsWith('/')
-      ? this.store.list().filter(t => t.chatId === message.chatId && ['waiting_input','waiting_approval'].includes(t.status)
+      ? ownTasks().filter(t => ['waiting_input','waiting_approval'].includes(t.status)
         && this.store.requests(t.id).length) : [];
     const dmSelections = message.chatType === 'p2p' && !message.text.trim().startsWith('/')
-      ? this.store.list(message.chatId).filter(t => t.status === 'review' && this.store.projectSelection(t.id)) : [];
+      ? ownTasks().filter(t => t.status === 'review' && this.store.projectSelection(t.id)) : [];
     const selectionAnswer = !!projectAnswer(message.text) || namedProjects(this.config,message.text).length > 0;
-    const bound = message.chatType === 'group' ? this.store.conversationTask(message.chatId, message.conversation)
+    const bound = message.chatType === 'group' ? this.store.conversationTask(message.chatId, message.conversation,requesterId)
       : dmWaits.length === 1 && this.store.graphWait(dmWaits[0].id)?.requestId === this.store.requests(dmWaits[0].id)[0]?.id ? dmWaits[0]
-      : !dmWaits.length && dmSelections.length === 1 && selectionAnswer ? dmSelections[0] : undefined;
+      : !dmWaits.length && dmSelections.length === 1 && selectionAnswer ? dmSelections[0]
+      : requesterId && message.chatType === 'p2p' && !message.text.trim().startsWith('/') ? ownTasks()[0] : undefined;
     const pendingInput = bound && this.store.requests(bound.id);
     const projectSelection = bound && this.store.projectSelection(bound.id);
     const answeringProject = !!projectSelection && !!projectAnswer(message.text);
@@ -107,10 +121,13 @@ export class Engine {
     this.store.transaction(() => {
       if (!this.store.consume(message.id)) return;
       if (actionId && !this.store.useAction(actionId)) return;
-      const reply = (text: string, view?: View) => this.store.enqueue(message.chatId, text,
+      const reply = (text: string, view: View = {kind:'notice'}) => {
+        view = {...view,...(requesterId ? {requesterId} : {})};
+        this.store.enqueue(message.chatId, text,
         message.conversation ? { ...(view ?? { kind: 'notice' }), conversation: message.conversation,
           ...(!view || ['home', 'list'].includes(view.kind) ? { fresh: true } : {}) }
           : view && ['home', 'list'].includes(view.kind) ? { ...view, fresh: true } : view);
+      };
       const text = message.text.trim();
       if (!text && message.botMentioned) { reply('我在。直接告诉我想做什么，例如“分析上面的讨论，给出建议”。'); return; }
       const formPrompt = actionId ? /^\/(?:new|edit)\s+\S+\s+([\s\S]*)$/.exec(text)?.[1] : undefined;
@@ -122,8 +139,8 @@ export class Engine {
       let args = match?.[2]?.trim() ?? '';
       let selectedResource: string | undefined;
       if (command === '/model' || (!match && asksModelStatus(text))) {
-        const target = args ? this.store.get(args) : bound ?? (message.chatType === 'p2p' ? this.store.list(message.chatId)[0] : undefined);
-        if (args && (!target || target.chatId !== message.chatId || (message.conversation && target.conversation?.anchorId !== message.conversation.anchorId))) {
+        const target = args ? this.store.get(args) : bound ?? (message.chatType === 'p2p' ? ownTasks()[0] : undefined);
+        if (args && (!accessible(target) || !target || target.chatId !== message.chatId || (message.conversation && target.conversation?.anchorId !== message.conversation.anchorId))) {
           reply('任务不存在，请在对应话题查询。'); return;
         }
         const current = target && this.store.runtimeModel(target.id);
@@ -131,6 +148,7 @@ export class Engine {
         reply(modelStatusText(current, this.config.modelSelection, scope), target ? {kind:'reply',taskId:target.id} : undefined); return;
       }
       if (['控制台','打开控制台','设置','/console'].includes(text)) {
+        if (requesterId) { reply('控制台与人员、项目授权由机器人主人管理。你可以使用 /projects 查看可用项目。'); return; }
         reply(this.config.consoleUrl ? `在运行分身的电脑上打开：[分身控制台](${this.config.consoleUrl})。可以收藏此地址，设置权限、模型和项目。手机或其他电脑暂不支持访问这个本机地址。` : '控制台尚未启动，请在运行分身的电脑上启动新版服务。'); return;
       }
       let navigation = ['首页', '工作台', '帮助'].includes(text);
@@ -209,17 +227,18 @@ export class Engine {
         }
         const task = bound && message.conversation
           ? this.store.handoff(bound, project, prompt, mode, message.conversation)
-          : this.store.create(message.chatId, project, prompt, mode, message.conversation);
+          : this.store.create(message.chatId, project, prompt, mode, message.conversation,requesterId);
         if (!message.conversation || !this.channel.acknowledge) reply(`已接单 ${task.id} · ${project === CONVERSATION ? '对话' : project}\n任务已排队。查询：/status ${task.id}`, { kind: 'task', taskId: task.id }); return;
       }
       if (command === '/list' || (command === '/status' && !args)) {
-        reply(this.store.list(message.chatId).map(t => `${t.id} · ${t.project} · ${t.status}`).join('\n') || '暂无任务。', { kind: 'list' }); return;
+        reply(ownTasks().map(t => `${t.id} · ${t.project} · ${t.status}`).join('\n') || '暂无任务。', { kind: 'list' }); return;
       }
       const parts = /^(\S+)(?:\s+([\s\S]*))?$/.exec(args);
       const id = parts?.[1] ?? '', body = parts?.[2]?.trim() ?? '';
       if (['/approve', '/deny', '/answer'].includes(command)) {
         const req = this.store.getRequest(id), runtime = this.pending.get(id);
         const task = req && this.store.get(req.taskId);
+        if (!accessible(task)) { reply('只能处理自己的任务请求。'); return; }
         const business = task && this.store.graphWait(task.id);
         const operation=task && currentOperation(this.store,task.id);
         if(operation?.requestId===id && req?.status==='pending' && operation.state==='pending'){
@@ -242,6 +261,7 @@ export class Engine {
           if (task.status !== 'waiting_input' || this.active.has(task.id) || !body) { reply('请等待问题保存完成，并填写回答。'); return; }
           if (task.project !== CONVERSATION && !this.config.projects[task.project]) { reply('项目授权已撤销，任务尚未继续。'); return; }
           this.store.answerGraph(task.id,body);
+          this.store.event(task.id,'response_actor',JSON.stringify({requestId:id,actorId:message.senderId}));
           reply('收到，我会结合这条补充继续处理。',{kind:'reply',taskId:task.id}); return;
         }
         if (!req || !task || task.chatId !== message.chatId || (message.conversation && task.conversation?.anchorId !== message.conversation.anchorId) || req.status !== 'pending' || !runtime) {
@@ -258,13 +278,15 @@ export class Engine {
         }
         this.store.resolveRequest(id);
         this.store.event(task.id, 'human_response', `${id}: ${answer}`);
+        this.store.event(task.id,'response_actor',JSON.stringify({requestId:id,actorId:message.senderId}));
         this.updateWaiting(task.id);
         effects.push(() => { this.pending.delete(id); runtime.resolve(answer); });
         reply(message.conversation && req.kind === 'input' ? '收到，我继续。' : `请求 ${id} 已回答。`, { kind: message.conversation && req.kind === 'input' ? 'reply' : 'task', taskId: task.id }); return;
       }
       const task = this.store.get(id);
-      if (!task || task.chatId !== message.chatId || (message.conversation && task.conversation?.anchorId !== message.conversation.anchorId)) { reply('任务不存在，请重新选择。', { kind: 'home' }); return; }
-      if (bound && bound.id !== task.id && !['/status', '/source'].includes(command)) { reply('这个话题已转到另一个项目，请直接在话题里说明当前需求。'); return; }
+      if (!accessible(task) || !task || task.chatId !== message.chatId || (message.conversation && task.conversation?.anchorId !== message.conversation.anchorId)) { reply('任务不存在，请重新选择。', { kind: 'home' }); return; }
+      this.store.event(task.id,'command_actor',JSON.stringify({command,actorId:message.senderId}));
+      if (bound && bound.id !== task.id && !(message.senderId === this.config.ownerId && task.requesterId) && !['/status', '/source'].includes(command)) { reply('这个话题已转到另一个项目，请直接在话题里说明当前需求。'); return; }
       if (command === '/baseline' || command === '/restart') {
         if (this.active.has(id) || !['review','completed','failed','cancelled','interrupted'].includes(task.status)) { reply('请等任务结束或停止后再更换版本。'); return; }
         if (this.config.projects[task.project]?.workspaceMode === 'direct' || !this.store.workspace(id) || !this.config.projects[task.project]?.worktree) { reply('这个任务没有 Git 工作副本。'); return; }
@@ -320,16 +342,18 @@ export class Engine {
   // Only opaque, server-issued actions are accepted. Callback values are never executable commands.
   handleAction(action: CardAction): { toast: { type: 'success' | 'error'; content: string } } {
     const fail = (content: string) => ({ toast: { type: 'error' as const, content } });
-    if (this.stopped || action.senderId !== this.config.ownerId) return fail('此操作仅限机器人的主人。');
+    if (this.stopped || (action.senderId !== this.config.ownerId && !requesterAllowed(this.config,action.senderId))) return fail('未获得机器人使用权限。');
+    const requesterId = action.senderId === this.config.ownerId ? undefined : action.senderId;
     const saved = this.store.getAction(action.actionId);
     if (!saved || saved.chatId !== action.chatId || saved.expires < Date.now() || saved.used) {
       return fail('操作已处理或已过期。请发送“工作台”重新打开。');
     }
     const i = saved.intent, task = i.taskId ? this.store.get(i.taskId) : undefined;
+    if ((requesterId && i.requesterId !== requesterId) || (i.taskId && !canControlTask(this.config,action.senderId,task))) return fail('只能操作自己发起的任务和卡片。');
     if (i.conversation && !this.config.groupChats) return fail('群聊功能已关闭。');
-    if (i.op === 'new' && i.conversation && this.store.conversationTask(action.chatId, i.conversation)) return fail('此话题已绑定任务，请继续原任务；新任务请另起话题。');
+    if (i.op === 'new' && i.conversation && this.store.conversationTask(action.chatId, i.conversation,requesterId)) return fail('此话题已绑定任务，请继续原任务；新任务请另起话题。');
     if (i.taskId && (!task || task.chatId !== action.chatId)) return fail('任务不属于当前会话。');
-    const current = i.conversation && this.store.conversationTask(action.chatId, i.conversation);
+    const current = i.conversation && this.store.conversationTask(action.chatId, i.conversation,task?.requesterId ?? requesterId);
     if (task && current && task.id !== current.id && ['dispatch','continue','done','cancel','approve','deny','answer','publish','restart'].includes(i.op)) return fail('话题已转到另一个项目，旧操作已失效。');
     if (i.op === 'dispatch') {
       const p = i.project && this.config.projects[i.project];
@@ -363,7 +387,7 @@ export class Engine {
         if (!this.store.consume('card:' + action.id) || !this.store.useAction(action.actionId)) return;
         this.store.saveDelivery(task.id, { ...report, authorizedKey: i.publicationKey });
         this.store.queuePublication(task.id);
-        this.store.event(task.id, 'publication_authorized', 'Owner confirmed source-branch push and draft PR only.');
+        this.store.event(task.id, 'publication_authorized', JSON.stringify({actorId:action.senderId,scope:'source-branch push and draft PR only'}));
         this.store.enqueue(task.chatId, '正在准备草稿 PR', { kind: 'task', taskId: task.id });
       });
       this.tick(); void this.flush();
@@ -396,7 +420,7 @@ export class Engine {
     const view = views[i.op];
     if (view) {
       this.store.transaction(() => {
-        if (this.store.consume('card:' + action.id)) this.store.enqueue(action.chatId, '已更新', { ...view, conversation: i.conversation, targetMessageId: action.messageId });
+        if (this.store.consume('card:' + action.id)) this.store.enqueue(action.chatId, '已更新', { ...view, requesterId, conversation: i.conversation, targetMessageId: action.messageId });
       });
       void this.flush();
     } else {
@@ -407,12 +431,12 @@ export class Engine {
         chatType: i.conversation ? 'group' : 'p2p', senderType: 'user', text: command,
         botMentioned: !!i.conversation, conversation: i.conversation && { ...i.conversation, sourceId: action.messageId, cutoff: String(Date.now()) } }, action.actionId);
       // Refresh only the form that was submitted, not an older entry point in chat history.
-      if (i.op === 'new') this.store.enqueue(action.chatId, '任务已提交', { kind: 'home', conversation: i.conversation, targetMessageId: action.messageId });
+      if (i.op === 'new') this.store.enqueue(action.chatId, '任务已提交', { kind: 'home', requesterId, conversation: i.conversation, targetMessageId: action.messageId });
     }
     return { toast: { type: 'success', content: view ? '已更新' : '已处理' } };
   }
   private refreshTaskCard(task: Task): void {
-    const view: View = {kind:'task', taskId:task.id, conversation:task.conversation};
+    const view: View = {kind:'task', taskId:task.id, requesterId:task.requesterId ?? undefined, conversation:task.conversation};
     const targetMessageId = this.store.cardMessage(task.chatId, viewKey(view));
     // Patch only the existing task card; the ordinary reply supplies notification.
     // Never replace a card the owner has navigated into another view.
@@ -437,6 +461,7 @@ export class Engine {
   }
   private tick(): void {
     if (this.stopped) return;
+    for (const id of this.store.transaction(() => revokeRequesters(this.store,this.config))) this.active.get(id)?.abort.abort(new Error('来访者授权已撤销'));
     this.store.expireOperations();
     const queued = this.store.list().filter(t => t.status === 'queued').sort((a,b) => a.updatedAt.localeCompare(b.updatedAt));
     for (const candidate of queued) {
@@ -464,10 +489,12 @@ export class Engine {
     let snapshot: ContextSnapshot | undefined;
     try {
       abort.signal.throwIfAborted();
+      if (task.conversation && !this.config.groupChats) throw Error('群聊功能已关闭，任务未执行。');
+      if (task.requesterId && (!requesterAllowed(this.config,task.requesterId) || task.requesterRevoked)) throw Error('发起人授权已撤销，任务不能继续。');
       this.store.event(task.id, 'permission_mode', task.permissionMode ?? 'ask');
       if (task.modelSelection) this.store.event(task.id, 'model_selection', JSON.stringify(task.modelSelection));
       if (!task.nextAction || task.nextAction === 'execute') this.store.event(task.id,'runtime_model',JSON.stringify({model:null,effort:null}));
-      const project = task.project === CONVERSATION ? conversationProject(this.config) : this.config.projects[task.project];
+      const project = task.project === CONVERSATION ? conversationProject(this.config,task.requesterId ? task.id : undefined) : this.config.projects[task.project];
       if (!project) throw new Error('项目配置已移除。');
       const directDirectory = this.store.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='direct_directory' ORDER BY seq LIMIT 1").get(task.id) as {body:string}|undefined;
       if ((project.workspaceMode === 'direct' && this.store.workspace(task.id)) || (directDirectory && (project.workspaceMode !== 'direct' || project.path !== directDirectory.body))) throw Error('任务执行位置已变化，请新建任务；原任务改动保留。');
@@ -478,8 +505,9 @@ export class Engine {
       let baseline: BaselineProposal | undefined;
       let merge: MergeProposal | undefined;
       const grantKey = projectGrantKey(project);
-      const resourceCatalog = Object.entries(this.config.projects).map(([id,p]) => ({id,kind:'code-project',name:p.label ?? id,aliases:[...(p.aliases ?? [])],description:p.description ?? '',capability:p.sandbox}));
-      const resourceGrants = Object.fromEntries(Object.entries(this.config.projects).map(([id,p]) => [id,projectGrantKey(p)]));
+      const resources = Object.entries(this.config.projects);
+      const resourceCatalog = resources.map(([id,p]) => ({id,kind:'code-project',name:p.label ?? id,aliases:[...(p.aliases ?? [])],description:p.description ?? '',capability:p.sandbox}));
+      const resourceGrants = Object.fromEntries(resources.map(([id,p]) => [id,projectGrantKey(p)]));
       const hooks: RunHooks = {
         ...(task.nextAction==='merge'?{approveOperation:proposal=>{abort.signal.throwIfAborted();approveOperation(this.store,task.id,proposal);}}:{}),
         ...(task.project !== CONVERSATION && task.mode === 'workspace-write' && project.sandbox === 'workspace-write' && project.workspaceMode !== 'direct'
@@ -559,12 +587,12 @@ export class Engine {
         catch {
           abort.signal.throwIfAborted();
           this.store.event(task.id, 'acknowledgement_failed', '表情回复不可用，已改用话题文字回执。');
-          this.store.enqueue(task.chatId, '收到，正在处理。', { kind: 'notice', conversation: task.conversation, fresh: true });
+          this.store.enqueue(task.chatId, '收到，正在处理。', { kind: 'notice', requesterId:task.requesterId ?? undefined, conversation: task.conversation, fresh: true });
         }
       }
       abort.signal.throwIfAborted();
       let executionTask = task;
-      if (task.conversation && task.nextAction !== 'publish') {
+      if (task.conversation && !task.requesterId && task.nextAction !== 'publish') {
         if (!this.config.groupChats || !this.channel.context) throw new Error('群上下文读取未启用，任务未执行。');
         this.store.event(task.id, 'progress', '正在读取当前会话上下文。');
         snapshot = await this.channel.context(task, abort.signal);
@@ -581,7 +609,7 @@ export class Engine {
           currentPr:previousReport?.prUrl ?? null,publishedSha:previousReport?.publishedSha ?? null,
           deliveryError:previousReport?.error ?? null,configuredTarget:project.worktree?.github ?? null,
           history:this.store.workflowHistory(task.id),
-          approval:'Proposals only; each external operation retains its own owner confirmation.'},
+          approval:'Proposals only; each external operation retains its own task-authorized actor confirmation.'},
         availableProjects: resourceCatalog }) };
       let result: string;
       if (task.orchestration === 'langgraph-v1' && task.nextAction !== 'publish') {
@@ -689,7 +717,12 @@ export class Engine {
   private async drain(): Promise<void> {
       let item;
       while ((item = this.store.outgoing())) {
-        try { await this.channel.send(item.chatId, item.text, item.id, item.view ? JSON.parse(item.view) as View : undefined); this.store.delivered(item.id); }
+        try {
+          const view = item.view ? JSON.parse(item.view) as View : undefined;
+          if (view?.requesterId && (!requesterAllowed(this.config,view.requesterId) || (view.conversation && !this.config.groupChats)
+            || ('taskId' in view && this.store.get(view.taskId)?.requesterRevoked))) { this.store.delivered(item.id);continue; }
+          await this.channel.send(item.chatId, item.text, item.id, view); this.store.delivered(item.id);
+        }
         catch { this.store.retry(item.id, item.attempts); }
       }
   }
