@@ -21,6 +21,14 @@ src/setup-feishu.ts    — official new-app authorization and private local conf
 src/cli.ts             — terminal demo/local mode, diagnostics and service lifecycle
 ```
 
+## Configured monitoring intake
+
+`AlertPoller` is an optional Feishu-service component, not a second scheduler. The first connector (`SentryConnector`) reads a single configured organization/project/environment, produces bounded diagnostic evidence, and routes it through local `alertSources` grants. Future connectors implement the same list/evidence boundary and must be explicitly added to validated configuration. Neither external messages nor event contents can grant this machine-source capability or choose a project/recipient. See [setup and operational limits](alerts.md).
+
+Schema v12 adds `alert_cursors` (activation watermark, fixed window, page cursor and sanitized health) and `alert_tasks` (unique source authorization + issue, owner task binding and creation time). Creation, deduplication, provenance and outbox receipt commit atomically. Existing task states and approvals are unchanged. New source grants start at activation; durable daily and outstanding-work caps retain a partially consumed page instead of dropping it. All API reads have a timeout/body limit, fixed regional hosts and redirects disabled; only whitelisted evidence is persisted. Service-token environment variables use the already-filtered `STEWARD_` prefix.
+
+The Engine checks the original source/owner/project grant fingerprint before any alert-task execution, including publication/continuation, and aborts active runs when the source grant changes. Disabling intake does not silently release queued tasks into another authorization. The poller shares the existing code/Git slot and task queue, stops/aborts before store shutdown, and is absent in terminal/demo mode. Multiple installations still require disjoint code execution ownership. Mock tests establish implementation behavior, not live API, subscription, Feishu or PR acceptance.
+
 ## Domain
 
 - **Task**: durable work owned by a human; resources are optional. A general task can reason over supplied inputs without a space or code project.

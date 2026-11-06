@@ -22,6 +22,8 @@ Owner gate → Engine scheduler → SQLite tasks, events, requests and outbox
 
 For group screenshots, voice messages, videos and PDFs, see [media setup and reading limits](docs/media.md). Audio transcription runs locally; no paid speech API is used.
 
+For opt-in Sentry issue intake, diagnosis and isolated repair tasks, see [monitoring source setup](docs/alerts.md). Each source maps to a locally authorized project and owner DM; PR publication retains its existing confirmation.
+
 ## Try it without accounts
 
 Requires **Node.js 24.x**. macOS and Linux are the initial targets.

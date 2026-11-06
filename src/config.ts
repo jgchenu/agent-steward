@@ -1,3 +1,4 @@
+import { alertSources } from './alert-config.js';
 import { modelSelection } from './models.js';
 import { projectBindings, type CodexProject } from './codex-projects.js';
 import { permissionMode } from './permissions.js';
@@ -86,6 +87,6 @@ export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.
   if (!Number.isFinite(maxRunMinutes) || maxRunMinutes < 1 || maxRunMinutes > 1440) {
     throw new Error('maxRunMinutes must be between 1 and 1440.');
   }
-  return { configFile: resolve(file), ownerId, trustedRequesters:trustedRequesters(raw.trustedRequesters), projects, modelSelection:modelSelection(raw.modelSelection), ...(catalog ? {codexProjects:catalog} : {}), maxRunMinutes, maxConcurrentTasks, permissionMode: permissionMode(raw), approvalsReviewer: raw.approvalsReviewer ?? 'user', defaultProject: raw.defaultProject, groupChats: raw.groupChats ?? false, stateDir: resolve(base, raw.stateDir ?? '.steward'),
+  return { alertSources: alertSources(raw.alertSources), configFile: resolve(file), ownerId, trustedRequesters:trustedRequesters(raw.trustedRequesters), projects, modelSelection:modelSelection(raw.modelSelection), ...(catalog ? {codexProjects:catalog} : {}), maxRunMinutes, maxConcurrentTasks, permissionMode: permissionMode(raw), approvalsReviewer: raw.approvalsReviewer ?? 'user', defaultProject: raw.defaultProject, groupChats: raw.groupChats ?? false, stateDir: resolve(base, raw.stateDir ?? '.steward'),
     codexCommand: raw.codexCommand ?? 'codex', langGraphPilot: raw.langGraphPilot ?? true };
 }
