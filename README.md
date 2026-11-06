@@ -100,6 +100,8 @@ Once the service is running, bookmark http://127.0.0.1:17831/ on that computer t
 
 Keep the process and machine awake. Closing the service interrupts active work; it is not a hosted cloud agent. Start manually for initial evaluation; OS service installers are planned.
 
+The local console defaults to port 17831. Set `STEWARD_CONSOLE_PORT=17832` in a private `.env` to use another port; both the bot and `npm run workspaces` honor it. The console remains bound to `127.0.0.1`. An occupied or invalid port stops startup instead of silently selecting another address. Separate installations need their own application identity, owner binding, config and state directory. Changing the port does not coordinate execution across installations; do not run overlapping code/Git work across them.
+
 ## Commands
 
 | Command | Behavior |

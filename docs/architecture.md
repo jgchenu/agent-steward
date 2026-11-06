@@ -100,6 +100,8 @@ An instance lock is local to one filesystem and PID namespace. Do not share stat
 
 ## Implementation choices
 
+The console listens only on loopback. `STEWARD_CONSOLE_PORT` optionally selects a fixed port (1–65535, default 17831) for both service and standalone-console startup. Invalid values fail before service startup; an occupied port fails without falling back to another listener. This is deployment configuration, not multi-tenant routing or a cross-instance scheduler. Independent installations must keep application identities, owner IDs, config, databases and Codex task sessions separate; their code execution slots are not coordinated.
+
 - TypeScript + Node 24: one language with official Feishu SDK integration and native SQLite.
 - SQLite: durable local operation without requiring a database service.
 - WebSocket Feishu transport: outbound connection, no public webhook server in the initial version.
