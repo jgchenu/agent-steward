@@ -1,3 +1,4 @@
+import { assertAlertAuthorized } from './alerts.js';
 import { taskConcurrency } from './config.js';
 import { requesterAllowed, canControlTask, revokeRequesters } from './requesters.js';
 import { approveOperation, currentOperation, decideOperation, operationFailure, OperationWaiting } from './operations.js';
@@ -49,11 +50,12 @@ export class Engine {
     this.orchestrator = new TaskOrchestrator(store);
   }
 
-  updateProjects(next: Pick<Config, 'projects' | 'defaultProject' | 'codexProjects'> & Partial<Pick<Config, 'trustedRequesters' | 'permissionMode' | 'approvalsReviewer' | 'modelSelection' | 'maxConcurrentTasks'>>): void {
+  updateProjects(next: Pick<Config, 'projects' | 'defaultProject' | 'codexProjects'> & Partial<Pick<Config, 'alertSources' | 'trustedRequesters' | 'permissionMode' | 'approvalsReviewer' | 'modelSelection' | 'maxConcurrentTasks'>>): void {
     const concurrency = taskConcurrency('maxConcurrentTasks' in next ? next.maxConcurrentTasks : this.config.maxConcurrentTasks);
     this.config.maxConcurrentTasks = concurrency;
     if ('trustedRequesters' in next) this.config.trustedRequesters = next.trustedRequesters;
     for (const id of this.store.transaction(() => revokeRequesters(this.store,this.config))) this.active.get(id)?.abort.abort(new Error('来访者授权已撤销'));
+    if ('alertSources' in next) this.config.alertSources = next.alertSources;
     const previous = this.config.projects;
     for (const task of this.store.list()) {
       const selection = this.store.projectSelection(task.id);
@@ -70,6 +72,7 @@ export class Engine {
     this.config.codexProjects = next.codexProjects; this.config.projects = next.projects; this.config.defaultProject = next.defaultProject;
     for (const run of this.active.values()) {
       const t = run.task, p = next.projects[t.project];
+      try { assertAlertAuthorized(this.store,this.config,t); } catch {run.abort.abort(new Error('告警来源授权已变化，执行已停止。'));}
       if (t.project !== CONVERSATION && (!p || p.path !== previous[t.project]?.path || p.workspaceMode !== previous[t.project]?.workspaceMode || (t.mode === 'workspace-write' && p.sandbox !== 'workspace-write'))) run.abort.abort(new Error('项目授权或执行位置已变化，执行已停止；已有改动保留。'));
     }
   }
@@ -489,6 +492,7 @@ export class Engine {
     let snapshot: ContextSnapshot | undefined;
     try {
       abort.signal.throwIfAborted();
+      assertAlertAuthorized(this.store,this.config,task);
       if (task.conversation && !this.config.groupChats) throw Error('群聊功能已关闭，任务未执行。');
       if (task.requesterId && (!requesterAllowed(this.config,task.requesterId) || task.requesterRevoked)) throw Error('发起人授权已撤销，任务不能继续。');
       this.store.event(task.id, 'permission_mode', task.permissionMode ?? 'ask');

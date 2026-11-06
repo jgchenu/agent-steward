@@ -24,7 +24,8 @@
     "smoke:resources": "tsx scripts/smoke-resources.ts",
     "smoke:workflow": "tsx scripts/smoke-workflow.ts",
     "smoke:codex": "tsx scripts/smoke-codex.ts",
-    "smoke:workspace": "tsx scripts/smoke-workspace.ts"
+    "smoke:workspace": "tsx scripts/smoke-workspace.ts",
+    "alerts": "tsx --env-file-if-exists=.env scripts/alerts.ts"
   },
   "dependencies": {
     "@langchain/langgraph": "1.4.21",

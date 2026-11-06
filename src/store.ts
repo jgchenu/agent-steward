@@ -53,7 +53,14 @@ export class Store {
         scope TEXT NOT NULL, state TEXT NOT NULL, phase TEXT NOT NULL, expiresAt INTEGER NOT NULL,
         actorId TEXT, result TEXT, current INTEGER NOT NULL DEFAULT 1);
       CREATE UNIQUE INDEX IF NOT EXISTS operations_current ON operations(taskId) WHERE current=1;
-      PRAGMA user_version=11;`);
+      CREATE TABLE IF NOT EXISTS alert_cursors (
+        sourceKey TEXT PRIMARY KEY, sourceId TEXT NOT NULL, watermark TEXT NOT NULL,
+        windowEnd TEXT, cursor TEXT, checkedAt TEXT, error TEXT);
+      CREATE TABLE IF NOT EXISTS alert_tasks (
+        sourceId TEXT NOT NULL, sourceKey TEXT NOT NULL, issueId TEXT NOT NULL,
+        taskId TEXT NOT NULL UNIQUE, createdAt TEXT NOT NULL, PRIMARY KEY(sourceKey,issueId));
+      CREATE INDEX IF NOT EXISTS alert_task_budget ON alert_tasks(sourceId,createdAt);
+      PRAGMA user_version=12;`);
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
