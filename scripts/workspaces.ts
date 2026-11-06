@@ -1,7 +1,7 @@
 import { startWorkspaceConsole } from '../src/workspace-console.js';
-import { CONSOLE_PORT } from '../src/console-entry.js';
+import { consolePort } from '../src/console-entry.js';
 try {
-  const { server, url } = await startWorkspaceConsole(process.env.STEWARD_CONFIG ?? 'steward.config.json',CONSOLE_PORT);
+  const { server, url } = await startWorkspaceConsole(process.env.STEWARD_CONFIG ?? 'steward.config.json',consolePort());
   console.log(`分身控制台：${url}\n仅监听本机。按 Ctrl+C 关闭控制台服务。`);
   process.on('SIGINT', () => server.close());
   process.on('SIGTERM', () => server.close());
