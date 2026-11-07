@@ -1,4 +1,5 @@
 import { assertAlertAuthorized } from './alerts.js';
+import { sentryMcpForTask } from './sentry-mcp.js';
 import { taskConcurrency } from './config.js';
 import { requesterAllowed, canControlTask, revokeRequesters } from './requesters.js';
 import { approveOperation, currentOperation, decideOperation, operationFailure, OperationWaiting } from './operations.js';
@@ -604,7 +605,7 @@ export class Engine {
         this.store.saveContext(task.id, snapshot); this.store.event(task.id, 'context_loaded', snapshot.summary);
         executionTask = { ...task, contextSnapshot: snapshot };
       }
-      executionTask = { ...executionTask, projectCandidates: hooks.proposeProject ? Object.keys(resourceGrants) : undefined,
+      executionTask = { ...executionTask, sentryMcp:sentryMcpForTask(this.store,this.config,task), projectCandidates: hooks.proposeProject ? Object.keys(resourceGrants) : undefined,
         projectCandidateGrants: hooks.proposeProject ? resourceGrants : undefined,
         routingContext: JSON.stringify({ currentProject: task.project === CONVERSATION ? null : project.label ?? task.project,
         resources: task.resources ?? [],

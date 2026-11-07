@@ -9,9 +9,12 @@ async function main() {
     const db = new DatabaseSync(join(config.stateDir,'steward.sqlite'),{readOnly:true});
     try {
       const hasTable = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='alert_cursors'").get();
+      const hasWebhooks = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='alert_webhooks'").get();
       for (const [sourceId,s] of Object.entries(config.alertSources ?? {})) {
         const state = hasTable ? db.prepare('SELECT watermark,checkedAt,error FROM alert_cursors WHERE sourceId=? ORDER BY rowid DESC LIMIT 1').get(sourceId) : null;
-        console.log(JSON.stringify({sourceId,enabled:s.enabled,project:s.project,credentialPresent:!!process.env[s.sentry.tokenEnv]?.trim(),state}));
+        const webhook = hasWebhooks ? db.prepare('SELECT count(*) pending,max(attempts) maxAttempts FROM alert_webhooks WHERE sourceId=?').get(sourceId) : null;
+        console.log(JSON.stringify({sourceId,enabled:s.enabled,project:s.project,credentialPresent:!!process.env[s.sentry.tokenEnv]?.trim(),state,
+          mcpConfigured:!!s.sentry.mcpProject,webhookConfigured:!!s.webhook,webhook}));
       }
     } finally {db.close();}
   } else if (command === 'check' && id && config.alertSources?.[id]) {

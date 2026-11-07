@@ -6,7 +6,8 @@ export interface AlertSource {
   kind: 'sentry'; enabled: boolean; project: string; chatId: string;
   mode: 'read-only' | 'workspace-write'; pollSeconds: number; maxTasksPerDay: number;
   sentry: { region: 'us' | 'eu' | 'global'; organization: string; projectId: string;
-    environment: string; tokenEnv: string };
+    environment: string; tokenEnv: string; mcpProject?: string };
+  webhook?: { secretEnv: string; installationId: string };
 }
 
 export function alertSources(raw: unknown): Record<string, AlertSource> {
@@ -25,8 +26,12 @@ export function alertSources(raw: unknown): Record<string, AlertSource> {
     const pollSeconds = s.pollSeconds ?? 300, maxTasksPerDay = s.maxTasksPerDay ?? 5;
     if (!Number.isInteger(pollSeconds) || pollSeconds < 60 || pollSeconds > 86400
       || !Number.isInteger(maxTasksPerDay) || maxTasksPerDay < 1 || maxTasksPerDay > 20) throw Error(`Invalid alert limits: ${id}`);
+    if (p.mcpProject !== undefined && (typeof p.mcpProject !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/.test(p.mcpProject))) throw Error(`Invalid Sentry MCP project: ${id}`);
+    if (s.webhook !== undefined && (!s.webhook || !/^STEWARD_SENTRY_[A-Z0-9_]+_WEBHOOK_SECRET$/.test(s.webhook.secretEnv)
+      || typeof s.webhook.installationId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(s.webhook.installationId))) throw Error(`Invalid Sentry webhook: ${id}`);
     result[id] = {kind:'sentry',enabled:s.enabled,project:s.project,chatId:s.chatId,mode:s.mode,pollSeconds,maxTasksPerDay,
-      sentry:{region:p.region,organization:p.organization,projectId:p.projectId,environment:p.environment,tokenEnv:p.tokenEnv}};
+      sentry:{region:p.region,organization:p.organization,projectId:p.projectId,environment:p.environment,tokenEnv:p.tokenEnv,
+        ...(p.mcpProject ? {mcpProject:p.mcpProject} : {})},...(s.webhook ? {webhook:{...s.webhook}} : {})};
   }
   return result;
 }
@@ -36,5 +41,9 @@ export function alertSourceKey(config: Config, id: string): string | undefined {
   const source = config.alertSources?.[id], project = source && config.projects[source.project];
   if (!source?.enabled || !project || (source.mode === 'workspace-write'
     && (project.sandbox !== 'workspace-write' || !project.worktree || project.workspaceMode === 'direct'))) return;
-  return createHash('sha256').update(JSON.stringify({id,owner:config.ownerId,source,grant:projectGrantKey(project)})).digest('hex');
+  // Transport and read-tool setup do not revoke existing work or replay old issues.
+  // Keep the original property order for persisted v12 authorization keys.
+  const {webhook: _webhook, sentry, ...base} = source;
+  const {mcpProject: _mcp, ...api} = sentry;
+  return createHash('sha256').update(JSON.stringify({id,owner:config.ownerId,source:{...base,sentry:api},grant:projectGrantKey(project)})).digest('hex');
 }
