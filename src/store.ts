@@ -60,7 +60,11 @@ export class Store {
         sourceId TEXT NOT NULL, sourceKey TEXT NOT NULL, issueId TEXT NOT NULL,
         taskId TEXT NOT NULL UNIQUE, createdAt TEXT NOT NULL, PRIMARY KEY(sourceKey,issueId));
       CREATE INDEX IF NOT EXISTS alert_task_budget ON alert_tasks(sourceId,createdAt);
-      PRAGMA user_version=12;`);
+      CREATE TABLE IF NOT EXISTS alert_webhooks (
+        sourceKey TEXT NOT NULL, sourceId TEXT NOT NULL, issueId TEXT NOT NULL,
+        receivedAt TEXT NOT NULL, dueAt INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
+        error TEXT, PRIMARY KEY(sourceKey,issueId));
+      PRAGMA user_version=13;`);
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');

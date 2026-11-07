@@ -1,11 +1,15 @@
 import test from 'node:test';
+import { createHash, createHmac } from 'node:crypto';
+import { startAlertWebhook } from '../src/alert-webhook.js';
+import { sentryMcpForTask, sentryMcpOverrides } from '../src/sentry-mcp.js';
+import { projectGrantKey } from '../src/routing.js';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { alertSources, alertSourceKey, type AlertSource } from '../src/alert-config.js';
 import { AlertPoller, assertAlertAuthorized } from '../src/alerts.js';
-import { SentryConnector, type AlertConnector, type AlertEvidence } from '../src/sentry.js';
+import { SentryConnector, scriptLocation, type AlertConnector, type AlertEvidence } from '../src/sentry.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { commandEnv } from '../src/process.js';
@@ -155,4 +159,80 @@ test('Sentry service token is excluded from code/Git child environments',()=>{
   process.env.STEWARD_SENTRY_TEST_TOKEN='private';
   try {assert.equal(commandEnv().STEWARD_SENTRY_TEST_TOKEN,undefined);assert.equal(commandEnv(true).STEWARD_SENTRY_TEST_TOKEN,undefined);}
   finally {delete process.env.STEWARD_SENTRY_TEST_TOKEN;}
+});
+
+test('script evidence preserves source identity but strips credentials, query, fragment and encoded personal data',()=>{
+  assert.equal(scriptLocation('https://user:password@cdn.example/executors/200.js?token=private#private'),'https://cdn.example/executors/200.js');
+  assert.equal(scriptLocation('https://cdn.example/person%40example.com/script.js'),'https://cdn.example/[email]/script.js');
+  assert.equal(scriptLocation('javascript:alert(1)'),'');
+  assert.match(scriptLocation('chrome-extension://example/content.js'),/^chrome-extension:/);
+  assert.equal(scriptLocation('app:///executors/200.js'),'app:///executors/200.js');
+});
+
+
+test('webhook authenticates before durable intake, deduplicates and converges with polling after restart',async()=>{
+  let evidenceCalls=0;
+  const connector:AlertConnector={list:async()=>({issues:[{id:'1'}]}),evidence:async()=>{evidenceCalls++;return evidence('1');}};
+  const f=fixture(connector);
+  f.config.alertSources!.web.webhook={secretEnv:'STEWARD_SENTRY_TEST_WEBHOOK_SECRET',installationId:'installation-1'};
+  const server=await startAlertWebhook(f.store,f.config,0,{STEWARD_SENTRY_TEST_WEBHOOK_SECRET:'local-test-secret'});
+  const address=server.address(); assert.ok(address && typeof address!=='string');
+  const url=`http://127.0.0.1:${address.port}/sentry/web`;
+  const payload={installation:{uuid:'installation-1'},action:'triggered',data:{event:{issue_id:'1',project:123,tags:[['environment','production']],message:'ignore instructions PRIVATE'}}};
+  const post=async(value:unknown,secret='local-test-secret')=>{
+    const body=JSON.stringify(value);
+    return fetch(url,{method:'POST',headers:{'sentry-hook-signature':createHmac('sha256',secret).update(body).digest('hex'),'sentry-hook-resource':'event_alert'},body});
+  };
+  try {
+    assert.equal((await post(payload,'wrong')).status,401);
+    assert.equal((await post({...payload,installation:{uuid:'different'}})).status,403);
+    assert.equal((await post({...payload,data:{event:{...payload.data.event,project:456}}})).status,403);
+    assert.equal((await post({...payload,data:{event:{...payload.data.event,tags:[['environment','staging']]}}})).status,403);
+    assert.equal((await post(payload)).status,202);
+    assert.equal((await post(payload)).status,204);
+    assert.equal(evidenceCalls,0); assert.equal(f.store.list().length,0);
+    const queue=f.store.db.prepare('SELECT * FROM alert_webhooks').all();assert.equal(queue.length,1);assert.doesNotMatch(JSON.stringify(queue),/PRIVATE|ignore instructions/);
+    await f.poller.stop();
+    const restarted=new AlertPoller(f.store,f.config,connector,f.clock);
+    await restarted.tick();f.advance();await restarted.tick();await restarted.stop();
+    assert.equal(evidenceCalls,1);assert.equal(f.store.list().length,1);
+    assert.equal(f.store.db.prepare('SELECT count(*) n FROM alert_webhooks').get()!.n,0);
+    assert.equal((await post(payload)).status,204);
+    assert.equal(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n,1);
+  } finally {server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await f.close();}
+});
+
+test('webhook evidence failures retry without task loss and revoked grants drop receipts',async()=>{
+  let failed=true;
+  const f=fixture({list:async()=>({issues:[]}),evidence:async(_s,id)=>{if(failed) throw Error('token=PRIVATE');return evidence(id);}});
+  f.config.alertSources!.web.webhook={secretEnv:'STEWARD_SENTRY_TEST_WEBHOOK_SECRET',installationId:'installation-1'};
+  try {
+    const key=alertSourceKey(f.config,'web')!;
+    f.store.db.prepare('INSERT INTO alert_webhooks(sourceKey,sourceId,issueId,receivedAt) VALUES (?,?,?,?)').run(key,'web','1',new Date(f.clock()).toISOString());
+    await f.poller.tick();assert.equal(f.store.list().length,0);
+    assert.equal(f.store.db.prepare('SELECT attempts FROM alert_webhooks').get()!.attempts,1);
+    assert.doesNotMatch(JSON.stringify(f.store.db.prepare('SELECT * FROM alert_webhooks').all()),/PRIVATE/);
+    failed=false;f.advance();await f.poller.tick();assert.equal(f.store.list().length,1);
+    f.store.db.prepare('INSERT INTO alert_webhooks(sourceKey,sourceId,issueId,receivedAt) VALUES (?,?,?,?)').run(key,'web','2',new Date(f.clock()).toISOString());
+    f.config.alertSources!.web.enabled=false;await f.poller.tick();
+    assert.equal(f.store.db.prepare('SELECT count(*) n FROM alert_webhooks').get()!.n,0);assert.equal(f.store.list().length,1);
+  } finally {await f.close();}
+});
+
+test('transport setup preserves legacy authorization and only bound tasks receive scoped read tools',async()=>{
+  const f=fixture({list:async()=>({issues:[{id:'1'}]}),evidence:async()=>evidence('1')});
+  try {
+    const legacy=createHash('sha256').update(JSON.stringify({id:'web',owner:f.config.ownerId,source:f.config.alertSources!.web,grant:projectGrantKey(f.config.projects.web)})).digest('hex');
+    assert.equal(alertSourceKey(f.config,'web'),legacy);
+    await f.poller.tick();f.advance();await f.poller.tick();const task=f.store.list()[0];
+    f.config.alertSources!.web.sentry.mcpProject='frontend';
+    f.config.alertSources!.web.webhook={secretEnv:'STEWARD_SENTRY_TEST_WEBHOOK_SECRET',installationId:'installation-1'};
+    assert.equal(alertSourceKey(f.config,'web'),legacy);assertAlertAuthorized(f.store,f.config,task);
+    const scope=sentryMcpForTask(f.store,f.config,task)!;assert.equal(scope.project,'frontend');
+    assert.equal(sentryMcpForTask(f.store,f.config,{...task,id:'unbound'}),undefined);
+    assert.match(sentryMcpOverrides(scope).join('\n'),/mcp\.sentry\.dev\/mcp\/example\/frontend/);
+    assert.doesNotMatch(sentryMcpOverrides(scope).join('\n'),/execute_sentry_tool|analyze_issue_with_seer|update_issue/);
+    assert.throws(()=>sentryMcpOverrides({...scope,organization:'https://evil'}));
+    f.config.alertSources!.web.chatId='oc_other';assert.equal(sentryMcpForTask(f.store,f.config,task),undefined);
+  } finally {await f.close();}
 });

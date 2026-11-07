@@ -24,7 +24,20 @@ const record = (v: unknown): Record<string, any> => v && typeof v === 'object' &
 function sourceFile(value: unknown): string {
   if (typeof value !== 'string') return '';
   try { const u = new URL(value); return redactAlertText(decodeURIComponent(u.pathname).split(/[?#]/)[0],200); }
-  catch { return redactAlertText(value.split(/[?#]/)[0],200); }
+  catch {
+    const path=value.split(/[?#]/)[0];
+    try {return redactAlertText(decodeURIComponent(path),200);} catch {return redactAlertText(path,200);}
+  }
+}
+export function scriptLocation(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  try {
+    const u=new URL(value);
+    if (!['https:','http:','chrome-extension:','moz-extension:','webpack:','app:'].includes(u.protocol)) return '';
+    // Preserve the origin needed to distinguish first-party code from injected scripts.
+    // Never retain userinfo, query strings, fragments, source context or frame variables.
+    return `${u.protocol}//${redactAlertText(u.host,160)}${sourceFile(u.pathname)}`;
+  } catch {return sourceFile(value);}
 }
 
 export class SentryConnector implements AlertConnector {
@@ -74,7 +87,8 @@ export class SentryConnector implements AlertConnector {
     const exception = (Array.isArray(values) ? values : []).slice(0,3).map(record).map(e => ({
       type:redactAlertText(e.type,100), value:redactAlertText(e.value),
       frames:(Array.isArray(e.stacktrace?.frames) ? e.stacktrace.frames : []).slice(-20).map(record).map((f: Record<string, any>) => ({
-        filename:sourceFile(f.filename),function:redactAlertText(f.function,150),
+        filename:sourceFile(f.filename),absPath:scriptLocation(f.absPath || f.abs_path || f.filename),function:redactAlertText(f.function,150),
+        sourceLink:scriptLocation(f.sourceLink),mappingErrors:(Array.isArray(f.errors) ? f.errors : []).slice(0,5).map((error:unknown)=>redactAlertText(record(error).type,100)).filter(Boolean),
         line:count(f.lineNo),column:count(f.colNo),inApp:f.inApp === true,
       })),
     }));

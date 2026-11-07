@@ -46,6 +46,17 @@ test('requires subscription before starting inference and resumes stored thread'
   assert.equal(rpc.closed, true);
 });
 
+test('bound alert execution passes scoped MCP configuration and requires evidence before clarification',async()=>{
+  const rpc=new FakeRpc();rpc.onTurn=()=>rpc.finish();
+  const scope={organization:'example',project:'web',environment:'production'};
+  let received:unknown;
+  const executor=new CodexExecutor('unused',(_command,_cwd,mcp)=>{received=mcp;return rpc;});
+  await executor.run({...task,sentryMcp:scope},{path:'.',sandbox:'read-only'},setup(rpc).hooks,AbortSignal.timeout(5000));
+  assert.deepEqual(received,scope);
+  assert.match(rpc.params['thread/start'].developerInstructions,/obtain missing issue\/event\/release\/stack evidence before asking/);
+  assert.match(rpc.params['thread/start'].developerInstructions,/does not filter environments/);
+});
+
 test('API-only or missing authentication stops before any thread or turn', async () => {
   const rpc = new FakeRpc(); rpc.subscription = async () => { throw new Error('subscription required'); };
   await assert.rejects(setup(rpc).run(), /subscription required/);

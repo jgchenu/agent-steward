@@ -36,7 +36,50 @@ export class AlertPoller {
     if (this.abort.signal.aborted) return Promise.resolve();
     this.active = this.poll().finally(() => {this.active=undefined;}); return this.active;
   }
+  private hasCapacity(id: string): boolean {
+    const source=this.config.alertSources![id], day=new Date(this.now()).toISOString().slice(0,10);
+    const today=Number(this.store.db.prepare('SELECT count(*) n FROM alert_tasks WHERE sourceId=? AND createdAt>=?').get(id,day)!.n);
+    const pending=Number(this.store.db.prepare("SELECT count(*) n FROM alert_tasks a JOIN tasks t ON t.id=a.taskId WHERE t.status IN ('queued','running','waiting_input','waiting_approval','interrupted')").get()!.n);
+    return today<source.maxTasksPerDay && pending<2;
+  }
+  private async intake(id: string, key: string, issueId: string): Promise<boolean> {
+    if (this.store.db.prepare('SELECT 1 FROM alert_tasks WHERE sourceKey=? AND issueId=?').get(key,issueId)) return true;
+    if (!this.hasCapacity(id)) return false;
+    const source=this.config.alertSources![id];
+    const evidence=await this.connector.evidence(source,issueId,this.abort.signal);
+    if (evidence.issueId!==issueId) throw Error('Alert evidence mismatch');
+    if (this.abort.signal.aborted || alertSourceKey(this.config,id)!==key) return false;
+    return this.store.transaction(() => {
+      if (this.store.db.prepare('SELECT 1 FROM alert_tasks WHERE sourceKey=? AND issueId=?').get(key,issueId)) return true;
+      if (!this.hasCapacity(id)) return false;
+      const task=this.store.create(source.chatId,source.project,prompt(evidence),source.mode);
+      this.store.db.prepare('INSERT INTO alert_tasks(sourceId,sourceKey,issueId,taskId,createdAt) VALUES (?,?,?,?,?)')
+        .run(id,key,issueId,task.id,new Date(this.now()).toISOString());
+      this.store.event(task.id,'alert_source',JSON.stringify({sourceId:id,kind:source.kind,issueId,url:evidence.url}));
+      this.store.enqueue(source.chatId,`收到监控问题：${evidence.title}\n${evidence.url}\n任务 ${task.id} 已排队，分析和修复结果会回到这里。`,{kind:'task',taskId:task.id});
+      return true;
+    });
+  }
+  private async drainWebhooks(): Promise<void> {
+    const rows=this.store.db.prepare('SELECT * FROM alert_webhooks WHERE dueAt<=? ORDER BY receivedAt LIMIT 20').all(this.now());
+    for (const row of rows) {
+      if (this.abort.signal.aborted) return;
+      const id=String(row.sourceId),key=String(row.sourceKey),issueId=String(row.issueId);
+      if (alertSourceKey(this.config,id)!==key || !this.config.alertSources?.[id].webhook) {
+        this.store.db.prepare('DELETE FROM alert_webhooks WHERE sourceKey=? AND issueId=?').run(key,issueId);continue;
+      }
+      try {
+        if (await this.intake(id,key,issueId)) this.store.db.prepare('DELETE FROM alert_webhooks WHERE sourceKey=? AND issueId=?').run(key,issueId);
+        else this.store.db.prepare('UPDATE alert_webhooks SET dueAt=?,error=? WHERE sourceKey=? AND issueId=?').run(this.now()+60_000,'capacity_wait',key,issueId);
+      } catch {
+        if (this.abort.signal.aborted) return;
+        this.store.db.prepare('UPDATE alert_webhooks SET dueAt=?,attempts=attempts+1,error=? WHERE sourceKey=? AND issueId=?')
+          .run(this.now()+Math.min(3600,30*2**Math.min(Number(row.attempts),7))*1000,'Webhook evidence unavailable',key,issueId);
+      }
+    }
+  }
   private async poll(): Promise<void> {
+    await this.drainWebhooks();
     for (const [id,source] of Object.entries(this.config.alertSources ?? {})) {
       const key = alertSourceKey(this.config,id);
       if (!key || (this.due.get(key) ?? 0) > this.now() || this.abort.signal.aborted) continue;
@@ -55,23 +98,7 @@ export class AlertPoller {
         if (this.abort.signal.aborted || alertSourceKey(this.config,id) !== key) continue;
         let full = true;
         for (const issue of page.issues) {
-          if (this.store.db.prepare('SELECT 1 FROM alert_tasks WHERE sourceKey=? AND issueId=?').get(key,issue.id)) continue;
-          const day = new Date(this.now()).toISOString().slice(0,10);
-          const today = this.store.db.prepare('SELECT count(*) n FROM alert_tasks WHERE sourceId=? AND createdAt>=?').get(id,day)!.n as number;
-          const pending = this.store.db.prepare("SELECT count(*) n FROM alert_tasks a JOIN tasks t ON t.id=a.taskId WHERE t.status IN ('queued','running','waiting_input','waiting_approval','interrupted')").get()!.n as number;
-          if (today >= source.maxTasksPerDay || pending >= 2) { full=false; break; }
-          const evidence = await this.connector.evidence(source,issue.id,this.abort.signal);
-          if (evidence.issueId !== issue.id) throw Error('Alert evidence mismatch');
-          if (this.abort.signal.aborted || alertSourceKey(this.config,id) !== key) {full=false;break;}
-          this.store.transaction(() => {
-            // Task, dedup claim, provenance and notification are one atomic write.
-            if (this.store.db.prepare('SELECT 1 FROM alert_tasks WHERE sourceKey=? AND issueId=?').get(key,issue.id)) return;
-            const task = this.store.create(source.chatId,source.project,prompt(evidence),source.mode);
-            this.store.db.prepare('INSERT INTO alert_tasks(sourceId,sourceKey,issueId,taskId,createdAt) VALUES (?,?,?,?,?)')
-              .run(id,key,issue.id,task.id,new Date(this.now()).toISOString());
-            this.store.event(task.id,'alert_source',JSON.stringify({sourceId:id,kind:source.kind,issueId:issue.id,url:evidence.url}));
-            this.store.enqueue(source.chatId,`收到监控问题：${evidence.title}\n${evidence.url}\n任务 ${task.id} 已排队，分析和修复结果会回到这里。`,{kind:'task',taskId:task.id});
-          });
+          if (!await this.intake(id,key,issue.id)) {full=false;break;}
         }
         if (full) {
           if (page.next === state.cursor) throw Error('Sentry pagination stalled');
