@@ -1,3 +1,4 @@
+import { alertTopic, alertUpdateCurrent, recordTopicMessage } from '../alert-collaboration.js';
 import { evidenceBytes } from '../evidence.js';
 import { createHash } from 'node:crypto';
 import * as lark from '@larksuiteoapi/node-sdk';
@@ -100,6 +101,14 @@ export class FeishuChannel implements Channel {
     await releaseMedia(snapshot, this.config.stateDir);
   }
   async send(chatId: string, text: string, deliveryId: string, view?: View): Promise<void> {
+    const collaboration=view?.kind==='alert-collaboration' ? view : undefined;
+    const topic=collaboration && alertTopic(this.store,collaboration.topicId);
+    if (collaboration) {
+      if (!topic || !alertUpdateCurrent(this.store,this.config,chatId,collaboration)) throw Error('群告警通知授权或进展已变化。');
+      if (collaboration.root && topic.rootId) return;
+      if (!collaboration.root && !topic.rootId) throw Error('问题话题尚未送达。');
+      view={kind:'notice',...(topic.rootId ? {conversation:{anchorId:topic.rootId,sourceId:topic.rootId,scope:'thread'}} : {})};
+    }
     const scopedTask = view && 'taskId' in view ? this.store.get(view.taskId) : undefined;
     if (view && scopedTask?.conversation) view = { ...view, conversation: scopedTask.conversation };
     if (view?.kind === 'evidence') {
@@ -139,7 +148,8 @@ export class FeishuChannel implements Channel {
             data: { msg_type: 'post', content, uuid, reply_in_thread: true } })
           : await this.client.im.message.create({ params: { receive_id_type: 'chat_id' }, data: { receive_id: chatId, msg_type: 'post', content, uuid } });
         if (result.code !== 0 || !result.data?.message_id) throw new Error(`Feishu reply error ${result.code}`);
-        this.store.saveCardMessage(chatId, key, result.data.message_id);
+        if (topic && collaboration) recordTopicMessage(this.store,topic,result.data.message_id,result.data.thread_id,!!collaboration.root && i===0,key);
+        else this.store.saveCardMessage(chatId, key, result.data.message_id);
         if (scopedTask) {
           this.store.bindConversation(chatId, result.data.message_id, scopedTask.id);
           if (result.data.thread_id) this.store.bindConversation(chatId, result.data.thread_id, scopedTask.id);

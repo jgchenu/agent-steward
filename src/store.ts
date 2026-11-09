@@ -78,7 +78,18 @@ export class Store {
         sourceKey TEXT NOT NULL, issueId TEXT NOT NULL, signature TEXT NOT NULL,
         reason TEXT NOT NULL, confirmedAt INTEGER NOT NULL, PRIMARY KEY(sourceKey,issueId));
       CREATE TABLE IF NOT EXISTS alert_digests (sourceKey TEXT PRIMARY KEY, sentAt INTEGER NOT NULL);
-      PRAGMA user_version=14;`);
+      CREATE TABLE IF NOT EXISTS alert_topics (
+        id TEXT PRIMARY KEY, sourceId TEXT NOT NULL, sourceKey TEXT NOT NULL, issueId TEXT NOT NULL,
+        chatId TEXT NOT NULL, taskId TEXT NOT NULL, rootId TEXT, threadId TEXT,
+        UNIQUE(sourceKey,issueId,chatId));
+      CREATE TABLE IF NOT EXISTS alert_topic_messages (
+        chatId TEXT NOT NULL, messageId TEXT NOT NULL, topicId TEXT NOT NULL, PRIMARY KEY(chatId,messageId));
+      CREATE TABLE IF NOT EXISTS alert_topic_updates (
+        topicId TEXT NOT NULL, updateKey TEXT NOT NULL, PRIMARY KEY(topicId,updateKey));
+      CREATE TABLE IF NOT EXISTS alert_topic_evidence (
+        seq INTEGER PRIMARY KEY, topicId TEXT NOT NULL, messageId TEXT NOT NULL UNIQUE,
+        senderId TEXT NOT NULL, text TEXT NOT NULL, createdAt TEXT NOT NULL);
+      PRAGMA user_version=15;`);
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -421,6 +432,7 @@ export class Store {
     return this.db.prepare('SELECT * FROM outbox WHERE sent=0 AND due<=? ORDER BY rowid LIMIT 1')
       .get(Date.now()) as unknown as Outgoing | undefined;
   }
+  retireOutgoing(id: string): void { this.db.prepare('UPDATE outbox SET sent=2 WHERE id=?').run(id); }
   delivered(id: string): void { this.db.prepare('UPDATE outbox SET sent=1 WHERE id=?').run(id); }
   retry(id: string, attempts: number): void {
     this.db.prepare('UPDATE outbox SET attempts=attempts+1,due=? WHERE id=?')

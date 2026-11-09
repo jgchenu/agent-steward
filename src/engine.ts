@@ -1,3 +1,4 @@
+import { alertGroupContext, alertUpdateCurrent, receiveAlertEvidence, syncAlertTopics } from './alert-collaboration.js';
 import { assertAlertAuthorized } from './alerts.js';
 import { sentryMcpForTask } from './sentry-mcp.js';
 import { taskConcurrency } from './config.js';
@@ -98,6 +99,7 @@ export class Engine {
       }); void this.flush();return;
     }
     if (message.senderId !== this.config.ownerId && !requesterAllowed(this.config,message.senderId)) return;
+    if (receiveAlertEvidence(this.store,this.config,message,id=>this.active.has(id))) { this.tick(); void this.flush(); return; }
     const requesterId = message.senderId === this.config.ownerId ? undefined : message.senderId;
     const ownTasks = () => this.store.list(message.chatId,requesterId ?? null).filter(t => !requesterId || !t.requesterRevoked);
     const accessible = (task: Task | undefined) => canControlTask(this.config,message.senderId,task);
@@ -620,6 +622,8 @@ export class Engine {
         this.store.saveContext(task.id, snapshot); this.store.event(task.id, 'context_loaded', snapshot.summary);
         executionTask = { ...task, contextSnapshot: snapshot };
       }
+      const groupEvidence=alertGroupContext(this.store,this.config,task);
+      if (groupEvidence) executionTask={...executionTask,contextSnapshot:groupEvidence};
       executionTask = { ...executionTask, sentryMcp:sentryMcpForTask(this.store,this.config,task), projectCandidates: hooks.proposeProject ? Object.keys(resourceGrants) : undefined,
         projectCandidateGrants: hooks.proposeProject ? resourceGrants : undefined,
         routingContext: JSON.stringify({ currentProject: task.project === CONVERSATION ? null : project.label ?? task.project,
@@ -731,10 +735,12 @@ export class Engine {
     try { await this.flushPromise; } finally { this.flushPromise = undefined; }
   }
   private async drain(): Promise<void> {
+      syncAlertTopics(this.store,this.config);
       let item;
       while ((item = this.store.outgoing())) {
         try {
           const view = item.view ? JSON.parse(item.view) as View : undefined;
+          if (view?.kind==='alert-collaboration' && !alertUpdateCurrent(this.store,this.config,item.chatId,view)) { this.store.retireOutgoing(item.id);continue; }
           if (view?.requesterId && (!requesterAllowed(this.config,view.requesterId) || (view.conversation && !this.config.groupChats)
             || ('taskId' in view && this.store.get(view.taskId)?.requesterRevoked))) { this.store.delivered(item.id);continue; }
           await this.channel.send(item.chatId, item.text, item.id, view); this.store.delivered(item.id);

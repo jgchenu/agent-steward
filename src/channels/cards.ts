@@ -90,6 +90,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     if ((page + 1) * 3 < tasks.length) nav.push(button('下一页', { op: 'list', page: page + 1 }));
     return card('我的任务', `最近 ${tasks.length} 项 · 第 ${page + 1} 页 · 点击任务查看详情`, 'grey', [...(items.length ? items : [box('还没有任务。从一个小任务开始吧。')]), row(...nav)]);
   }
+  if (view.kind === 'alert-collaboration') throw Error('群告警进展只支持普通消息。');
   const task = store.get(view.taskId);
   if (!task || task.chatId !== chatId || (requesterId && (task.requesterId !== requesterId || task.requesterRevoked))) return card('任务不可用', '请重新打开任务列表', 'grey', [box('找不到当前会话中的任务。'), homeButton()]);
   const [label, color] = status[task.status];
