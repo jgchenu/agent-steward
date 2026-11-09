@@ -10,7 +10,7 @@ export function alertBindingForTask(store: Store, taskId: string): AlertBinding 
   for (let depth=0;depth<100;depth++) {
     if (seen.has(id)) throw Error('告警任务继承链异常，不能继续。');
     seen.add(id);
-    const binding=store.db.prepare('SELECT sourceId,sourceKey,issueId FROM alert_tasks WHERE taskId=?').get(id) as AlertBinding | undefined;
+    const binding=store.db.prepare('SELECT sourceId,sourceKey,issueId FROM alert_runs WHERE taskId=? UNION ALL SELECT sourceId,sourceKey,issueId FROM alert_tasks WHERE taskId=? LIMIT 1').get(id,id) as AlertBinding | undefined;
     if (binding) return binding;
     const events=store.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='baseline_authorized'").all(id);
     if (!events.length) return;

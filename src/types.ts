@@ -38,6 +38,7 @@ export interface Incoming {
   id: string; senderId: string; chatId: string; text: string;
   chatType: 'p2p' | 'group'; senderType: string;
   conversation?: Conversation; botMentioned?: boolean; mentionsOthers?: boolean;
+  replyToMessageId?: string;
 }
 export interface Check { name: string; command: string; args: string[]; timeoutSeconds?: number }
 export interface Project {

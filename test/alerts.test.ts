@@ -15,6 +15,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { commandEnv } from '../src/process.js';
 import type { Config } from '../src/types.js';
+import { confirmAlertNoise, clearAlertNoise, noiseSignature, ALERT_RECHECK_MS } from '../src/alert-triage.js';
 
 const source: AlertSource = {kind:'sentry',enabled:true,project:'web',chatId:'oc_owner_dm',mode:'workspace-write',pollSeconds:60,maxTasksPerDay:5,
   sentry:{region:'us',organization:'example',projectId:'123',environment:'production',tokenEnv:'STEWARD_SENTRY_TEST_TOKEN'}};
@@ -30,6 +31,149 @@ function fixture(connector: AlertConnector) {
   return {dir,path,store,config,poller,advance:()=>{now+=60_000;},clock:()=>now,
     async close(){await poller.stop();store.close();rmSync(dir,{recursive:true,force:true});}};
 }
+
+const extensionEvidence=(id='1'):AlertEvidence=>({...evidence(id),eventId:'a'.repeat(32),completeStack:true,
+  extensionOrigins:[`chrome-extension://${'a'.repeat(32)}`],exception:[{type:'ReferenceError',value:'M_ID',
+    frames:[{absPath:'app:///executors/200.js',line:761,column:18,inApp:true}]}]});
+const hour=(f:ReturnType<typeof fixture>)=>{for(let i=0;i<ALERT_RECHECK_MS/60_000;i++) f.advance();};
+
+test('unseen releases and stacks create isolated recurrences; seen signatures and restart do not replay',async()=>{
+  let e=evidence('1');const connector:AlertConnector={list:async()=>({issues:[{id:'1'}]}),evidence:async()=>e};
+  const f=fixture(connector);
+  try {
+    await f.poller.tick();f.advance();await f.poller.tick();const original=f.store.list()[0];f.store.set(original.id,'review');
+    e={...e,release:'v2'};f.advance();await f.poller.tick();assert.equal(f.store.list().length,1); // cooldown
+    hour(f);await f.poller.tick();const second=f.store.list()[1];assert.equal(f.store.list().length,2);
+    assert.notEqual(second.id,original.id);assert.match(second.prompt,new RegExp(original.id));assert.equal(second.threadId,null);
+    assert.equal(f.store.get(original.id)!.status,'review');assertAlertAuthorized(f.store,f.config,second);
+    f.store.set(second.id,'review');e={...e,release:'v1'};hour(f);await f.poller.tick();assert.equal(f.store.list().length,2);
+    await f.poller.stop();const restarted=new AlertPoller(f.store,f.config,connector,f.clock);await restarted.tick();await restarted.stop();
+    assert.equal(f.store.list().length,2);
+    f.config.alertSources!.web.enabled=false;assert.throws(()=>assertAlertAuthorized(f.store,f.config,second));
+    assert.equal(f.store.db.prepare('SELECT count(*) n FROM alert_tasks').get()!.n,1);
+    assert.equal(f.store.db.prepare('SELECT count(*) n FROM alert_runs').get()!.n,2);
+  } finally {await f.close();}
+});
+
+test('waiting input and daily budget retain recurrence without overwriting old task or handled evidence',async()=>{
+  let e=evidence('1');const f=fixture({list:async()=>({issues:[{id:'1'}]}),evidence:async()=>e});
+  try {
+    await f.poller.tick();f.advance();await f.poller.tick();const original=f.store.list()[0];f.store.set(original.id,'waiting_input');
+    e={...e,release:'v2'};hour(f);await f.poller.tick();assert.equal(f.store.list().length,1);
+    assert.equal(JSON.parse(String(f.store.db.prepare('SELECT baseline FROM alert_observations').get()!.baseline)).release,'v1');
+    assert.equal(f.store.get(original.id)!.status,'waiting_input');f.store.set(original.id,'review');
+    // Prefill today's budget without changing the source grant.
+    for(let i=0;i<4;i++) f.store.db.prepare('INSERT INTO alert_runs VALUES (?,?,?,?,?,?)').run(`budget-${i}`,'web','other',`${i+2}`,'x',new Date(f.clock()).toISOString());
+    f.advance();await f.poller.tick();assert.equal(f.store.list().length,1);
+    assert.equal(f.store.db.prepare('SELECT error FROM alert_cursors').get()!.error,'capacity_wait');
+    for(let i=0;i<24;i++) hour(f);await f.poller.tick();assert.equal(f.store.list().length,2);
+  } finally {await f.close();}
+});
+
+test('cumulative impact is measured against last analysis, so gradual growth triggers once',async()=>{
+  let e=evidence('1');const f=fixture({list:async()=>({issues:[{id:'1'}]}),evidence:async()=>e});
+  try {
+    await f.poller.tick();f.advance();await f.poller.tick();f.store.set(f.store.list()[0].id,'review');hour(f);
+    for(const count of [30,60,109]) {e={...e,count};f.advance();await f.poller.tick();assert.equal(f.store.list().length,1);}
+    e={...e,count:110};f.advance();await f.poller.tick();assert.equal(f.store.list().length,2);
+    assert.match(f.store.list()[1].prompt,/累计影响增长/);f.store.set(f.store.list()[1].id,'review');hour(f);await f.poller.tick();assert.equal(f.store.list().length,2);
+  } finally {await f.close();}
+});
+
+test('legacy intake migrates budget and provenance and establishes baseline without replay',async()=>{
+  let e=evidence('1');const connector:AlertConnector={list:async()=>({issues:[{id:'1'}]}),evidence:async()=>e};
+  const f=fixture(connector);
+  try {
+    const original=f.store.create(source.chatId,'web','legacy','workspace-write');f.store.set(original.id,'review');
+    f.store.db.prepare('INSERT INTO alert_tasks VALUES (?,?,?,?,?)').run('web',alertSourceKey(f.config,'web')!,'1',original.id,new Date(f.clock()).toISOString());
+    const migrated=new Store(f.path),poller=new AlertPoller(migrated,f.config,connector,f.clock);
+    try {
+      assert.equal(migrated.db.prepare('SELECT count(*) n FROM alert_runs').get()!.n,1);
+      await poller.tick();f.advance();await poller.tick();assert.equal(migrated.list().length,1);
+      assertAlertAuthorized(migrated,f.config,original);e={...e,release:'v2'};hour(f);await poller.tick();assert.equal(migrated.list().length,2);
+    } finally {await poller.stop();migrated.close();}
+  } finally {await f.close();}
+});
+
+test('noise requires exact complete extension evidence and an explicit local confirmation',async()=>{
+  for(const e of [evidence('1'),{...extensionEvidence(),completeStack:false},{...extensionEvidence(),extensionOrigins:[]},
+    {...extensionEvidence(),extensionOrigins:['moz-extension://private-uuid']},
+    {...extensionEvidence(),exception:[{frames:[{absPath:'https://product.example/app.js'}]}]}]) assert.equal(noiseSignature(e),undefined);
+  let e=extensionEvidence();const f=fixture({list:async()=>({issues:[{id:'1'}]}),evidence:async()=>e});
+  try {
+    assert.throws(()=>confirmAlertNoise(f.store,f.config,'web','1',noiseSignature(e)!,'confirmed'),/complete extension/);
+    await f.poller.tick();f.advance();await f.poller.tick();assert.equal(f.store.list().length,1);f.store.set(f.store.list()[0].id,'review');
+    assert.throws(()=>confirmAlertNoise(f.store,f.config,'web','1','stale-signature','verified',f.clock()),/current evidence/);
+    confirmAlertNoise(f.store,f.config,'web','1',noiseSignature(e)!,'Locally verified script origin',f.clock());
+    f.advance();await f.poller.tick();assert.equal(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n,2);
+    assert.equal(JSON.parse(String(f.store.db.prepare('SELECT view FROM outbox ORDER BY rowid DESC LIMIT 1').get()!.view)).fresh,true);
+    f.advance();await f.poller.tick();assert.equal(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n,2);
+    e={...e,release:'v2',eventId:'b'.repeat(32)};f.advance();await f.poller.tick();assert.equal(f.store.list().length,1);
+    assert.equal(f.store.db.prepare('SELECT pendingNoise FROM alert_observations').get()!.pendingNoise,1);
+    hour(f);await f.poller.tick();assert.equal(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n,3);
+    e={...e,extensionOrigins:[]};hour(f);await f.poller.tick();assert.equal(f.store.list().length,2);
+    assert.match(f.store.list()[1].prompt,/不再匹配/);
+  } finally {await f.close();}
+});
+
+test('a blocked issue does not starve confirmed noise later on the page; revocation fences pending digests',async()=>{
+  let ids=['1'];let noise=extensionEvidence();const f=fixture({list:async()=>({issues:ids.map(id=>({id}))}),evidence:async(_s,id)=>id==='1' ? noise : evidence(id)});
+  try {
+    await f.poller.tick();f.advance();await f.poller.tick();f.store.set(f.store.list()[0].id,'review');
+    confirmAlertNoise(f.store,f.config,'web','1',noiseSignature(noise)!,'verified',f.clock());f.advance();await f.poller.tick();
+    ids=['2','3','4','1'];noise={...noise,eventId:'b'.repeat(32)};f.advance();await f.poller.tick();
+    assert.equal(f.store.list().length,3);assert.equal(f.store.db.prepare('SELECT error FROM alert_cursors').get()!.error,'capacity_wait');
+    assert.equal(f.store.db.prepare("SELECT pendingNoise FROM alert_observations WHERE issueId='1'").get()!.pendingNoise,1);
+    const receipts=f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n;
+    f.config.alertSources!.web.enabled=false;hour(f);await f.poller.tick();
+    assert.equal(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n,receipts);
+    f.config.alertSources!.web.enabled=true;await f.poller.tick();assert.equal(Number(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n),Number(receipts)+1);
+  } finally {await f.close();}
+});
+
+test('noise mismatch remains pending through cooldown and budget without publishing stale digest',async()=>{
+  let e=extensionEvidence();const f=fixture({list:async()=>({issues:[{id:'1'}]}),evidence:async()=>e});
+  try {
+    await f.poller.tick();f.advance();await f.poller.tick();f.store.set(f.store.list()[0].id,'review');
+    confirmAlertNoise(f.store,f.config,'web','1',noiseSignature(e)!,'verified',f.clock());f.advance();await f.poller.tick();
+    e={...e,eventId:'b'.repeat(32)};f.advance();await f.poller.tick();
+    e={...e,exception:[]};f.advance();await f.poller.tick();assert.equal(f.store.list().length,1);
+    assert.equal(f.store.db.prepare('SELECT pendingNoise FROM alert_observations').get()!.pendingNoise,0);
+    hour(f);await f.poller.tick();assert.equal(f.store.list().length,2);assert.equal(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n,3);
+  } finally {await f.close();}
+});
+
+test('digest and recurrence receipt rollback leave evidence retryable and clearing a rule reopens analysis',async()=>{
+  let e=extensionEvidence();const f=fixture({list:async()=>({issues:[{id:'1'}]}),evidence:async()=>e});
+  try {
+    await f.poller.tick();f.advance();await f.poller.tick();f.store.set(f.store.list()[0].id,'review');
+    confirmAlertNoise(f.store,f.config,'web','1',noiseSignature(e)!,'verified',f.clock());
+    f.store.db.exec("CREATE TRIGGER fail_notice BEFORE INSERT ON outbox BEGIN SELECT RAISE(FAIL,'test'); END;");
+    f.advance();await assert.rejects(f.poller.tick(),/test/);
+    assert.equal(f.store.db.prepare('SELECT pendingNoise FROM alert_observations').get()!.pendingNoise,1);
+    assert.equal(f.store.db.prepare('SELECT count(*) n FROM alert_digests').get()!.n,0);
+    f.store.db.exec('DROP TRIGGER fail_notice');f.advance();await f.poller.tick();
+    clearAlertNoise(f.store,f.config,'web','1');hour(f);await f.poller.tick();assert.equal(f.store.list().length,2);
+    f.store.set(f.store.list()[1].id,'review');e={...e,release:'v3'};hour(f);
+    f.store.db.exec("CREATE TRIGGER fail_notice BEFORE INSERT ON outbox BEGIN SELECT RAISE(FAIL,'test'); END;");
+    await assert.rejects(f.poller.tick(),/test/);assert.equal(f.store.list().length,2);
+    f.store.db.exec('DROP TRIGGER fail_notice');f.advance();await f.poller.tick();assert.equal(f.store.list().length,3);
+  } finally {await f.close();}
+});
+
+test('Sentry context whitelist excludes private UUIDs and incomplete stacks from noise rules',async()=>{
+  let context:unknown={evidence:'original_exception_stack',origins:[`chrome-extension://${'a'.repeat(32)}`],private:'PRIVATE'};
+  let frames=Array.from({length:1},()=>({absPath:'app:///executors/200.js',lineNo:761,colNo:18}));
+  const connector=new SentryConnector((async(input)=>Response.json(String(input).includes('/events/')
+    ? {eventID:'a'.repeat(32),dateCreated:'2026-11-06T00:00:00Z',tags:[{key:'environment',value:'production'}],contexts:{browser_extension_source:context,private:'PRIVATE'},
+      entries:[{type:'exception',data:{values:[{type:'Error',stacktrace:{frames}}]}}]}
+    : {id:'1',project:{id:'123'}})) as typeof fetch,{STEWARD_SENTRY_TEST_TOKEN:'PRIVATE'});
+  const read=()=>connector.evidence(source,'1',new AbortController().signal);
+  const first=await read();assert.ok(noiseSignature(first));assert.doesNotMatch(JSON.stringify(first),/PRIVATE/);
+  frames=Array.from({length:21},()=>frames[0]);assert.equal(noiseSignature(await read()),undefined);
+  context={evidence:'original_exception_stack',origins:['moz-extension://PRIVATE']};assert.deepEqual((await read()).extensionOrigins,[]);
+  context={evidence:'guessed',origins:[`chrome-extension://${'a'.repeat(32)}`]};assert.deepEqual((await read()).extensionOrigins,[]);
+});
 
 test('source config rejects unknown connectors, broad projects, external token variables and direct writes',()=>{
   assert.deepEqual(alertSources(undefined),{});
@@ -196,9 +340,9 @@ test('webhook authenticates before durable intake, deduplicates and converges wi
     await f.poller.stop();
     const restarted=new AlertPoller(f.store,f.config,connector,f.clock);
     await restarted.tick();f.advance();await restarted.tick();await restarted.stop();
-    assert.equal(evidenceCalls,1);assert.equal(f.store.list().length,1);
+    assert.equal(evidenceCalls,2);assert.equal(f.store.list().length,1);
     assert.equal(f.store.db.prepare('SELECT count(*) n FROM alert_webhooks').get()!.n,0);
-    assert.equal((await post(payload)).status,204);
+    assert.equal((await post(payload)).status,202);
     assert.equal(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n,1);
   } finally {server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await f.close();}
 });

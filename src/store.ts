@@ -64,7 +64,21 @@ export class Store {
         sourceKey TEXT NOT NULL, sourceId TEXT NOT NULL, issueId TEXT NOT NULL,
         receivedAt TEXT NOT NULL, dueAt INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
         error TEXT, PRIMARY KEY(sourceKey,issueId));
-      PRAGMA user_version=13;`);
+      CREATE TABLE IF NOT EXISTS alert_runs (
+        taskId TEXT PRIMARY KEY, sourceId TEXT NOT NULL, sourceKey TEXT NOT NULL, issueId TEXT NOT NULL,
+        signature TEXT NOT NULL, createdAt TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS alert_run_budget ON alert_runs(sourceId,createdAt);
+      CREATE INDEX IF NOT EXISTS alert_run_issue ON alert_runs(sourceKey,issueId,signature);
+      INSERT OR IGNORE INTO alert_runs SELECT taskId,sourceId,sourceKey,issueId,'',createdAt FROM alert_tasks;
+      CREATE TABLE IF NOT EXISTS alert_observations (
+        sourceKey TEXT NOT NULL, issueId TEXT NOT NULL, latest TEXT NOT NULL, baseline TEXT,
+        handledAt INTEGER NOT NULL DEFAULT 0, pendingNoise INTEGER NOT NULL DEFAULT 0, noiseEvent TEXT,
+        PRIMARY KEY(sourceKey,issueId));
+      CREATE TABLE IF NOT EXISTS alert_noise_rules (
+        sourceKey TEXT NOT NULL, issueId TEXT NOT NULL, signature TEXT NOT NULL,
+        reason TEXT NOT NULL, confirmedAt INTEGER NOT NULL, PRIMARY KEY(sourceKey,issueId));
+      CREATE TABLE IF NOT EXISTS alert_digests (sourceKey TEXT PRIMARY KEY, sentAt INTEGER NOT NULL);
+      PRAGMA user_version=14;`);
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -162,6 +176,17 @@ export class Store {
   }
   isOwnMessage(chatId: string, messageId?: string): boolean {
     return !!messageId && !!this.db.prepare("SELECT 1 FROM card_messages WHERE chatId=? AND messageId=? AND viewKey NOT LIKE 'reaction:%' LIMIT 1").get(chatId, messageId);
+  }
+  directTask(chatId: string, requesterId?: string): Task | undefined {
+    const key=requesterId ? `requester:${requesterId}:dm-focus` : 'dm-focus';
+    const row=this.db.prepare('SELECT taskId FROM conversation_bindings WHERE chatId=? AND messageKey=?').get(chatId,key);
+    const task=row && this.get(String(row.taskId));
+    return task && !task.requesterRevoked && task.chatId===chatId && (task.requesterId ?? undefined)===requesterId ? task : undefined;
+  }
+  focusDirectTask(task: Task): void {
+    if (task.requesterRevoked || task.conversation) return;
+    const key=task.requesterId ? `requester:${task.requesterId}:dm-focus` : 'dm-focus';
+    this.db.prepare('INSERT INTO conversation_bindings VALUES (?,?,?) ON CONFLICT(chatId,messageKey) DO UPDATE SET taskId=excluded.taskId').run(task.chatId,key,task.id);
   }
   saveContext(id: string, snapshot: ContextSnapshot): void {
     this.db.prepare('INSERT INTO context_snapshots VALUES (?,?) ON CONFLICT(taskId) DO UPDATE SET data=excluded.data').run(id, JSON.stringify(snapshot));
@@ -277,7 +302,7 @@ export class Store {
     const requestId = this.request(taskId, 'input', question);
     this.db.prepare('INSERT OR REPLACE INTO graph_waits VALUES (?,?,?,?,NULL)').run(task.orchestrationRunId!, taskId, requestId, step);
     this.set(taskId, 'waiting_input', question);
-    this.enqueue(task.chatId, `${question}${task.conversation ? '' : `\n/answer ${requestId} <回答>`}`, {kind:task.conversation ? 'reply' : 'task',taskId});
+    this.enqueue(task.chatId, question, {kind:'reply',taskId});
     return requestId;
   }
   answerGraph(taskId: string, answer: string): void {
