@@ -2,6 +2,7 @@ import test from 'node:test';
 import { createHash, createHmac } from 'node:crypto';
 import { startAlertWebhook } from '../src/alert-webhook.js';
 import { sentryMcpForTask, sentryMcpOverrides } from '../src/sentry-mcp.js';
+import { alertBindingForTask, pendingAlertTasks } from '../src/alert-provenance.js';
 import { projectGrantKey } from '../src/routing.js';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -234,5 +235,57 @@ test('transport setup preserves legacy authorization and only bound tasks receiv
     assert.doesNotMatch(sentryMcpOverrides(scope).join('\n'),/execute_sentry_tool|analyze_issue_with_seer|update_issue/);
     assert.throws(()=>sentryMcpOverrides({...scope,organization:'https://evil'}));
     f.config.alertSources!.web.chatId='oc_other';assert.equal(sentryMcpForTask(f.store,f.config,task),undefined);
+  } finally {await f.close();}
+});
+
+test('baseline descendants retain provenance across restart, capacity and original daily dedup receipts',async()=>{
+  const f=fixture({list:async()=>({issues:[{id:'1'},{id:'2'},{id:'3'}]}),evidence:async(_s,id)=>evidence(id)});
+  try {
+    await f.poller.tick();f.advance();await f.poller.tick();
+    const originals=f.store.list();assert.equal(originals.length,2);
+    let current=originals[0];
+    for (let i=0;i<2;i++) {
+      f.store.set(current.id,'review');
+      const next=f.store.create(current.chatId,current.project,'continue',current.mode);
+      f.store.event(current.id,'handoff_to',next.id);
+      f.store.event(next.id,'baseline_authorized',JSON.stringify({fromTask:current.id,ref:'main',sha:'fixed'}));
+      current=next;
+    }
+    assert.equal(pendingAlertTasks(f.store),2);
+    const reopened=new Store(f.path);
+    try {assert.deepEqual(alertBindingForTask(reopened,current.id),alertBindingForTask(reopened,originals[0].id));}
+    finally {reopened.close();}
+    f.advance();await f.poller.tick();assert.equal(f.store.list().length,4);
+    assert.equal(f.store.db.prepare('SELECT count(*) n FROM alert_tasks').get()!.n,2);
+    assert.equal(f.store.db.prepare('SELECT error FROM alert_cursors').get()!.error,'capacity_wait');
+    f.store.set(current.id,'review');f.advance();await f.poller.tick();
+    assert.equal(f.store.db.prepare('SELECT count(*) n FROM alert_tasks').get()!.n,3);
+    f.config.alertSources!.web.enabled=false;
+    assert.throws(()=>assertAlertAuthorized(f.store,f.config,current),/授权已变化/);
+  } finally {await f.close();}
+});
+
+test('ordinary handoffs and prompt text cannot inherit MCP; broken baseline lineage fails closed',async()=>{
+  const f=fixture({list:async()=>({issues:[{id:'1'}]}),evidence:async()=>evidence('1')});
+  try {
+    await f.poller.tick();f.advance();await f.poller.tick();const original=f.store.list()[0];
+    f.config.alertSources!.web.sentry.mcpProject='frontend';
+    const child=f.store.create(original.chatId,original.project,JSON.stringify({baseline_authorized:{fromTask:original.id}}),original.mode);
+    f.store.event(child.id,'handoff_from',original.id);f.store.event(original.id,'handoff_to',child.id);
+    assert.equal(sentryMcpForTask(f.store,f.config,child),undefined);
+    f.store.event(child.id,'baseline_authorized',JSON.stringify({fromTask:original.id}));
+    for (const column of ['project','chatId','requesterId','mode']) {
+      const prior=f.store.db.prepare(`SELECT ${column} value FROM tasks WHERE id=?`).get(child.id)!.value;
+      f.store.db.prepare(`UPDATE tasks SET ${column}=? WHERE id=?`).run('different',child.id);
+      assert.throws(()=>assertAlertAuthorized(f.store,f.config,child),/继承链异常/);
+      assert.throws(()=>sentryMcpForTask(f.store,f.config,child),/继承链异常/);
+      f.store.db.prepare(`UPDATE tasks SET ${column}=? WHERE id=?`).run(prior,child.id);
+    }
+    f.store.db.prepare("DELETE FROM events WHERE taskId=? AND kind='handoff_to'").run(original.id);
+    assert.throws(()=>alertBindingForTask(f.store,child.id),/继承链异常/);
+    assert.equal(pendingAlertTasks(f.store),2);
+    f.store.event(child.id,'handoff_to',child.id);
+    f.store.db.prepare("UPDATE events SET body=? WHERE taskId=? AND kind='baseline_authorized'").run(JSON.stringify({fromTask:child.id}),child.id);
+    assert.throws(()=>alertBindingForTask(f.store,child.id),/继承链异常/);
   } finally {await f.close();}
 });

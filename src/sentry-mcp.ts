@@ -1,10 +1,11 @@
 import { alertSourceKey } from './alert-config.js';
+import { alertBindingForTask } from './alert-provenance.js';
 import type { Config, Task } from './types.js';
 import type { Store } from './store.js';
 
 export interface SentryMcp { organization: string; project: string; environment: string }
 export function sentryMcpForTask(store: Store, config: Config, task: Task): SentryMcp | undefined {
-  const binding=store.db.prepare('SELECT sourceId,sourceKey FROM alert_tasks WHERE taskId=?').get(task.id);
+  const binding=alertBindingForTask(store,task.id);
   if (!binding || alertSourceKey(config,String(binding.sourceId))!==binding.sourceKey) return;
   const sentry=config.alertSources![String(binding.sourceId)].sentry;
   if (sentry.mcpProject) return {organization:sentry.organization,project:sentry.mcpProject,environment:sentry.environment};

@@ -33,6 +33,8 @@ Schema v13 adds a bounded `alert_webhooks` receipt queue, keyed by source author
 
 The Engine derives optional Sentry MCP scope from validated alert provenance, never from task text. Codex App Server receives an official project-scoped HTTP MCP override with an explicit read-tool allowlist and required startup. Official Codex owns OAuth storage; service API tokens remain filtered from children. The MCP environment filter is an execution instruction, not a server-side authorization boundary; only org/project scoping is supplied by the endpoint. Existing human questions are not silently answered or resumed by configuring MCP. Live OAuth, readable tool results and actual Sentry webhook delivery are separate acceptance gates.
 
+Approved baseline replacements inherit alert provenance through the controller's durable `baseline_authorized` event and reciprocal `handoff_to` receipt, preserving project, chat, requester and execution mode. This bounded lineage lookup also covers replacements created before the fix; it does not infer grants from prompts or ordinary project handoffs. Source revocation and MCP scoping use the same lookup. Outstanding-work capacity includes active descendants, while the original intake row remains the single deduplication and daily-budget receipt. Invalid or cyclic lineage fails closed and retains an intake slot. No task state or approval is synthesized, and no schema migration is required.
+
 ## Domain
 
 - **Task**: durable work owned by a human; resources are optional. A general task can reason over supplied inputs without a space or code project.

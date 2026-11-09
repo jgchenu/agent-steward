@@ -1,11 +1,12 @@
 import { alertSourceKey } from './alert-config.js';
+import { alertBindingForTask, pendingAlertTasks } from './alert-provenance.js';
 import { SentryConnector, type AlertConnector, type AlertEvidence } from './sentry.js';
 import type { Config, Task } from './types.js';
 import type { Store } from './store.js';
 
 interface Cursor { sourceKey: string; watermark: string; windowEnd: string | null; cursor: string | null }
 export function assertAlertAuthorized(store: Store, config: Config, task: Task): void {
-  const provenance = store.db.prepare('SELECT sourceId,sourceKey FROM alert_tasks WHERE taskId=?').get(task.id) as {sourceId:string;sourceKey:string}|undefined;
+  const provenance = alertBindingForTask(store,task.id);
   if (provenance && alertSourceKey(config,provenance.sourceId) !== provenance.sourceKey) throw Error('告警来源或项目授权已变化，请恢复配置后再继续。');
 }
 
@@ -39,7 +40,7 @@ export class AlertPoller {
   private hasCapacity(id: string): boolean {
     const source=this.config.alertSources![id], day=new Date(this.now()).toISOString().slice(0,10);
     const today=Number(this.store.db.prepare('SELECT count(*) n FROM alert_tasks WHERE sourceId=? AND createdAt>=?').get(id,day)!.n);
-    const pending=Number(this.store.db.prepare("SELECT count(*) n FROM alert_tasks a JOIN tasks t ON t.id=a.taskId WHERE t.status IN ('queued','running','waiting_input','waiting_approval','interrupted')").get()!.n);
+    const pending=pendingAlertTasks(this.store);
     return today<source.maxTasksPerDay && pending<2;
   }
   private async intake(id: string, key: string, issueId: string): Promise<boolean> {
