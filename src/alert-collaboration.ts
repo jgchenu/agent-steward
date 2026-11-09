@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import { alertSourceKey } from './alert-config.js';
-import { alertBindingForTask } from './alert-provenance.js';
+import { alertBindingForTask, alertRepairTask } from './alert-provenance.js';
 import { requesterAllowed } from './requesters.js';
 import { sentryIssueUrl } from './sentry.js';
+import type { AlertAssessment } from './alert-assessment.js';
 import type { Store } from './store.js';
 import type { Config, ContextSnapshot, Incoming, Task, View } from './types.js';
 
@@ -22,7 +23,7 @@ function enqueueUpdate(store: Store, topic: AlertTopic, key: string, text: strin
   store.enqueue(topic.chatId,text,{kind:'alert-collaboration',topicId:topic.id,...(root ? {root:true} : {}),...(snapshot ? {snapshot} : {})});
 }
 // Called inside intake's transaction. No historical private task is automatically published.
-export function openAlertTopic(store: Store, config: Config, sourceId: string, sourceKey: string, issueId: string, task: Task): void {
+export function openAlertTopic(store: Store, config: Config, sourceId: string, sourceKey: string, issueId: string, task: Task, assessment?:AlertAssessment): void {
   const source=config.alertSources?.[sourceId];
   if (!config.groupChats || !source?.collaborationChatId) return;
   const id=createHash('sha256').update(JSON.stringify([sourceKey,issueId,source.collaborationChatId])).digest('hex');
@@ -30,19 +31,29 @@ export function openAlertTopic(store: Store, config: Config, sourceId: string, s
     .run(id,sourceId,sourceKey,issueId,source.collaborationChatId,task.id).changes;
   const topic=alertTopic(store,id)!;
   bindGroupTask(store,topic);
-  if (!created) enqueueUpdate(store,topic,`run:${task.id}`,'这个问题出现了需要复查的证据或影响变化，我会在原话题继续跟进。');
+  const introduction=assessment ? `${assessment.summary}\n\n${assessment.explanation}\n影响：${assessment.impact}\n依据：${assessment.evidence.join('；')}\n我会继续核对并修复，进展和需要你确认的操作都在这个话题里。` : '这个监控问题需要继续核查，已有话题记录保留。';
+  if (!created) enqueueUpdate(store,topic,`run:${task.id}`,introduction);
   const url=sentryIssueUrl(source,issueId);
-  enqueueUpdate(store,topic,'root',`我开始跟进这个监控问题，先核对事件、版本和源码，再判断是否需要修复。\n${url}\n后续进展会接在这个话题里。补充复现线索时请回复我的消息或 @我；${task.chatId===topic.chatId ? '分析、补证和具体操作确认都在这个话题里，由任务主人批准。' : '需要授权的操作会单独在原私聊中确认。'}`,true);
+  enqueueUpdate(store,topic,'root',`${introduction}\n\n[查看 Sentry 问题](${url})`,true);
 }
 
 // Derive the latest run and trusted baseline replacement; never retarget to arbitrary group work.
 function currentTask(store: Store, topic: AlertTopic): Task | undefined {
-  const row=store.db.prepare('SELECT taskId FROM alert_runs WHERE sourceKey=? AND issueId=? ORDER BY rowid DESC LIMIT 1').get(topic.sourceKey,topic.issueId);
+  // A later private reassessment must not take over a public repair topic.
+  const row=store.db.prepare(`SELECT taskId FROM alert_runs r WHERE sourceKey=? AND issueId=? AND
+    (NOT EXISTS(SELECT 1 FROM events WHERE taskId=r.taskId AND kind='alert_assessment_required')
+    OR EXISTS(SELECT 1 FROM events WHERE taskId=r.taskId AND kind='alert_repair_created')) ORDER BY r.rowid DESC LIMIT 1`).get(topic.sourceKey,topic.issueId);
   let task=row ? store.get(String(row.taskId)) : undefined;
   const seen=new Set<string>();
   while (task) {
     if (seen.has(task.id)) return;
     seen.add(task.id);
+    const repair=alertRepairTask(store,task.id);
+    if (repair) {
+      const child=store.get(repair),binding=child && alertBindingForTask(store,child.id);
+      if (!child || binding?.sourceKey!==topic.sourceKey || binding.issueId!==topic.issueId) return;
+      task=child;continue;
+    }
     const next=store.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='handoff_to' ORDER BY seq DESC LIMIT 1").get(task.id);
     if (!next) break;
     const child=store.get(String(next.body));

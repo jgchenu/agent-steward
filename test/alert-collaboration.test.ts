@@ -52,18 +52,16 @@ test('collaboration is opt-in and does not change existing alert grant/cursor or
   } finally {f.store.close();}
 });
 
-test('actual poller intake atomically links the group; repeat polling and recurrence use one topic',async()=>{
+test('actual poller keeps initial and recurring diagnoses private until evidence supports repair',async()=>{
   const f=fixture();let now=Date.now(),release='v1';
   const poller=new AlertPoller(f.store,f.config,{list:async()=>({issues:[{id:'1'}]}),evidence:async()=>({issueId:'1',title:'PRIVATE diagnostic text',
     url:'https://us.sentry.io/organizations/example/issues/1/',count:1,userCount:1,release,environment:'production',firstSeen:'',lastSeen:'',exception:[]})},()=>now);
   try {
     await poller.tick();now+=60000;await poller.tick();const first=f.store.list()[0];
-    assert.equal(updates(f.store).length,1);assert.doesNotMatch(JSON.stringify(updates(f.store)),/PRIVATE/);
-    now+=60000;await poller.tick();assert.equal(f.store.list().length,1);assert.equal(updates(f.store).length,1);
+    assert.equal(first.chatId,'oc_dm');assert.equal(first.mode,'read-only');assert.equal(updates(f.store).length,0);
+    now+=60000;await poller.tick();assert.equal(f.store.list().length,1);assert.equal(updates(f.store).length,0);
     f.store.set(first.id,'review');release='v2';now+=3600000;await poller.tick();syncAlertTopics(f.store,f.config);
-    assert.equal(f.store.list().length,2);assert.equal(f.store.db.prepare('SELECT count(*) n FROM alert_topics').get()!.n,1);
-    assert.equal(updates(f.store).filter(r=>JSON.parse(String(r.view)).root).length,1);
-    assert.equal(f.topic().taskId,f.store.list()[1].id);
+    assert.equal(f.store.list().length,2);assert.equal(f.store.db.prepare('SELECT count(*) n FROM alert_topics').get()!.n,0);
   } finally {await poller.stop();f.store.close();}
 });
 
