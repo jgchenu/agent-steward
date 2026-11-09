@@ -1,5 +1,6 @@
 import { alertGroupContext, alertUpdateCurrent, awaitingAlertRoot, isAlertRootTurn, isGroupAlertTask, receiveAlertEvidence, syncAlertTopics } from './alert-collaboration.js';
 import { assertAlertAuthorized } from './alerts.js';
+import { isAlertAssessment, parseAlertAssessment, completeAlertAssessment, type AlertAssessment } from './alert-assessment.js';
 import { sentryMcpForTask } from './sentry-mcp.js';
 import { taskConcurrency } from './config.js';
 import { requesterAllowed, canControlTask, revokeRequesters } from './requesters.js';
@@ -527,11 +528,18 @@ export class Engine {
       let publication: PublicationTarget | undefined;
       let baseline: BaselineProposal | undefined;
       let merge: MergeProposal | undefined;
+      let assessment: AlertAssessment | undefined;
+      const assessing=isAlertAssessment(this.store,task.id);
       const grantKey = projectGrantKey(project);
       const resources = Object.entries(this.config.projects);
       const resourceCatalog = resources.map(([id,p]) => ({id,kind:'code-project',name:p.label ?? id,aliases:[...(p.aliases ?? [])],description:p.description ?? '',capability:p.sandbox}));
       const resourceGrants = Object.fromEntries(resources.map(([id,p]) => [id,projectGrantKey(p)]));
       const hooks: RunHooks = {
+        ...(assessing ? {reportAlertAssessment:(value:AlertAssessment)=>{
+          abort.signal.throwIfAborted();
+          if (task.mode!=='read-only' || assessment) throw Error('告警初筛只能提交一次只读诊断。');
+          assessment=parseAlertAssessment(value);
+        }} : {}),
         ...(task.nextAction==='merge'?{approveOperation:proposal=>{abort.signal.throwIfAborted();approveOperation(this.store,task.id,proposal);}}:{}),
         ...(task.project !== CONVERSATION && task.mode === 'workspace-write' && project.sandbox === 'workspace-write' && project.workspaceMode !== 'direct'
           && (!task.nextAction || task.nextAction === 'execute') ? {proposeMerge:(request:MergeProposal)=>{
@@ -651,6 +659,7 @@ export class Engine {
         result = outcome.message;
       } else result = await this.executor.run(executionTask, project, hooks, abort.signal);
       if (abort.signal.aborted) throw abort.signal.reason;
+      if (assessing && !assessment) throw Error('未返回完整告警诊断，结果保留在私聊，未创建群话题。');
       let automaticallySelected: string | undefined;
       if (proposed) {
         const candidate = this.config.projects[proposed.project];
@@ -667,6 +676,7 @@ export class Engine {
       const evidence = report ? `\n\n${deliveryFooter(report, project)}` : '';
       this.store.transaction(() => {
         this.store.set(task.id, 'review', result);
+        if (assessment) completeAlertAssessment(this.store,this.config,task,assessment);
         if (automaticallySelected) {
           const selected = this.config.projects[automaticallySelected], mode = selected.naturalMode ?? 'read-only';
           if (mode === 'workspace-write' && (selected.sandbox !== mode || (!selected.worktree && selected.workspaceMode !== 'direct'))) throw Error('该代码资源没有可用的修改工作目录。');

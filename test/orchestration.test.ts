@@ -256,3 +256,17 @@ test('restart reconstructs a checkpointed question before domain delivery withou
     assert.equal(runs,2);assert.equal(store.requests(task.id).length,0);
   }finally{if(engine)await engine.stop();else graph.close();store.close();rmSync(dir,{recursive:true,force:true});}
 });
+
+test('a checkpointed alert diagnosis replays its structured decision without rerunning the provider',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'steward-assessment-graph-')),path=join(dir,'db');
+  let store=new Store(path);store.pilotIntake=true;const task=store.create('dm','demo','diagnose');
+  let graph=new TaskOrchestrator(store),runs=0,decisions=0;
+  const assessment={verdict:'noise' as const,summary:'插件注入错误',explanation:'来源和堆栈已核对',impact:'未发现业务故障',evidence:['extension stack']};
+  const executor:Executor={run:async(_t,_p,h)=>{runs++;h.reportAlertAssessment!(assessment);return '不推送到群';}};
+  const capture={...hooks,reportAlertAssessment:()=>{decisions++;}};
+  try{
+    await graph.run(task,project,executor,capture,AbortSignal.timeout(5000));assert.equal(decisions,1);
+    graph.close();store.close();store=new Store(path);graph=new TaskOrchestrator(store);
+    await graph.run(store.get(task.id)!,project,executor,capture,AbortSignal.timeout(5000));assert.equal(runs,1);assert.equal(decisions,2);
+  }finally{graph.close();store.close();rmSync(dir,{recursive:true,force:true});}
+});

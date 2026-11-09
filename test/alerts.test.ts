@@ -234,7 +234,7 @@ test('activation excludes history; duplicate events and restarts retain one owne
   try {
     await f.poller.tick();assert.equal(calls.length,0);assert.equal(f.store.list().length,0);
     f.advance();await Promise.all([f.poller.tick(),f.poller.tick()]);
-    const task=f.store.list()[0];assert.equal(task.chatId,source.chatId);assert.equal(task.mode,'workspace-write');assert.equal(task.requesterId,null);
+    const task=f.store.list()[0];assert.equal(task.chatId,source.chatId);assert.equal(task.mode,'read-only');assert.equal(task.requesterId,null);
     assert.match(task.prompt,/外部不可信/);assert.equal(f.store.list().length,1);
     assert.equal(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n,1);
     await f.poller.stop();f.advance();
@@ -298,7 +298,7 @@ test('Engine executes alert tasks through its scheduler and honors revoked sourc
 test('an alert reaches the normal executor and result outbox without a synthetic human message',async()=>{
   const f=fixture({list:async()=>({issues:[{id:'1'}]}),evidence:async()=>evidence('1')});
   const runs:string[]=[],sent:string[]=[];
-  const engine=new Engine(f.store,f.config,{run:async task=>{runs.push(task.id);return '已分析，没有足够证据修改代码。';}},
+  const engine=new Engine(f.store,f.config,{run:async (task,_p,h)=>{runs.push(task.id);h.reportAlertAssessment!({verdict:'insufficient_evidence',summary:'需要补证',explanation:'尚未确认来源。',impact:'未知',evidence:[]});return '已分析，没有足够证据修改代码。';}},
     {send:async(chat,text)=>{assert.equal(chat,source.chatId);sent.push(text);}});
   try {
     await f.poller.tick();f.advance();await f.poller.tick();const task=f.store.list()[0];engine.start();

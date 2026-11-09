@@ -12,6 +12,13 @@ export function alertBindingForTask(store: Store, taskId: string): AlertBinding 
     seen.add(id);
     const binding=store.db.prepare('SELECT sourceId,sourceKey,issueId FROM alert_runs WHERE taskId=? UNION ALL SELECT sourceId,sourceKey,issueId FROM alert_tasks WHERE taskId=? LIMIT 1').get(id,id) as AlertBinding | undefined;
     if (binding) return binding;
+    const diagnosis=store.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='alert_repair_from'").all(id);
+    if (diagnosis.length) {
+      const parent=diagnosis.length===1 && store.get(String(diagnosis[0].body)),child=store.get(id);
+      if (!parent || !child || parent.project!==child.project || parent.requesterId!==child.requesterId
+        || !store.db.prepare("SELECT 1 FROM events WHERE taskId=? AND kind='alert_repair_created' AND body=?").get(parent.id,id)) throw Error('告警修复来源异常。');
+      id=parent.id;continue;
+    }
     const events=store.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='baseline_authorized'").all(id);
     if (!events.length) return;
     if (events.length!==1) throw Error('告警任务继承链异常，不能继续。');
@@ -34,4 +41,9 @@ export function pendingAlertTasks(store: Store): number {
     try { return count+(alertBindingForTask(store,String(task.id)) ? 1 : 0); }
     catch { return count+1; } // Broken provenance must not free an intake slot.
   },0);
+}
+
+export function alertRepairTask(store:Store,parentId:string):string | undefined {
+  const row=store.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='alert_repair_created' ORDER BY seq LIMIT 1").get(parentId);
+  return row ? String(row.body) : undefined;
 }

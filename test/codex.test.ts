@@ -484,3 +484,24 @@ test('direct project execution uses the authorized directory and explains source
  assert.match(start.developerInstructions,/No Steward automated PR delivery/);
  assert.deepEqual(rpc.params['turn/start'].sandboxPolicy.writableRoots,['/tmp/direct-project']);
 });
+
+test('alert assessment is structured, read-only and cannot mix a verdict with publication or clarification',async()=>{
+  const assessment={verdict:'needs_fix',summary:'发现代码缺陷',explanation:'调用链已确认',impact:'影响范围待核查',evidence:['src/retry.ts:42']};
+  for(const response of [
+    {message:'诊断完成',publication:null,alertAssessment:assessment,clarification:null},
+    {message:'需要补证',publication:null,alertAssessment:null,clarification:'是哪种操作触发？'},
+    {message:'bad',publication:null,alertAssessment:null,clarification:null},
+    {message:'bad',publication:{repository:'x/y',baseBranch:'main'},alertAssessment:assessment,clarification:null},
+    {message:'bad',publication:null,alertAssessment:assessment,clarification:'approve?'},
+    {message:'bad',publication:null,alertAssessment:{...assessment,evidence:[]},clarification:null},
+  ]){
+    const rpc=new FakeRpc(),s=setup(rpc);let assessed=false,asked=false;
+    s.hooks.reportAlertAssessment=()=>{assessed=true;};s.hooks.askClarification=()=>{asked=true;};
+    rpc.onTurn=()=>{rpc.emit('item/completed',{item:{type:'agentMessage',text:JSON.stringify(response),phase:'final_answer'}});rpc.finish();};
+    const run=s.executor.run({...task,mode:'read-only',permissionMode:'full-access'},{path:'.',sandbox:'workspace-write'},s.hooks,AbortSignal.timeout(5000));
+    if(response.message==='bad'){await assert.rejects(run);assert.equal(assessed,false);assert.equal(asked,false);}
+    else{assert.equal(await run,response.message);assert.equal(assessed,!!response.alertAssessment);assert.equal(asked,!!response.clarification);}
+    assert.equal(rpc.params['turn/start'].sandboxPolicy.type,'readOnly');assert.equal(rpc.params['turn/start'].approvalPolicy,'never');
+    assert.ok(rpc.params['turn/start'].outputSchema.required.includes('alertAssessment'));
+  }
+});

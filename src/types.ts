@@ -83,6 +83,7 @@ export interface HumanRequest {
   resolve: (answer: string) => void;
 }
 export interface RunHooks {
+  reportAlertAssessment?: (assessment: import('./alert-assessment.js').AlertAssessment) => void;
   approveOperation?: (proposal: import('./operations.js').OperationProposal) => void;
   askClarification?: (question: string) => void;
   proposeMerge?: (request: import('./operation-intent.js').MergeProposal) => void;

@@ -2,6 +2,7 @@ import { Annotation, Command, END, START, StateGraph, interrupt } from '@langcha
 import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite';
 import { projectGrantKey } from './routing.js';
 import { clarification } from './clarification.js';
+import { parseAlertAssessment, type AlertAssessment } from './alert-assessment.js';
 import type { Store } from './store.js';
 import type { BaselineProposal, Executor, Project, PublicationTarget, RunHooks, Task } from './types.js';
 import type { MergeProposal } from './operation-intent.js';
@@ -10,6 +11,7 @@ interface Outcome {
   message: string; question: string | null;
   projectId?: string; projectGrantKey?: string;
   publication?: PublicationTarget; baseline?: BaselineProposal; merge?: MergeProposal;
+  alertAssessment?: AlertAssessment;
 }
 const State = Annotation.Root({
   prompt: Annotation<string>, step: Annotation<number>, grant: Annotation<string>, outcome: Annotation<Outcome>,
@@ -45,6 +47,7 @@ export class TaskOrchestrator {
         this.store.db.prepare('INSERT INTO graph_operations VALUES (?,?,?,NULL)').run(id,task.id,grant);
         const outcome: Outcome = {message:'',question:null};
         const capture: RunHooks = {...hooks,
+          ...(hooks.reportAlertAssessment ? {reportAlertAssessment:(a:AlertAssessment)=>{outcome.alertAssessment=parseAlertAssessment(a);}} : {}),
           askClarification: question => {outcome.question=clarification(question);},
           ...(hooks.proposeProject ? {proposeProject:(id:string)=>{
             const key=task.projectCandidateGrants?.[id];
@@ -57,7 +60,7 @@ export class TaskOrchestrator {
         };
         outcome.message = await executor.run({...task,prompt:state.prompt,threadId:this.store.get(task.id)!.threadId},project,capture,signal);
         signal.throwIfAborted();
-        if ([!!outcome.question,!!outcome.projectId,!!outcome.publication,!!outcome.baseline,!!outcome.merge].filter(Boolean).length > 1) throw Error('每轮只能提出一个业务问题或操作。');
+        if ([!!outcome.question,!!outcome.projectId,!!outcome.publication,!!outcome.baseline,!!outcome.merge,!!outcome.alertAssessment].filter(Boolean).length > 1) throw Error('每轮只能提出一个业务问题或操作。');
         this.store.db.prepare('UPDATE graph_operations SET result=? WHERE id=?').run(JSON.stringify(outcome),id);
         return {outcome};
       })
@@ -95,6 +98,7 @@ export class TaskOrchestrator {
     if (outcome.publication) hooks.proposePublication?.(outcome.publication);
     if (outcome.baseline) hooks.proposeBaseline?.(outcome.baseline);
     if (outcome.merge) hooks.proposeMerge?.(outcome.merge);
+    if (outcome.alertAssessment) hooks.reportAlertAssessment?.(parseAlertAssessment(outcome.alertAssessment));
     return {waiting:false,message:outcome.message};
   }
 }
