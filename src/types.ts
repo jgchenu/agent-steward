@@ -18,6 +18,7 @@ export interface Attachment {
 export type PermissionMode = 'ask' | 'auto' | 'sandbox-auto' | 'full-access';
 export interface ResourceBinding { kind: 'code-project'; id: string }
 export interface Task {
+  sentryMcp?: import('./sentry-mcp.js').SentryMcp;
   requesterId?: string | null; requesterRevoked?: number;
   resources?: ResourceBinding[];
   orchestration?: 'legacy' | 'langgraph-v1'; orchestrationRunId?: string | null;
@@ -37,6 +38,7 @@ export interface Incoming {
   id: string; senderId: string; chatId: string; text: string;
   chatType: 'p2p' | 'group'; senderType: string;
   conversation?: Conversation; botMentioned?: boolean; mentionsOthers?: boolean;
+  replyToMessageId?: string;
 }
 export interface Check { name: string; command: string; args: string[]; timeoutSeconds?: number }
 export interface Project {
@@ -60,6 +62,7 @@ export interface DeliveryReport {
   ready: boolean; validationKey?: string; authorizedKey?: string; prUrl?: string; publishedSha?: string; targetBefore?: string; error?: string;
 }
 export interface Config {
+  alertSources?: Record<string, import('./alert-config.js').AlertSource>;
   trustedRequesters?: Array<{ openId: string; name: string }>;
   /** Defaults to true. Historical name; false affects new-task intake only. */
   langGraphPilot?: boolean;

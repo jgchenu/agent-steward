@@ -58,7 +58,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
   const projectLabel = (name: string) => name === CONVERSATION ? '通用任务' : config.projects[name]?.label ?? name;
   const homeButton = (primary = false) => button('派新任务', { op: 'home' }, primary);
   if (view?.kind === 'requester-reply') return card('Agent Steward','文字任务','blue',[text(notice)]);
-  if (!view || view.kind === 'notice') return card('Agent Steward', '工作动态', 'blue', [box(notice), homeButton()]);
+  if (!view || view.kind === 'notice') return card('Agent Steward', '工作动态', 'blue', [box(notice)]);
   if (view.kind === 'choose-project') return card('这次处理哪个项目？', '选一下就开始，不用重新填写需求', 'blue', [
     box(view.draft), ...view.choices.filter(name => Object.hasOwn(config.projects, name)).map(project =>
       button(projectLabel(project), { op: 'dispatch', project, prompt: view.draft, selectionKey: view.selectionKey,
@@ -69,16 +69,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     return card('交给我来做', 'Agent Steward · 你的 Agent 分身', 'blue', [
       box('直接说需求就能开始，群里请 @我。默认无需选择空间；只有需要代码时才使用已授权的代码资源。'),
       ...(conversation ? [caption(requesterId ? '使用你提交的文字执行；结果与审批显示在原群话题，由你操作，群成员可见。' : `自动读取${conversation.scope === 'thread' ? '当前话题' : '当前群最近讨论'}作为参考；结果会回复到对应话题，仅主人可操作。`)] : []),
-      form('开始处理', { op: 'new' }, [
-        text('任务资源'),
-        { tag: 'select_static', name: 'project', required: true, width: 'fill', initial_option: CONVERSATION,
-          options: [{text:plain('通用任务 · 按需使用资源'),value:CONVERSATION},...projects.map(([name]) => ({ text: plain(projectLabel(name)), value: name }))] },
-        text('本次工作方式'),
-        { tag: 'select_static', name: 'mode', required: true, width: 'fill', initial_option: 'read-only',
-          options: [{ text: plain('分析与内容整理'), value: 'read-only' },
-            ...(projects.some(([, p]) => p.sandbox === 'workspace-write' && (p.worktree || p.workspaceMode === 'direct')) ? [{ text: plain('编辑项目 · 按项目设置执行'), value: 'workspace-write' }] : [])] },
-        { ...input('任务要求', '例如：归纳客服反馈，或整理这份报销说明'), ...(view.draft ? { default_value: view.draft.slice(0, 1000) } : {}) },
-      ]),
+      text('直接发消息告诉我想做什么。需要补充信息时我会问你；修改范围、发布或权限需要确认时，我会说明具体操作再请你授权。'),
       ...(projects.length ? [{ tag: 'collapsible_panel', expanded: false, header: { title: plain('可用代码资源') }, elements: projects.map(([name, p]) => text(`${projectLabel(name)}\n${p.description ?? '配置在这台电脑上的工作目录。'}${conversation ? '' : `\n本机位置：${p.path}`}`)) }] : []),
       row(button('我的任务', { op: 'list' }), button('刷新入口', { op: 'home' })),
     ]);
@@ -159,7 +150,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     ]);
   }
   if (view.kind === 'followup') return card('继续这项任务', `${projectLabel(task.project)} · ${task.id}`, 'blue', [box(task.prompt),
-    form('提交后续要求', intent('continue'), [input('希望调整什么', '说明需要补充、修改或继续的内容')]),
+    text('直接引用回复这条消息，告诉我需要补充或调整什么。'),
     button('返回任务', intent('status'))]);
   const busy = ['queued', 'running', 'waiting_input', 'waiting_approval'].includes(task.status);
   const metadata = (): Element => ({ tag: 'collapsible_panel', expanded: false, header: { title: plain('代码与验证记录') }, elements: [
@@ -198,7 +189,9 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     return card(task.nextAction === 'publish' && task.status === 'running' ? '正在准备 PR' : label, `${projectLabel(task.project)} · ${modeLabel}`, color, [detail,
       ...(req.kind === 'approval' ? [row(...(fits ? [button('允许本次', action('approve'), true,
         '仅允许上方展示的本次操作，不授予后续操作权限。')] : []), button('拒绝', action('deny')))]
-        : [form('提交回答', action('answer'), [input('你的回答', '填写回答；多个问题请按问题 ID 填写 JSON')]), button('停止任务', intent('cancel'))]),
+        : [store.db.prepare("SELECT 1 FROM events WHERE taskId=? AND kind='input_explicit' AND body=?").get(task.id,req.id)
+          ? form('提交回答', action('answer'), [input('你的回答', '工具要求明确提交结构化回答')])
+          : text('直接引用回复这条消息回答即可。'), button('停止任务', intent('cancel'))]),
       caption('仅适用于本次操作。'), metadata(),
     ]);
   }

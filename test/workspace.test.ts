@@ -301,8 +301,14 @@ test('write configuration requires worktree and a consistent GitHub base', () =>
 
 test('baseline restart pins an approved SHA, preserves old WIP/session and leaves project defaults alone', async () => {
   const { baselinePreview, restartAtBaseline } = await import('../src/baseline.js');
+  const { alertSourceKey } = await import('../src/alert-config.js');
+  const { sentryMcpForTask } = await import('../src/sentry-mcp.js');
+  const { assertAlertAuthorized } = await import('../src/alerts.js');
   const f = fixture();
   try {
+    f.config.alertSources={monitor:{kind:'sentry',enabled:true,project:'test',chatId:'dm',mode:'workspace-write',pollSeconds:60,maxTasksPerDay:5,
+      sentry:{region:'us',organization:'example',projectId:'123',environment:'production',tokenEnv:'STEWARD_SENTRY_TEST_TOKEN',mcpProject:'frontend'}}};
+    f.store.db.prepare('INSERT INTO alert_tasks VALUES (?,?,?,?,?)').run('monitor',alertSourceKey(f.config,'monitor')!,'123',f.task.id,new Date().toISOString());
     const old = await prepareWorkspace(f.store,f.config.stateDir,f.task,f.project,signal());
     f.store.thread(f.task.id,'old-session'); writeFileSync(join(old.path,'README.md'),'unfinished work');
     writeFileSync(join(f.source,'feature.txt'),'new implementation'); f.g('add','feature.txt'); f.g('commit','-m','new base');
@@ -310,6 +316,13 @@ test('baseline restart pins an approved SHA, preserves old WIP/session and leave
     const preview=await baselinePreview(f.store,f.task,f.project,'main',signal());
     assert.equal(preview.sha,sha); assert.equal(preview.before.files.length,1);
     const next=await restartAtBaseline(f.store,f.config,f.store.get(f.task.id)!,preview,signal());
+    assert.deepEqual(sentryMcpForTask(f.store,f.config,next),sentryMcpForTask(f.store,f.config,f.task));
+    assert.equal(sentryMcpForTask(f.store,f.config,next)?.project,'frontend');
+    assertAlertAuthorized(f.store,f.config,next);
+    f.config.alertSources.monitor.enabled=false;
+    assert.throws(()=>assertAlertAuthorized(f.store,f.config,next),/授权已变化/);
+    assert.equal(sentryMcpForTask(f.store,f.config,next),undefined);
+    f.config.alertSources.monitor.enabled=true;
     assert.equal(next.threadId,null); assert.equal(next.mode,f.task.mode); assert.match(next.prompt,/Update README/);
     assert.equal(f.store.get(f.task.id)?.threadId,'old-session'); assert.equal(readFileSync(join(old.path,'README.md'),'utf8'),'unfinished work');
     const newer=await prepareWorkspace(f.store,f.config.stateDir,next,f.project,signal());
