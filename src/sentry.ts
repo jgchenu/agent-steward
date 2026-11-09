@@ -11,6 +11,16 @@ export interface AlertConnector {
   evidence(source: AlertSource, issueId: string, signal: AbortSignal): Promise<AlertEvidence>;
 }
 const hosts = {us:'https://us.sentry.io',eu:'https://de.sentry.io',global:'https://sentry.io'};
+// Regional hosts are API endpoints, not browser applications. Rebuild from the
+// locally authorized scope, never forward remote URL queries or cached API links.
+export function sentryIssueUrl(source: AlertSource, issueId: string): string {
+  if (!/^[1-9][0-9]{0,30}$/.test(issueId)) throw Error('Invalid issue id');
+  const org=source.sentry.organization;
+  const base=/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(org) && !['us','de','eu','www'].includes(org.toLowerCase())
+    ? `https://${org.toLowerCase()}.sentry.io/issues/${issueId}/`
+    : `https://sentry.io/organizations/${encodeURIComponent(org)}/issues/${issueId}/`;
+  return `${base}?${new URLSearchParams({project:source.sentry.projectId})}`;
+}
 export function redactAlertText(value: unknown, limit = 600): string {
   return (typeof value === 'string' ? value : '').slice(0,4000)
     .replace(/https?:\/\/[^\s"'<>]+/gi, '[url]')
@@ -103,7 +113,7 @@ export class SentryConnector implements AlertConnector {
         line:count(f.lineNo),column:count(f.colNo),inApp:f.inApp === true,
       })),
     }));
-    return {issueId,title:redactAlertText(issue.title),url:`${hosts[source.sentry.region]}/organizations/${encodeURIComponent(source.sentry.organization)}/issues/${issueId}/`,
+    return {issueId,title:redactAlertText(issue.title),url:sentryIssueUrl(source,issueId),
       eventId:typeof event.eventID==='string' && /^[a-f0-9]{32}$/.test(event.eventID) ? event.eventID : '',
       eventAt:date(event.dateCreated),extensionOrigins:origins,completeStack,
       firstSeen:date(issue.firstSeen),lastSeen:date(issue.lastSeen),count:count(issue.count),userCount:count(issue.userCount),

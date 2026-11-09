@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { alertSourceKey } from './alert-config.js';
 import { alertBindingForTask } from './alert-provenance.js';
-import { redactAlertText, type AlertEvidence } from './sentry.js';
+import { redactAlertText, sentryIssueUrl, type AlertEvidence } from './sentry.js';
 import type { Store } from './store.js';
 import type { Config } from './types.js';
 
 export const ALERT_RECHECK_MS=3600_000;
+export const NOISE_DIGEST_MS=24*3600_000;
 const hash=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const evidenceSignature=(e:AlertEvidence)=>hash([e.release,e.exception,e.extensionOrigins ?? [],e.completeStack ?? false]);
 
@@ -93,12 +94,13 @@ export function flushNoiseDigests(store:Store,config:Config,now:number):void {
     const key=alertSourceKey(config,id);if (!key) continue;
     store.transaction(()=>{
       const previous=store.db.prepare('SELECT sentAt FROM alert_digests WHERE sourceKey=?').get(key);
-      if (previous && now-Number(previous.sentAt)<ALERT_RECHECK_MS) return;
+      if (previous && now-Number(previous.sentAt)<NOISE_DIGEST_MS) return;
       const rows=store.db.prepare(`SELECT o.issueId,o.latest,o.pendingNoise FROM alert_observations o JOIN alert_noise_rules r
         ON r.sourceKey=o.sourceKey AND r.issueId=o.issueId WHERE o.sourceKey=? AND o.pendingNoise>0 ORDER BY o.issueId LIMIT 20`).all(key);
       if (!rows.length) return;
-      const lines=rows.map(r=>{const e=JSON.parse(String(r.latest)) as AlertEvidence;return `issue ${r.issueId}：${r.pendingNoise} 次采样匹配\n${e.url}`;});
-      store.enqueue(source.chatId,`监控噪声汇总（${id}）\n${lines.join('\n')}\n样本与本机确认的扩展来源和堆栈一致，未创建修复任务。采样数不代表错误总数；来源或堆栈变化会重新分析。`,{kind:'notice',fresh:true});
+      const lines=rows.map(r=>`issue ${r.issueId}：${r.pendingNoise} 次新增采样匹配\n${sentryIssueUrl(source,String(r.issueId))}`);
+      const stamp=new Date(now).toISOString().replace('T',' ').replace(/:\d\d\.\d{3}Z$/,' UTC');
+      store.enqueue(source.chatId,`监控噪声汇总（${id}，截至 ${stamp}）\n${lines.join('\n')}\n以上是尚未汇总的采样，不代表错误总数。来源和堆栈仍与本机确认的扩展证据一致，无需创建修复任务；发生变化会重新分析。同类噪声每天最多汇总一次。`,{kind:'notice',fresh:true});
       for (const r of rows) store.db.prepare('UPDATE alert_observations SET pendingNoise=0 WHERE sourceKey=? AND issueId=?').run(key,String(r.issueId));
       store.db.prepare('INSERT INTO alert_digests VALUES (?,?) ON CONFLICT(sourceKey) DO UPDATE SET sentAt=excluded.sentAt').run(key,now);
     });

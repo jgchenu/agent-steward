@@ -1,4 +1,4 @@
-import { alertGroupContext, alertUpdateCurrent, receiveAlertEvidence, syncAlertTopics } from './alert-collaboration.js';
+import { alertGroupContext, alertUpdateCurrent, awaitingAlertRoot, isAlertRootTurn, isGroupAlertTask, receiveAlertEvidence, syncAlertTopics } from './alert-collaboration.js';
 import { assertAlertAuthorized } from './alerts.js';
 import { sentryMcpForTask } from './sentry-mcp.js';
 import { taskConcurrency } from './config.js';
@@ -280,6 +280,7 @@ export class Engine {
           if (task.status !== 'waiting_input' || this.active.has(task.id) || !body) { reply('请等待问题保存完成，并填写回答。'); return; }
           if (task.project !== CONVERSATION && !this.config.projects[task.project]) { reply('项目授权已撤销，任务尚未继续。'); return; }
           this.store.answerGraph(task.id,body);
+          if (message.conversation) this.store.saveConversation(task.id,message.conversation);
           this.store.event(task.id,'response_actor',JSON.stringify({requestId:id,actorId:message.senderId}));
           reply('收到，我会结合这条补充继续处理。',{kind:'reply',taskId:task.id}); return;
         }
@@ -469,6 +470,7 @@ export class Engine {
     this.store.set(id, status);
   }
   private canDispatch(task: Task): boolean {
+    if (awaitingAlertRoot(this.store,this.config,task)) return false;
     if (this.active.size >= (this.config.maxConcurrentTasks ?? 2) || this.active.has(task.id)) return false;
     for (const run of this.active.values()) {
       // Keep all code/Git actions serial; general read-only conversations may overlap them.
@@ -614,7 +616,7 @@ export class Engine {
       }
       abort.signal.throwIfAborted();
       let executionTask = task;
-      if (task.conversation && !task.requesterId && task.nextAction !== 'publish') {
+      if (task.conversation && !task.requesterId && task.nextAction !== 'publish' && !isAlertRootTurn(this.store,task)) {
         if (!this.config.groupChats || !this.channel.context) throw new Error('群上下文读取未启用，任务未执行。');
         this.store.event(task.id, 'progress', '正在读取当前会话上下文。');
         snapshot = await this.channel.context(task, abort.signal);
@@ -623,7 +625,9 @@ export class Engine {
         executionTask = { ...task, contextSnapshot: snapshot };
       }
       const groupEvidence=alertGroupContext(this.store,this.config,task);
-      if (groupEvidence) executionTask={...executionTask,contextSnapshot:groupEvidence};
+      if (groupEvidence) executionTask={...executionTask,contextSnapshot:executionTask.contextSnapshot
+        ? {...executionTask.contextSnapshot,summary:executionTask.contextSnapshot.summary+'\n'+groupEvidence.summary,
+          messages:[...executionTask.contextSnapshot.messages,...groupEvidence.messages]} : groupEvidence};
       executionTask = { ...executionTask, sentryMcp:sentryMcpForTask(this.store,this.config,task), projectCandidates: hooks.proposeProject ? Object.keys(resourceGrants) : undefined,
         projectCandidateGrants: hooks.proposeProject ? resourceGrants : undefined,
         routingContext: JSON.stringify({ currentProject: task.project === CONVERSATION ? null : project.label ?? task.project,
@@ -741,6 +745,13 @@ export class Engine {
         try {
           const view = item.view ? JSON.parse(item.view) as View : undefined;
           if (view?.kind==='alert-collaboration' && !alertUpdateCurrent(this.store,this.config,item.chatId,view)) { this.store.retireOutgoing(item.id);continue; }
+          if (view && 'taskId' in view) {
+            const task=this.store.get(view.taskId);
+            if (task) {
+              try {if (isGroupAlertTask(this.store,task)) assertAlertAuthorized(this.store,this.config,task);}
+              catch {this.store.retireOutgoing(item.id);continue;}
+            }
+          }
           if (view?.requesterId && (!requesterAllowed(this.config,view.requesterId) || (view.conversation && !this.config.groupChats)
             || ('taskId' in view && this.store.get(view.taskId)?.requesterRevoked))) { this.store.delivered(item.id);continue; }
           await this.channel.send(item.chatId, item.text, item.id, view); this.store.delivered(item.id);
