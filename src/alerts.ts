@@ -1,3 +1,4 @@
+import { openAlertTopic } from './alert-collaboration.js';
 import { alertSourceKey } from './alert-config.js';
 import { alertBindingForTask, pendingAlertTasks } from './alert-provenance.js';
 import { SentryConnector, type AlertConnector, type AlertEvidence } from './sentry.js';
@@ -63,6 +64,7 @@ export class AlertPoller {
         .run(id,key,issueId,task.id,new Date(this.now()).toISOString());
       this.store.db.prepare('INSERT INTO alert_runs VALUES (?,?,?,?,?,?)').run(task.id,id,key,issueId,evidenceSignature(evidence),new Date(this.now()).toISOString());
       markAlertHandled(this.store,key,evidence,this.now());
+      openAlertTopic(this.store,this.config,id,key,issueId,task);
       this.store.event(task.id,'alert_source',JSON.stringify({sourceId:id,kind:source.kind,issueId,url:evidence.url,reason:decision.reason,previousTask:decision.previousTask}));
       this.store.enqueue(source.chatId,`我收到了一个监控问题：${evidence.title}\n${evidence.url}\n我会先查证据，再判断是否需要修复，结果在这里告诉你。`,{kind:'reply',taskId:task.id});
       return true;
