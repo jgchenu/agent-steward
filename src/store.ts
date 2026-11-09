@@ -64,7 +64,21 @@ export class Store {
         sourceKey TEXT NOT NULL, sourceId TEXT NOT NULL, issueId TEXT NOT NULL,
         receivedAt TEXT NOT NULL, dueAt INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
         error TEXT, PRIMARY KEY(sourceKey,issueId));
-      PRAGMA user_version=13;`);
+      CREATE TABLE IF NOT EXISTS alert_runs (
+        taskId TEXT PRIMARY KEY, sourceId TEXT NOT NULL, sourceKey TEXT NOT NULL, issueId TEXT NOT NULL,
+        signature TEXT NOT NULL, createdAt TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS alert_run_budget ON alert_runs(sourceId,createdAt);
+      CREATE INDEX IF NOT EXISTS alert_run_issue ON alert_runs(sourceKey,issueId,signature);
+      INSERT OR IGNORE INTO alert_runs SELECT taskId,sourceId,sourceKey,issueId,'',createdAt FROM alert_tasks;
+      CREATE TABLE IF NOT EXISTS alert_observations (
+        sourceKey TEXT NOT NULL, issueId TEXT NOT NULL, latest TEXT NOT NULL, baseline TEXT,
+        handledAt INTEGER NOT NULL DEFAULT 0, pendingNoise INTEGER NOT NULL DEFAULT 0, noiseEvent TEXT,
+        PRIMARY KEY(sourceKey,issueId));
+      CREATE TABLE IF NOT EXISTS alert_noise_rules (
+        sourceKey TEXT NOT NULL, issueId TEXT NOT NULL, signature TEXT NOT NULL,
+        reason TEXT NOT NULL, confirmedAt INTEGER NOT NULL, PRIMARY KEY(sourceKey,issueId));
+      CREATE TABLE IF NOT EXISTS alert_digests (sourceKey TEXT PRIMARY KEY, sentAt INTEGER NOT NULL);
+      PRAGMA user_version=14;`);
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');

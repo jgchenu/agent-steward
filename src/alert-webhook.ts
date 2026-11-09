@@ -41,8 +41,7 @@ export async function startAlertWebhook(store: Store, config: Config, port: numb
       try {
         const result=store.transaction(() => {
           if (alertSourceKey(config,id!) !== key) return 403;
-          if (store.db.prepare('SELECT 1 FROM alert_tasks WHERE sourceKey=? AND issueId=?').get(key,issueId)
-            || store.db.prepare('SELECT 1 FROM alert_webhooks WHERE sourceKey=? AND issueId=?').get(key,issueId)) return 204;
+          if (store.db.prepare('SELECT 1 FROM alert_webhooks WHERE sourceKey=? AND issueId=?').get(key,issueId)) return 204;
           if (Number(store.db.prepare('SELECT count(*) n FROM alert_webhooks').get()!.n)>=1000) return 503;
           store.db.prepare('INSERT INTO alert_webhooks(sourceKey,sourceId,issueId,receivedAt) VALUES (?,?,?,?)')
             .run(key,id!,issueId,new Date().toISOString());
