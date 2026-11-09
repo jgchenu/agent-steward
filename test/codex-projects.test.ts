@@ -43,7 +43,7 @@ test('resource-free tasks reach the executor with zero grants; resource proposal
   send('概括这段讨论');await until(()=>store.list()[0]?.status==='review');assert.equal(runs[0].project,CONVERSATION);
   send('修改登录流程代码');await until(()=>runs.length===2&&store.list().every(t=>t.status==='review'));assert.equal(runs[1].project,CONVERSATION);assert.deepEqual(runs[1].projectCandidates,[]);
   send('PrivateRepo 看看');await until(()=>runs.length===3&&store.list().some(t=>t.status==='failed'));assert.equal(runs[2].project,CONVERSATION);
-  assert.deepEqual(runs[2].resources,[]);assert.equal(store.list().length,3);
+  assert.deepEqual(runs[2].resources,[]);assert.equal(store.list().length,1);assert.equal(runs[2].id,runs[0].id);
   engine.updateProjects({...c,defaultProject:'web',projects:{web:{path:'/web',sandbox:'read-only',label:'Web'}}});
   send('修复这个组件');await until(()=>runs.length===4&&store.list().at(-1)?.status==='review');assert.equal(runs[3].project,CONVERSATION);assert.ok(store.projectSelection(runs[3].id));
   send('再总结一下');await until(()=>runs.length===5);assert.equal(runs[4].project,CONVERSATION);

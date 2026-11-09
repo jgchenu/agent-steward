@@ -177,6 +177,17 @@ export class Store {
   isOwnMessage(chatId: string, messageId?: string): boolean {
     return !!messageId && !!this.db.prepare("SELECT 1 FROM card_messages WHERE chatId=? AND messageId=? AND viewKey NOT LIKE 'reaction:%' LIMIT 1").get(chatId, messageId);
   }
+  directTask(chatId: string, requesterId?: string): Task | undefined {
+    const key=requesterId ? `requester:${requesterId}:dm-focus` : 'dm-focus';
+    const row=this.db.prepare('SELECT taskId FROM conversation_bindings WHERE chatId=? AND messageKey=?').get(chatId,key);
+    const task=row && this.get(String(row.taskId));
+    return task && !task.requesterRevoked && task.chatId===chatId && (task.requesterId ?? undefined)===requesterId ? task : undefined;
+  }
+  focusDirectTask(task: Task): void {
+    if (task.requesterRevoked || task.conversation) return;
+    const key=task.requesterId ? `requester:${task.requesterId}:dm-focus` : 'dm-focus';
+    this.db.prepare('INSERT INTO conversation_bindings VALUES (?,?,?) ON CONFLICT(chatId,messageKey) DO UPDATE SET taskId=excluded.taskId').run(task.chatId,key,task.id);
+  }
   saveContext(id: string, snapshot: ContextSnapshot): void {
     this.db.prepare('INSERT INTO context_snapshots VALUES (?,?) ON CONFLICT(taskId) DO UPDATE SET data=excluded.data').run(id, JSON.stringify(snapshot));
   }
@@ -291,7 +302,7 @@ export class Store {
     const requestId = this.request(taskId, 'input', question);
     this.db.prepare('INSERT OR REPLACE INTO graph_waits VALUES (?,?,?,?,NULL)').run(task.orchestrationRunId!, taskId, requestId, step);
     this.set(taskId, 'waiting_input', question);
-    this.enqueue(task.chatId, `${question}${task.conversation ? '' : `\n/answer ${requestId} <回答>`}`, {kind:task.conversation ? 'reply' : 'task',taskId});
+    this.enqueue(task.chatId, question, {kind:'reply',taskId});
     return requestId;
   }
   answerGraph(taskId: string, answer: string): void {

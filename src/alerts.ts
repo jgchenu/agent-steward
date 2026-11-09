@@ -64,7 +64,7 @@ export class AlertPoller {
       this.store.db.prepare('INSERT INTO alert_runs VALUES (?,?,?,?,?,?)').run(task.id,id,key,issueId,evidenceSignature(evidence),new Date(this.now()).toISOString());
       markAlertHandled(this.store,key,evidence,this.now());
       this.store.event(task.id,'alert_source',JSON.stringify({sourceId:id,kind:source.kind,issueId,url:evidence.url,reason:decision.reason,previousTask:decision.previousTask}));
-      this.store.enqueue(source.chatId,`收到监控问题：${evidence.title}\n${evidence.url}\n任务 ${task.id} 已排队，分析和修复结果会回到这里。`,{kind:'task',taskId:task.id});
+      this.store.enqueue(source.chatId,`我收到了一个监控问题：${evidence.title}\n${evidence.url}\n我会先查证据，再判断是否需要修复，结果在这里告诉你。`,{kind:'reply',taskId:task.id});
       return true;
     });
   }

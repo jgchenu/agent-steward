@@ -107,10 +107,20 @@ export class Engine {
     const dmSelections = message.chatType === 'p2p' && !message.text.trim().startsWith('/')
       ? ownTasks().filter(t => t.status === 'review' && this.store.projectSelection(t.id)) : [];
     const selectionAnswer = !!projectAnswer(message.text) || namedProjects(this.config,message.text).length > 0;
+    const quoted=message.chatType==='p2p' && message.replyToMessageId ? this.store.conversationTask(message.chatId,
+      {anchorId:message.replyToMessageId,sourceId:message.id,scope:'chat'},requesterId) : undefined;
+    const focus=message.chatType==='p2p' && !message.text.trim().startsWith('/') && !message.replyToMessageId
+      ? this.store.directTask(message.chatId,requesterId) : undefined;
+    const onlyWait=dmWaits.length===1 ? dmWaits[0] : undefined;
+    const waitingRequest=onlyWait && this.store.requests(onlyWait.id)[0];
+    const ordinaryWait=onlyWait && waitingRequest?.kind==='input'
+      && (this.store.graphWait(onlyWait.id)?.requestId===waitingRequest.id
+        || (this.pending.has(waitingRequest.id) && !this.pending.get(waitingRequest.id)?.explicit));
+    const dmFallback=ordinaryWait ? onlyWait
+      : !dmWaits.length && dmSelections.length===1 && selectionAnswer ? dmSelections[0]
+      : requesterId && message.chatType==='p2p' && !message.text.trim().startsWith('/') ? ownTasks()[0] : undefined;
     const bound = message.chatType === 'group' ? this.store.conversationTask(message.chatId, message.conversation,requesterId)
-      : dmWaits.length === 1 && this.store.graphWait(dmWaits[0].id)?.requestId === this.store.requests(dmWaits[0].id)[0]?.id ? dmWaits[0]
-      : !dmWaits.length && dmSelections.length === 1 && selectionAnswer ? dmSelections[0]
-      : requesterId && message.chatType === 'p2p' && !message.text.trim().startsWith('/') ? ownTasks()[0] : undefined;
+      : message.replyToMessageId ? (quoted && accessible(quoted) ? quoted : undefined) : focus ?? dmFallback;
     const pendingInput = bound && this.store.requests(bound.id);
     const projectSelection = bound && this.store.projectSelection(bound.id);
     const answeringProject = !!projectSelection && !!projectAnswer(message.text);
@@ -127,6 +137,9 @@ export class Engine {
       if (actionId && !this.store.useAction(actionId)) return;
       const reply = (text: string, view: View = {kind:'notice'}) => {
         view = {...view,...(requesterId ? {requesterId} : {})};
+        if (message.chatType==='p2p' && 'taskId' in view) {
+          const task=this.store.get(view.taskId);if (task && accessible(task)) this.store.focusDirectTask(task);
+        }
         this.store.enqueue(message.chatId, text,
         message.conversation ? { ...(view ?? { kind: 'notice' }), conversation: message.conversation,
           ...(!view || ['home', 'list'].includes(view.kind) ? { fresh: true } : {}) }
@@ -137,7 +150,7 @@ export class Engine {
       const formPrompt = actionId ? /^\/(?:new|edit)\s+\S+\s+([\s\S]*)$/.exec(text)?.[1] : undefined;
       if (!text || (formPrompt ?? text).length > 16_000) { reply('任务文本应为 1–16000 字符。'); return; }
       const match = /^(\/\S+)(?:\s+([\s\S]*))?$/.exec(text);
-      if (!match && dmWaits.length > 1 && dmWaits.some(t => this.store.graphWait(t.id))) { reply('当前有多个待处理的问题或权限请求，请使用对应卡片提交回答。'); return; }
+      if (!match && !bound && dmWaits.length > 1 && dmWaits.some(t => this.store.graphWait(t.id))) { reply('我有几个问题在等你回复，请引用对应的问题直接回答。涉及权限的操作仍需明确授权。'); return; }
       if (!match && !dmWaits.length && dmSelections.length > 1 && projectAnswer(text)) { reply('当前有多个待选择的代码资源，请说明对应的任务和项目。'); return; }
       let command = match?.[1] ?? '/new';
       let args = match?.[2]?.trim() ?? '';
@@ -223,7 +236,7 @@ export class Engine {
         }
         if (bound && bound.project === project) {
           if (mode !== bound.mode) { reply('这段工作的执行权限保持不变。需要不同权限时，请另起消息说明任务。'); return; }
-          this.store.resume(bound.id, prompt); this.store.saveConversation(bound.id, message.conversation!); return;
+          this.store.resume(bound.id, prompt); if (message.conversation) this.store.saveConversation(bound.id, message.conversation); return;
         }
         if (bound && (bound.project === CONVERSATION || bound.project === this.config.defaultProject) && !this.store.workspace(bound.id)) {
           // Recover a request previously misrouted to general discussion, using owner input only.
@@ -232,7 +245,7 @@ export class Engine {
         const task = bound && message.conversation
           ? this.store.handoff(bound, project, prompt, mode, message.conversation)
           : this.store.create(message.chatId, project, prompt, mode, message.conversation,requesterId);
-        if (!message.conversation || !this.channel.acknowledge) reply(`已接单 ${task.id} · ${project === CONVERSATION ? '对话' : project}\n任务已排队。查询：/status ${task.id}`, { kind: 'task', taskId: task.id }); return;
+        if (!message.conversation || !this.channel.acknowledge) reply('收到，我来处理。', { kind: 'reply', taskId: task.id }); return;
       }
       if (command === '/list' || (command === '/status' && !args)) {
         reply(ownTasks().map(t => `${t.id} · ${t.project} · ${t.status}`).join('\n') || '暂无任务。', { kind: 'list' }); return;
@@ -285,7 +298,8 @@ export class Engine {
         this.store.event(task.id,'response_actor',JSON.stringify({requestId:id,actorId:message.senderId}));
         this.updateWaiting(task.id);
         effects.push(() => { this.pending.delete(id); runtime.resolve(answer); });
-        reply(message.conversation && req.kind === 'input' ? '收到，我继续。' : `请求 ${id} 已回答。`, { kind: message.conversation && req.kind === 'input' ? 'reply' : 'task', taskId: task.id }); return;
+        const ordinary=req.kind==='input' && !runtime.explicit;
+        reply(ordinary ? '收到，我继续。' : `请求 ${id} 已回答。`, { kind: ordinary ? 'reply' : 'task', taskId: task.id }); return;
       }
       const task = this.store.get(id);
       if (!accessible(task) || !task || task.chatId !== message.chatId || (message.conversation && task.conversation?.anchorId !== message.conversation.anchorId)) { reply('任务不存在，请重新选择。', { kind: 'home' }); return; }
@@ -333,7 +347,7 @@ export class Engine {
         if (!body) { reply(`用法：/continue ${id} <后续要求>`); return; }
         this.store.resume(id, body);
         if (message.conversation) this.store.saveConversation(id, message.conversation);
-        if (!message.conversation || !this.channel.acknowledge) reply(`任务 ${id} 已重新排队。`, { kind: 'task', taskId: id }); return;
+        if (!message.conversation || !this.channel.acknowledge) reply('收到，我接着处理。', { kind: 'reply', taskId: id }); return;
       }
       if (command === '/done' && task.status === 'review') {
         this.store.set(id, 'completed'); reply(`任务 ${id} 已由你确认验收。`, { kind: 'task', taskId: id }); return;
@@ -482,7 +496,7 @@ export class Engine {
       const task = { ...candidate, permissionMode: permissionMode(this.config), modelSelection: this.config.modelSelection ? {...this.config.modelSelection} : undefined };
       const abort = new AbortController();
       this.store.set(task.id, 'running');
-      if (!task.conversation || !this.channel.acknowledge) this.store.enqueue(task.chatId, `开始执行 ${task.id} · ${task.project === CONVERSATION ? '对话' : task.project}`, { kind: 'task', taskId: task.id });
+      if (task.conversation && !this.channel.acknowledge) this.store.enqueue(task.chatId, '正在处理。', { kind: 'reply', taskId: task.id });
       // Register before invoking an adapter; each task owns its abort and completion.
       const done = Promise.resolve().then(() => this.run(task, abort));
       this.active.set(task.id,{ task, abort, done });
@@ -550,8 +564,9 @@ export class Engine {
         request: req => {
           if (abort.signal.aborted) throw new Error('任务已停止');
           const id = this.store.request(task.id, req.kind, req.description);
+          if (req.kind==='input' && req.explicit) this.store.event(task.id,'input_explicit',id);
           this.pending.set(id, req); this.updateWaiting(task.id);
-          if (task.conversation && req.kind === 'input' && !req.explicit) this.store.enqueue(task.chatId, req.description, { kind: 'reply', taskId: task.id });
+          if (req.kind === 'input' && !req.explicit) this.store.enqueue(task.chatId, req.description, { kind: 'reply', taskId: task.id });
           else this.store.enqueue(task.chatId, `任务 ${task.id} 需要你处理 · 请求 ${id}\n${req.description}\n`
             + (req.kind === 'approval' ? `/approve ${id} 或 /deny ${id}` : `/answer ${id} <回答>`), { kind: 'task', taskId: task.id });
           return id;
@@ -583,7 +598,7 @@ export class Engine {
         if (accepted) await restartAtBaseline(this.store, this.config, task, preview, abort.signal);
         else {
           this.store.set(task.id, 'review');
-          this.store.enqueue(task.chatId, '未更换代码版本，原任务和文件保持原样。', { kind: task.conversation ? 'reply' : 'task', taskId: task.id });
+          this.store.enqueue(task.chatId, '未更换代码版本，原任务和文件保持原样。', { kind: 'reply', taskId: task.id });
         }
         return;
       }
@@ -652,7 +667,7 @@ export class Engine {
           this.store.event(next.id,'resource_bound',JSON.stringify({fromTaskId:task.id,resource:{kind:'code-project',id:automaticallySelected},source:'owner-named-model-proposal'}));
           this.store.enqueue(task.chatId,`本任务需要使用你指定的 ${selected.label ?? automaticallySelected} 代码资源，正在准备执行目录并继续。`,{kind:'reply',taskId:next.id});
         } else if (proposed) this.store.saveProjectSelection(task.id, proposed.project, proposed.grantKey);
-        if (task.conversation) this.store.enqueue(task.chatId, result + (report && task.mode === 'workspace-write' ? evidence : ''), {kind:'reply',taskId:task.id});
+        this.store.enqueue(task.chatId, result + (report && task.mode === 'workspace-write' ? evidence : ''), {kind:'reply',taskId:task.id});
         if (baseline) {
           this.store.event(task.id,'baseline_proposed',JSON.stringify(baseline));
           this.store.queueBaseline(task.id,baseline.ref,{migrateChanges:baseline.migrateChanges,delivery:baseline.delivery});
@@ -671,8 +686,6 @@ export class Engine {
             {kind:'publication',taskId:task.id,fresh:true,publicationTarget});
         }
       });
-      if (!task.conversation) this.store.enqueue(task.chatId, `任务 ${task.id} 已产出结果，等待你验收（执行器报告，尚非独立验证）。\n${result}${evidence}\n`
-        + `验收：/done ${task.id}\n继续：/continue ${task.id} <要求>`, { kind: 'task', taskId: task.id });
       if (task.nextAction !== 'publish' && report?.evidenceIds?.length) this.store.enqueue(task.chatId, '验收截图（执行 Agent 提供）', { kind:'evidence', taskId:task.id, evidenceIds:report.evidenceIds });
       if (report?.evidenceWarning) this.store.enqueue(task.chatId, report.evidenceWarning, {kind:'reply', taskId:task.id});
     } catch (error) {
@@ -695,9 +708,7 @@ export class Engine {
         this.store.set(task.id, this.stopped ? 'interrupted' : 'failed', task.nextAction === 'publish' ? undefined : reason);
         if(task.nextAction === 'publish')this.store.event(task.id,'publication_failed',reason);
         if (task.nextAction === 'merge') this.refreshTaskCard(task);
-        if (task.conversation) this.store.enqueue(task.chatId, `${task.nextAction === 'publish' ? 'PR 发布未完成，已有代码结果保留' : '这次没能完成'}：${reason}\n你可以引用回复这条消息，或 @我补充要求，我会接着处理。`, { kind: 'reply', taskId: task.id });
-        else this.store.enqueue(task.chatId, `任务 ${task.id} ${this.stopped ? '已中断' : '失败'}：${reason}\n`
-          + `不会自动重试已发生的操作。检查后用 /continue ${task.id} <要求> 继续。`, { kind: 'task', taskId: task.id });
+        this.store.enqueue(task.chatId, `${task.nextAction === 'publish' ? 'PR 发布未完成，已有代码结果保留' : '这次没能完成'}：${reason}\n你可以引用回复这条消息，补充要求后我会接着处理。`, { kind: 'reply', taskId: task.id });
       }
     } finally {
       clearTimeout(timeout);

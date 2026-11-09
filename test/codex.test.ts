@@ -112,6 +112,19 @@ test('multi-question responses require complete, explicit answers', () => {
     { a: { answers: ['yes'] }, b: { answers: ['no'] } });
 });
 
+test('multiple business questions are asked sequentially as prose while preserving the protocol response',async()=>{
+  const rpc=new FakeRpc(),requests:HumanRequest[]=[],s=setup(rpc,requests);
+  rpc.onTurn=()=>{
+    rpc.emit('tool/requestUserInput',{questions:[{id:'audience',question:'写给谁？'},{id:'tone',question:'希望什么语气？'}]},8);
+    assert.equal(requests.length,1);assert.match(requests[0].description,/写给谁/);
+    requests[0].resolve('新用户');requests[0].resolve('duplicate');
+    assert.equal(requests.length,2);assert.equal(rpc.writes.length,0);assert.match(requests[1].description,/语气/);
+    requests[1].resolve('简单自然');requests[1].resolve('duplicate');
+    assert.deepEqual(rpc.writes,[{id:8,result:{answers:{audience:{answers:['新用户']},tone:{answers:['简单自然']}}}}]);rpc.finish();
+  };
+  await s.run();
+});
+
 
 test('image attachments reach the subscription turn as localImage inputs, unread resources do not',async()=>{
   const rpc=new FakeRpc();rpc.onTurn=()=>rpc.finish();

@@ -122,12 +122,20 @@ export class CodexExecutor implements Executor {
           if (!Array.isArray(questions) || !questions.length || questions.some(q => typeof q.id !== 'string' || q.isSecret)) {
             respond({ answers: {} }); hooks.progress('敏感或无法识别的输入请求未转发，请在本机处理。'); return;
           }
-          const description = questions.map(q => `${questions.length > 1 ? q.id + ': ' : ''}${q.question}\n`
-            + (q.options ?? []).map((o: { label: string; description?: string }) => `${o.label}: ${o.description ?? ''}`).join('\n')).join('\n\n');
-          const request = { kind: 'input' as const, description,
-            validate: (text: string) => { inputAnswers(questions, text); },
-            resolve: (text: string) => respond({ answers: inputAnswers(questions, text) }) };
-          pending.set(id, hooks.request(request));
+          // Business clarification is a dialogue, not a JSON form. Keep the official
+          // response schema internally while asking one question at a time.
+          const answers:Record<string,{answers:string[]}>={};
+          const ask=(index:number):void=>{
+            if (finished || signal.aborted || settled.has(id)) return;
+            const q=questions[index];let answered=false;
+            const description=`${q.question}\n`+(q.options ?? []).map((o:{label:string;description?:string})=>`${o.label}: ${o.description ?? ''}`).join('\n');
+            pending.set(id,hooks.request({kind:'input',description,resolve:text=>{
+              if (answered || finished || signal.aborted || settled.has(id)) return;
+              answered=true;answers[q.id]={answers:[text]};
+              if(index+1<questions.length) ask(index+1);else respond({answers});
+            }}));
+          };
+          ask(0);
         } else {
           // New protocol permissions or tool calls must never silently gain authority.
           rpc.write({ id, error: { code: -32601, message: `Unsupported request: ${message.method}` } });
