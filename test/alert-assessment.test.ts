@@ -44,7 +44,11 @@ test('verified diagnosis creates one fresh group repair with summary, provenance
     assert.equal(child.conversation,undefined);assert.equal(f.store.requests(child.id).length,0);
     assert.deepEqual({...alertBindingForTask(f.store,child.id)},{sourceId:'web',sourceKey:f.key,issueId:'1'});
     assert.equal(pendingAlertTasks(f.store),1);assert.equal(f.store.db.prepare('SELECT count(*) n FROM alert_runs').get()!.n,1);
-    const root=groups(f.store)[0];assert.match(String(root.text),/断线重连/);assert.match(String(root.text),/影响：/);
+    const root=groups(f.store)[0];assert.match(String(root.text),/断线重连/);assert.ok(String(root.text).includes(decision.impact));
+    assert.ok(!String(root.text).includes(decision.explanation));
+    for (const evidence of decision.evidence) {
+      assert.ok(!String(root.text).includes(evidence));assert.ok(child.prompt.includes(evidence));
+    }
     assert.match(String(root.text),/\[查看 Sentry 问题\]\(https:\/\/example.sentry.io\/issues\/1\/\?project=123\)/);
     assert.doesNotMatch(String(root.text)+child.prompt,/PRIVATE|private-session/);
     const reopened=new Store(join(dir,'db'));try{completeAlertAssessment(reopened,f.config,t,decision);assert.equal(reopened.list().length,2);assert.equal(groups(reopened).length,1);}finally{reopened.close();}
