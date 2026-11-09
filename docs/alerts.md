@@ -76,9 +76,13 @@ codex -c 'mcp_servers.steward_sentry.url="https://mcp.sentry.dev/mcp/your-org/yo
 
 **实际授权页优先于 CLI scopes 参数**：仅勾选 Inspect Issues & Events，取消 Seer、Triage Issues、Manage Projects & Teams，核对页面中的组织/项目范围后批准。不同来源 URL 需要各自完成官方 OAuth。MCP 是额外的诊断通道，不能用它代替接收服务所需的只读 API token。新授权失败时保留原来的轮询。
 
+OAuth 可能有第二层 Sentry 应用授权页。已观察到第一层只选 Inspect 后，第二层仍请求 Teams/Projects/Events/Alerts 写权限；第一层工具范围不能证明底层 OAuth Token 是只读。只获准读取时，不得代为批准这个扩权页面。需核对实际应用授权，再分别记录 MCP 会话的工具限制与上游应用权限。官方实现目前在上游授权请求中使用完整 scope 列表，参见 [授权处理代码](https://github.com/getsentry/toolkit/blob/main/packages/mcp-cloudflare/src/server/oauth/routes/authorize.ts)。
+
 执行时 MCP 是 required，缺少授权/连接失败应明确失败；工具只开放读取 issue/event/resource 和查询，排除修改、Seer 与通用执行网关。运行时继承本机 Codex 的其他配置和工具，白名单仅约束 Steward 添加的这个 server。MCP 返回的数据由官方运行时消费，可能比轮询白名单更详细；应只授权允许向该执行器提供诊断数据的项目。不得在 PR/日志中复制原始个人数据或事件全文。为已有来源增加 Webhook/MCP 不改变来源授权键，因此保留历史任务、游标和去重；修改实际来源、接收人或代码授权仍会撤销旧任务执行资格。
 
 官方依据：[Sentry MCP](https://mcp.sentry.dev/)、[Sentry Webhooks](https://docs.sentry.io/integrations/integration-platform/webhooks/)、[Issue Alert Webhooks](https://docs.sentry.io/integrations/integration-platform/webhooks/issue-alerts/)、[Codex MCP](https://developers.openai.com/codex/mcp)。
+
+没有服务器和自有域名时，见 [Worker + Queue 部署方案](alerts-deployment-plan.md)。该方案尚未实现部署；已有本地 Webhook 接收器不能直接等同于云端入口。
 
 ## 运行行为与边界
 
