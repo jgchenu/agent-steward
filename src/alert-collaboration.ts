@@ -31,7 +31,7 @@ export function openAlertTopic(store: Store, config: Config, sourceId: string, s
     .run(id,sourceId,sourceKey,issueId,source.collaborationChatId,task.id).changes;
   const topic=alertTopic(store,id)!;
   bindGroupTask(store,topic);
-  const introduction=assessment ? `${assessment.summary}\n\n${assessment.explanation}\n影响：${assessment.impact}\n依据：${assessment.evidence.join('；')}\n我会继续核对并修复，进展和需要你确认的操作都在这个话题里。` : '这个监控问题需要继续核查，已有话题记录保留。';
+  const introduction=assessment ? `${assessment.summary}\n\n${assessment.impact}\n我会修复并验证，准备好后在这里发 PR 供你确认。` : '这个监控问题需要继续核查，已有话题记录保留。';
   if (!created) enqueueUpdate(store,topic,`run:${task.id}`,introduction);
   const url=sentryIssueUrl(source,issueId);
   enqueueUpdate(store,topic,'root',`${introduction}\n\n[查看 Sentry 问题](${url})`,true);
