@@ -98,7 +98,7 @@ export function flushNoiseDigests(store:Store,config:Config,now:number):void {
         ON r.sourceKey=o.sourceKey AND r.issueId=o.issueId WHERE o.sourceKey=? AND o.pendingNoise>0 ORDER BY o.issueId LIMIT 20`).all(key);
       if (!rows.length) return;
       const lines=rows.map(r=>{const e=JSON.parse(String(r.latest)) as AlertEvidence;return `issue ${r.issueId}：${r.pendingNoise} 次采样匹配\n${e.url}`;});
-      store.enqueue(source.chatId,`监控噪声汇总（${id}）\n${lines.join('\n')}\n样本与本机确认的扩展来源和堆栈一致，未创建修复任务。采样数不代表错误总数；来源或堆栈变化会重新分析。`,{kind:'notice'});
+      store.enqueue(source.chatId,`监控噪声汇总（${id}）\n${lines.join('\n')}\n样本与本机确认的扩展来源和堆栈一致，未创建修复任务。采样数不代表错误总数；来源或堆栈变化会重新分析。`,{kind:'notice',fresh:true});
       for (const r of rows) store.db.prepare('UPDATE alert_observations SET pendingNoise=0 WHERE sourceKey=? AND issueId=?').run(key,String(r.issueId));
       store.db.prepare('INSERT INTO alert_digests VALUES (?,?) ON CONFLICT(sourceKey) DO UPDATE SET sentAt=excluded.sentAt').run(key,now);
     });

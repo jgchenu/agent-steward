@@ -106,6 +106,7 @@ test('noise requires exact complete extension evidence and an explicit local con
     assert.throws(()=>confirmAlertNoise(f.store,f.config,'web','1','stale-signature','verified',f.clock()),/current evidence/);
     confirmAlertNoise(f.store,f.config,'web','1',noiseSignature(e)!,'Locally verified script origin',f.clock());
     f.advance();await f.poller.tick();assert.equal(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n,2);
+    assert.equal(JSON.parse(String(f.store.db.prepare('SELECT view FROM outbox ORDER BY rowid DESC LIMIT 1').get()!.view)).fresh,true);
     f.advance();await f.poller.tick();assert.equal(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n,2);
     e={...e,release:'v2',eventId:'b'.repeat(32)};f.advance();await f.poller.tick();assert.equal(f.store.list().length,1);
     assert.equal(f.store.db.prepare('SELECT pendingNoise FROM alert_observations').get()!.pendingNoise,1);
