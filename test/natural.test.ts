@@ -1,10 +1,13 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {setTimeout} from 'node:timers/promises';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {Engine} from '../src/engine.js';
 import {Store} from '../src/store.js';
 import {buildCard} from '../src/channels/cards.js';
-import {FeishuChannel} from '../src/channels/feishu.js';
+import {FeishuChannel,parseFeishuEvent} from '../src/channels/feishu.js';
 import type {Config, Incoming, Task, View} from '../src/types.js';
 const cfg=():Config=>({ownerId:'owner',stateDir:'.',codexCommand:'codex',maxRunMinutes:1,groupChats:true,defaultProject:'general',projects:{
   general:{path:'.',sandbox:'read-only',label:'通用分析',description:'讨论、归纳与写作'},
@@ -13,6 +16,93 @@ const cfg=():Config=>({ownerId:'owner',stateDir:'.',codexCommand:'codex',maxRunM
 let seq=0;const incoming=(text:string):Incoming=>({id:'msg'+(++seq),senderId:'owner',senderType:'user',chatId:'group',chatType:'group',botMentioned:true,text,conversation:{anchorId:'root'+seq,sourceId:'msg'+seq,scope:'chat',cutoff:'1000'}});
 async function until(fn:()=>boolean){for(let i=0;i<100;i++){if(fn())return;await setTimeout(5)}assert.fail('timeout')}
 const snapshot={summary:'one context',capturedAt:'',truncated:false,messages:[]};
+const dm=(text:string,extra:Partial<Incoming>={}):Incoming=>({id:'dm-'+(++seq),senderId:'owner',senderType:'user',chatId:'dm',chatType:'p2p',text,...extra});
+
+test('DM focus survives restart, follows trusted handoff and stays isolated by chat and actor',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'steward-dm-')),file=join(dir,'state.sqlite');let store=new Store(file);
+ try{
+  const owner=store.create('dm','general','owner'),guest=store.create('dm','general','guest','read-only',undefined,'guest');
+  store.focusDirectTask(owner);store.focusDirectTask(guest);store.set(owner.id,'review');
+  const next=store.handoff(store.get(owner.id)!,'code','continue','read-only');
+  store.close();store=new Store(file);
+  assert.equal(store.directTask('dm')!.id,next.id);assert.equal(store.directTask('dm','guest')!.id,guest.id);assert.equal(store.directTask('other-dm'),undefined);
+  store.db.prepare('UPDATE tasks SET requesterRevoked=1 WHERE id=?').run(guest.id);assert.equal(store.directTask('dm','guest'),undefined);
+ }finally{store.close();rmSync(dir,{recursive:true,force:true})}
+});
+
+test('DM clarification, result and followup are ordinary dialogue; unsolicited alerts do not steal focus',async()=>{
+ const store=new Store(':memory:'),sent:Array<{text:string;view?:View}>=[],runs:Task[]=[];
+ const engine=new Engine(store,cfg(),{run:async(t,_p,h)=>{
+  runs.push(t);h.thread('session');
+  if(runs.length===1)return new Promise(resolve=>h.request({kind:'input',description:'写给谁看？',resolve:a=>resolve('写给'+a)}));
+  return '已按补充修改';
+ }},{send:async(_c,text,_id,view)=>{sent.push({text,view})}});
+ try{
+  engine.receive(dm('帮我写一段介绍'));await until(()=>store.list()[0]?.status==='waiting_input');await engine.flush();
+  assert.ok(sent.every(x=>x.view?.kind==='reply'));assert.equal(sent.at(-1)!.text,'写给谁看？');
+  engine.receive(dm('新用户'));await until(()=>store.list()[0]?.status==='review');await engine.flush();
+  assert.ok(sent.every(x=>x.view?.kind==='reply'));
+  assert.equal(sent.at(-1)!.text,'写给新用户');assert.doesNotMatch(sent.at(-1)!.text,/验收|\/done|表单/);
+  const original=store.list()[0],alert=store.create('dm','general','unsolicited alert');store.set(alert.id,'review');
+  engine.receive(dm('再简短一点'));await until(()=>runs.length===2 && store.get(original.id)?.status==='review');
+  assert.equal(runs[1].id,original.id);assert.equal(runs[1].threadId,'session');assert.equal(store.get(alert.id)!.prompt,'unsolicited alert');
+ }finally{await engine.stop();store.close()}
+});
+
+test('DM quote selects its bound task over focus; foreign actor quotes never inherit owner work',async()=>{
+ const store=new Store(':memory:'),config=cfg(),runs:Task[]=[];
+ const engine=new Engine(store,config,{run:async t=>{runs.push(t);return 'done'}},{send:async()=>{}});
+ try{
+  engine.receive(dm('first'));await until(()=>store.list()[0]?.status==='review');const first=store.list()[0];
+  store.bindConversation('dm','first-reply',first.id);
+  engine.receive(dm('/new general second'));await until(()=>store.list().length===2 && store.list()[1].status==='review');const second=store.list()[1];
+  assert.equal(store.directTask('dm')!.id,second.id);
+  const raw={sender:{sender_type:'user',sender_id:{open_id:'owner'}},message:{message_id:'quoted-input',chat_id:'dm',chat_type:'p2p',message_type:'text',parent_id:'first-reply',content:JSON.stringify({text:'继续第一件事'})}};
+  const parsed=parseFeishuEvent(raw)!;assert.equal(parsed.replyToMessageId,'first-reply');assert.equal(parsed.conversation,undefined);
+  engine.receive(parsed);await until(()=>runs.length===3 && store.get(first.id)?.status==='review');
+  assert.equal(runs[2].id,first.id);assert.equal(store.directTask('dm')!.id,first.id);assert.equal(store.get(second.id)!.prompt,'second');
+  engine.receive({...dm('继续',{senderId:'stranger',replyToMessageId:'first-reply'})});assert.equal(runs.length,3);
+ }finally{await engine.stop();store.close()}
+});
+
+test('natural DM yes never accepts a permission request or explicit tool form',async()=>{
+ for(const kind of ['approval','input'] as const){
+  const store=new Store(':memory:'),requests:Array<{id:string;resolved:number}>=[];
+  const engine=new Engine(store,cfg(),{run:async(_t,_p,h,signal)=>new Promise((resolve,reject)=>{
+   signal.addEventListener('abort',()=>reject(signal.reason),{once:true});
+   const item={id:'',resolved:0};item.id=h.request({kind,explicit:true,description:'Explicit permission boundary',resolve:a=>{item.resolved++;resolve(a)}});requests.push(item);
+  })},{send:async()=>{}});
+  try{engine.receive(dm('执行'));await until(()=>requests.length===1);engine.receive(dm('好的'));await engine.flush();
+   assert.equal(requests[0].resolved,0);assert.equal(store.getRequest(requests[0].id)!.status,'pending');assert.equal(store.list().length,1);
+  }finally{await engine.stop();store.close()}
+ }
+});
+
+test('DM notices and long replies use new posts, deduplicate retries, and persist task quote bindings',async()=>{
+ const store=new Store(':memory:'),channel=new FeishuChannel('fake','fake',store,cfg()),sent:any[]=[];
+ (channel as any).client={im:{message:{create:async(p:any)=>{sent.push(p);return {code:0,data:{message_id:'post-'+sent.length}}},patch:async()=>{throw Error('Ordinary speech must not patch a card')}}}};
+ try{
+  store.saveCardMessage('dm','notice','old-card');
+  await channel.send('dm','噪声样本与已确认的来源一致。','digest',{kind:'notice',fresh:true});
+  await channel.send('dm','噪声样本与已确认的来源一致。','digest',{kind:'notice',fresh:true});assert.equal(sent.length,1);
+  const t=store.create('dm','general','question');
+  await channel.send('dm','完整结果。'.repeat(3000),'result',{kind:'reply',taskId:t.id});
+  assert.ok(sent.length>2);assert.ok(sent.every(p=>p.data.msg_type==='post' && !p.data.content.includes('派新任务')));
+  assert.equal(store.conversationTask('dm',{anchorId:'post-2',sourceId:'quote',scope:'chat'})!.id,t.id);
+  assert.equal(store.directTask('dm'),undefined); // Outbound automation never selects the human's current task.
+ }finally{channel.close();store.close()}
+});
+
+test('ordinary task entry and followup have no forms, while explicit tool inputs retain their boundary',()=>{
+ const store=new Store(':memory:');try{
+  const t=store.create('dm','general','work');store.set(t.id,'review');
+  for(const view of [{kind:'home'},{kind:'followup',taskId:t.id}] as View[])assert.doesNotMatch(JSON.stringify(buildCard(store,cfg(),'dm',view)),/"tag":"form"/);
+  const id=store.request(t.id,'input','Who is the audience?');store.set(t.id,'waiting_input');
+  assert.doesNotMatch(JSON.stringify(buildCard(store,cfg(),'dm',{kind:'task',taskId:t.id})),/"tag":"form"/);
+  store.event(t.id,'input_explicit',id);
+  assert.match(JSON.stringify(buildCard(store,cfg(),'dm',{kind:'task',taskId:t.id})),/"tag":"form"/);
+ }finally{store.close()}
+});
 test('natural task bypasses forms, acknowledges before inference, preserves full text and only posts a final card',async()=>{
  const store=new Store(':memory:'),order:string[]=[],sent:View[]=[],tasks:Task[]=[];const config=cfg();
  const engine=new Engine(store,config,{run:async t=>{order.push('run');tasks.push(t);return 'result'}},{acknowledge:async()=>{order.push('reaction')},context:async()=>{order.push('context');return snapshot},send:async(_c,_t,_id,v)=>{if(v)sent.push(v)}});

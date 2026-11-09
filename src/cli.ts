@@ -1,3 +1,5 @@
+import { AlertPoller } from './alerts.js';
+import { startAlertWebhook } from './alert-webhook.js';
 import { startWorkspaceConsole } from './workspace-console.js';
 import { consolePort } from './console-entry.js';
 import { listCodexProjects, pinCodexGrants, type CodexProject } from './codex-projects.js';
@@ -62,6 +64,9 @@ async function main(): Promise<void> {
     feishu = new FeishuChannel(appId, secret, store, config); channel = feishu;
   }
   const engine = new Engine(store, config, mode === 'demo' ? new DemoExecutor() : new WorkspaceExecutor(config, store, new CodexExecutor(config.codexCommand, undefined, config.approvalsReviewer)), channel);
+  const alerts = mode === 'feishu' ? new AlertPoller(store,config) : undefined;
+  const webhook = mode === 'feishu' && process.env.STEWARD_ALERT_WEBHOOK_PORT !== undefined
+    ? await startAlertWebhook(store,config,Number(process.env.STEWARD_ALERT_WEBHOOK_PORT)) : undefined;
   let configRevision = '';
   const refreshProjects = () => {
     if (mode === 'demo') return;
@@ -87,12 +92,14 @@ async function main(): Promise<void> {
   const shutdown = async () => {
     if (closing) return; closing = true;
     clearInterval(configTimer); clearInterval(catalogTimer); feishu?.close(); consoleApp?.server.close();
-    await engine.stop(); clearPermissionRuntime(config.stateDir); store.close(); release(); process.exit(0);
+    webhook?.close(); webhook?.closeAllConnections();
+    await alerts?.stop(); await engine.stop(); clearPermissionRuntime(config.stateDir); store.close(); release(); process.exit(0);
   };
   process.on('SIGINT', () => void shutdown()); process.on('SIGTERM', () => void shutdown());
   engine.start();
   if (feishu) {
     await feishu.connect(message => { refreshProjects(); engine.receive(message); }, action => { refreshProjects(); return engine.handleAction(action); });
+    alerts?.start();
     console.log('Agent Steward started. Owner-controlled Feishu tasks. Use /help; requester and group access follow local configuration.');
   } else {
     console.log(mode === 'demo' ? 'DEMO · 模拟执行器，不调用模型。输入任务或 /help。'

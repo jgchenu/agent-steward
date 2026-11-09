@@ -36,6 +36,7 @@ export function parseFeishuEvent(data: any, botId?: string): Incoming | undefine
   const str = (v: unknown) => typeof v === 'string' && v ? v : undefined;
   return { id: message.message_id, senderId: sender.sender_id.open_id, chatId: message.chat_id,
     text: body.trim(), chatType: message.chat_type, senderType: 'user',
+    ...(message.chat_type==='p2p' && str(message.parent_id) ? {replyToMessageId:str(message.parent_id)} : {}),
     botMentioned: botMentions.length > 0, mentionsOthers: mentions.some((m: any) => m.id?.open_id !== botId),
     ...(message.chat_type === 'group' ? { conversation: {
       anchorId: str(message.root_id) ?? message.message_id, sourceId: message.message_id,
@@ -122,7 +123,7 @@ export class FeishuChannel implements Channel {
       }
       return;
     }
-    if (view?.kind === 'reply' || view?.kind === 'requester-reply' || (view?.kind === 'notice' && view.conversation)) {
+    if (!view || view.kind === 'reply' || view.kind === 'requester-reply' || view.kind === 'notice') {
       const workspace = scopedTask && this.store.workspace(scopedTask.id);
       const roots = [workspace?.path, workspace?.source, scopedTask && this.config.projects[scopedTask.project]?.path]
         .filter((path): path is string => typeof path === 'string');
@@ -133,13 +134,13 @@ export class FeishuChannel implements Channel {
         const content = JSON.stringify({ zh_cn: { content: [[{ tag: 'md', text: chunks[i] }]] } });
         // Feishu accepts at most 50 characters, including for thread replies.
         const uuid = createHash('sha256').update(`${deliveryId}:${i}`).digest('hex').slice(0, 32);
-        const result = view.conversation
+        const result = view?.conversation
           ? await this.client.im.message.reply({ path: { message_id: view.conversation.anchorId },
             data: { msg_type: 'post', content, uuid, reply_in_thread: true } })
           : await this.client.im.message.create({ params: { receive_id_type: 'chat_id' }, data: { receive_id: chatId, msg_type: 'post', content, uuid } });
         if (result.code !== 0 || !result.data?.message_id) throw new Error(`Feishu reply error ${result.code}`);
         this.store.saveCardMessage(chatId, key, result.data.message_id);
-        if (scopedTask?.conversation) {
+        if (scopedTask) {
           this.store.bindConversation(chatId, result.data.message_id, scopedTask.id);
           if (result.data.thread_id) this.store.bindConversation(chatId, result.data.thread_id, scopedTask.id);
         }
@@ -167,7 +168,7 @@ export class FeishuChannel implements Channel {
       : await this.client.im.message.create({ params: { receive_id_type: 'chat_id' },
         data: { receive_id: chatId, msg_type: 'interactive', content, uuid: deliveryId } });
     if (result.code !== 0) throw new Error(`Feishu delivery error ${result.code}`);
-    if (scopedTask?.conversation && result.data?.message_id) {
+    if (scopedTask && result.data?.message_id) {
       this.store.bindConversation(chatId, result.data.message_id, scopedTask.id);
       if (result.data.thread_id) this.store.bindConversation(chatId, result.data.thread_id, scopedTask.id);
     }
