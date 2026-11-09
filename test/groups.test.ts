@@ -73,7 +73,7 @@ test('group plain yes never approves, and another topic cannot resolve an outsta
   } finally { await engine.stop(); store.close(); }
 });
 
-test('optional group card form persists trusted origin, rejects other members and duplicate tasks in a topic', async () => {
+test('workbench has no task form; legacy callbacks retain origin, actor and duplicate-task checks', async () => {
   const store = new Store(':memory:'); const sent: View[] = [];
   const cfg = { ...config, projects: { ...config.projects, second: config.projects.demo } };
   const engine = new Engine(store, cfg, { run: async () => 'done' }, { send: async (_c, _t, _d, v) => { if(v)sent.push(v); }, context: async () => snapshot });
@@ -82,9 +82,9 @@ test('optional group card form persists trusted origin, rejects other members an
     const view = sent.find(v => v.kind === 'home')!;
     assert.equal(view.conversation!.anchorId, 'root');
     const card = buildCard(store, cfg, 'group', view) as any;
-    const form = card.body.elements.find((e: any) => e.tag === 'form');
-    const submit = form.elements.find((e: any) => e.form_action_type === 'submit');
-    const click = { id: 'click', senderId: 'owner', chatId: 'group', messageId: 'card', actionId: submit.name, fields: { project: 'demo', body: 'work', conversation: ref('forged') } };
+    assert.equal(card.body.elements.some((e:any)=>e.tag==='form'),false);
+    const legacyAction=store.action('group',{op:'new',conversation:view.conversation});
+    const click = { id: 'click', senderId: 'owner', chatId: 'group', messageId: 'card', actionId: legacyAction, fields: { project: 'demo', body: 'work', conversation: ref('forged') } };
     assert.equal(engine.handleAction({ ...click, senderId: 'other' }).toast.type, 'error');
     assert.equal(engine.handleAction(click).toast.type, 'success'); await until(() => store.list()[0]?.status === 'review');
     assert.equal(store.list()[0].conversation!.anchorId, 'root'); assert.equal(store.list()[0].conversation!.sourceId, 'card');

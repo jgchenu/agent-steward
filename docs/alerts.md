@@ -1,6 +1,6 @@
 # Sentry 监控接入
 
-这是本地常驻服务中的可选轮询入口，不需要公网 Webhook。项目、来源凭证、环境、执行模式和通知私聊都由本机主人配置。新项目复用同一条队列、Codex 执行器、隔离工作区与 PR 确认流程；Sentry 连接器不直接调用模型、Git 或飞书。
+这是本地常驻服务中的可选监控入口：轮询可独立运行，也可增加 Sentry Webhook 和官方只读 MCP。项目、来源凭证、环境、执行模式和通知私聊都由本机主人配置。新项目复用同一条队列、Codex 执行器、隔离工作区与 PR 确认流程；Sentry 连接器不直接调用模型、Git 或飞书。
 
 ## 配置
 
@@ -42,19 +42,77 @@ npm run alerts -- status
 
 `check` 读取最近 24 小时第一页及一个代表事件，只输出连通性和数量；即使来源停用也可诊断，不创建任务、不发送消息、不调用 Codex。`status` 只读本机状态。若没有匹配问题，列表连通不代表事件详情权限或实际诊断成功。填好凭证后重启服务加载环境变量，检查通过再把 `enabled` 改为 `true`；Feishu 服务会热更新配置。terminal/demo 模式不启动轮询。
 
+## Webhook 主动触发（可选）
+
+在来源上增加 `webhook`，在私人 `.env` 中配置独立监听端口和 Sentry Internal Integration 的 Client Secret：
+
+```json
+"webhook": {
+  "secretEnv": "STEWARD_SENTRY_MY_WEB_WEBHOOK_SECRET",
+  "installationId": "YOUR_INSTALLATION_UUID"
+}
+```
+
+```dotenv
+STEWARD_ALERT_WEBHOOK_PORT=17833
+STEWARD_SENTRY_MY_WEB_WEBHOOK_SECRET=YOUR_PRIVATE_CLIENT_SECRET
+```
+
+接收路径为 `http://127.0.0.1:17833/sentry/my-web-errors`。用固定 HTTPS 反向代理/隧道仅暴露这个端口；不得暴露控制台端口。配置 Sentry 内部集成的 Webhook URL 为对应 HTTPS 路径，启用 Alert Rule Action，并在目标项目的 production Issue Alert Rule 中选择该集成。创建/授权内部集成需要管理员的明确批准。随机临时隧道只适合验证，不是持续服务的固定入口。
+
+接收器校验原始请求体的 HMAC-SHA256、安装 UUID、项目 ID 和环境，限制请求体 1 MB、请求时间 10 秒和并发连接 32。只接受 `event_alert` / `triggered`，不支持 metric alert。其他已签名事件返回空成功。它仅保存 issue ID、来源授权和接收时间；不保存原始事件，也不把正文当任务指令。ACK 在 SQLite 入队之后返回，模型/API 查询在后台发生。最多 1000 条待处理 issue，满时返回 503 让发送方重试；这是容量限制，不是无损归档承诺。
+
+消费时再用只读 API 核对项目/环境并获取脱敏证据，与轮询共用事务去重和配额。读取失败保留队列并指数退避（30 秒至 1 小时），容量不足一分钟后再试。来源撤销时丢弃旧授权收件；现有任务仍保留。`npm run alerts -- status` 显示待消费数及最大重试次数。轮询继续作为补漏入口；它不等同于 Alert Rule 的阈值语义。两种入口共用取证和复发判断；相同证据不会重复建单，版本、堆栈、来源或累计影响变化按下述规则复查。已建过任务的 issue 仍可接收后续 Webhook。
+
+## 官方 Sentry MCP 补查（可选）
+
+先核对数字项目 ID 对应的 slug，在来源的 `sentry` 中增加 `"mcpProject": "your-project-slug"`。Steward 只为有有效 Sentry 来源绑定的任务注入固定官方地址 `https://mcp.sentry.dev/mcp/<organization>/<mcpProject>`，不为普通任务注册新工具。环境不是 MCP 的权限边界；执行器必须继续按配置过滤环境。
+
+由官方 Codex 完成 OAuth，不复制、解析或转存它的认证文件。可用临时 CLI 配置登录，不修改全局 MCP 配置：
+
+```sh
+codex -c 'mcp_servers.steward_sentry.url="https://mcp.sentry.dev/mcp/your-org/your-project-slug"' mcp login steward_sentry --scopes org:read,project:read,team:read,event:read
+```
+
+**实际授权页优先于 CLI scopes 参数**：仅勾选 Inspect Issues & Events，取消 Seer、Triage Issues、Manage Projects & Teams，核对页面中的组织/项目范围后批准。不同来源 URL 需要各自完成官方 OAuth。MCP 是额外的诊断通道，不能用它代替接收服务所需的只读 API token。新授权失败时保留原来的轮询。
+
+OAuth 可能有第二层 Sentry 应用授权页。已观察到第一层只选 Inspect 后，第二层仍请求 Teams/Projects/Events/Alerts 写权限；第一层工具范围不能证明底层 OAuth Token 是只读。只获准读取时，不得代为批准这个扩权页面。需核对实际应用授权，再分别记录 MCP 会话的工具限制与上游应用权限。官方实现目前在上游授权请求中使用完整 scope 列表，参见 [授权处理代码](https://github.com/getsentry/toolkit/blob/main/packages/mcp-cloudflare/src/server/oauth/routes/authorize.ts)。
+
+执行时 MCP 是 required，缺少授权/连接失败应明确失败；工具只开放读取 issue/event/resource 和查询，排除修改、Seer 与通用执行网关。运行时继承本机 Codex 的其他配置和工具，白名单仅约束 Steward 添加的这个 server。MCP 返回的数据由官方运行时消费，可能比轮询白名单更详细；应只授权允许向该执行器提供诊断数据的项目。不得在 PR/日志中复制原始个人数据或事件全文。为已有来源增加 Webhook/MCP 不改变来源授权键，因此保留历史任务、游标和去重；修改实际来源、接收人或代码授权仍会撤销旧任务执行资格。
+
+官方依据：[Sentry MCP](https://mcp.sentry.dev/)、[Sentry Webhooks](https://docs.sentry.io/integrations/integration-platform/webhooks/)、[Issue Alert Webhooks](https://docs.sentry.io/integrations/integration-platform/webhooks/issue-alerts/)、[Codex MCP](https://developers.openai.com/codex/mcp)。
+
+没有服务器和自有域名时，见 [Worker + Queue 部署方案](alerts-deployment-plan.md)。该方案尚未实现部署；已有本地 Webhook 接收器不能直接等同于云端入口。
+
 ## 运行行为与边界
 
 - 首次启用（或来源/项目授权发生变化）以当时为起点，不自动导入历史积压。之后读取指定环境中在窗口内发生过的未解决问题，包括旧问题的新发生事件。这是 issue 轮询，不是 Sentry Alert Rule 的逐次投递或阈值事件重放。
-- 每页最多 20 个 issue，按 API cursor 分页；固定窗口在 SQLite 中保存，完成后留一分钟重叠。同一来源授权下每个 issue 最多创建一个任务，重启不会重复建单。重复发生不自动重新修复；在原任务由主人明确继续。已解决/忽略的问题不自动建单。
-- 默认每个来源每天最多 5 个新任务（UTC 日期，可配置 1–20），全实例告警待处理任务最多 2 个。配额计数跨重启保留；容量不足保留当前页，下次重试。review/failed/cancelled/completed 不占待处理名额，但仍计当天的新任务数。API 失败不推进进度；错误变更时通过持久化 outbox 通知主人。可用 `status` 检查 `capacity_wait` 或最近 API 错误。
+- 每页最多 20 个 issue，按 API cursor 分页；固定窗口在 SQLite 中保存，完成后留一分钟重叠。同一来源授权下保留首次任务绑定；相同证据不重复建单。发现未分析过的版本、堆栈或来源，或累计报错数翻倍且增加至少 100、累计用户数翻倍且增加至少 10，才创建隔离复查任务。对比上一次实际分析的基线，普通轮询不重置增长基线；计数是 issue API 返回的累计值，不是错误率，也不能归因于某个扩展样本。已分析过的签名不会仅因旧客户端版本交替出现而重复建单。已解决/忽略的问题不自动建单。
+- 默认每个来源每天最多 5 个分析任务（含复发，UTC 日期，可配置 1–20），全实例告警待处理任务最多 2 个。配额计数跨重启保留；同一 issue 的任务或可信基线后继处于 queued/running/waiting_input/waiting_approval/interrupted 时不另建复发任务；复查最短间隔一小时。容量不足或等待冷却时保留当前页，下次重试，并继续处理该页其他 issue 的噪声采样。原补证、审批和交付状态不被覆盖。review/failed/cancelled/completed 不占待处理名额，但仍计当天的新任务数。API 失败不推进进度；错误变更时通过持久化 outbox 通知主人。可用 `status` 检查 `capacity_wait` 或最近 API 错误。
 - 本地离线、Sentry 保留期、API 分页和问题状态变化会影响可见数据；这不是无损的逐事件归档。错误、过期 cursor 或长期积压会停留在可检查的状态，不以跳过窗口掩盖失败。
-- 只保存经过字段白名单筛选的标题、计数、日期、版本、异常类型/值和最多 3×20 个源码栈帧。丢弃用户对象、请求、Cookie、breadcrumbs、frame vars 和源码上下文，对选中字符串去除常见 URL/邮箱/凭证样式。任意业务文本不能保证完全匿名化；只连接允许向当前执行器提供这些诊断字段的项目。
+- 只保存经过字段白名单筛选的标题、计数、日期、版本、异常类型/值和最多 3×20 个源码栈帧，以及合法事件 ID/时间。额外只接收 `browser_extension_source.evidence=original_exception_stack` 下最多 3 个合法公开 Chromium 扩展 origin，不保留其他 contexts、扩展路径或 Firefox 用户配置 UUID。堆栈被截断时不可建立噪声规则。丢弃用户对象、请求、Cookie、breadcrumbs、frame vars 和源码上下文，对选中字符串去除常见 URL/邮箱/凭证样式。栈帧脚本地址例外保留协议、主机和脱敏路径，用于辨别插件注入；去掉 userinfo、查询参数和片段，不主动下载脚本。任意业务文本不能保证完全匿名化；只连接允许向当前执行器提供这些诊断字段的项目。
 - 外部诊断数据明确标记为不可信，不能成为发布、授权或外发指令。模型需先区分插件/网络噪音、预期业务失败与代码缺陷，验证根因，再修复和测试。无充分证据只报告缺口。
 - 新建任务和去重记录、来源绑定、飞书通知同事务提交。执行沿用 Engine 的并发与单代码执行限制。禁用来源或改变绑定会阻止排队任务，并中止已运行的相关任务；保留工作目录。恢复原授权后可由主人继续，不静默转换任务范围。
 - 结果通过既有 outbox 发回配置私聊。修复完成后生成 PR 预览；提交/推送/创建草稿 PR 仍使用原有一次性确认，合并与部署不属于告警授权。
 
+## 本机确认的噪声分流
+
+告警标题、扩展 ID 和模型结论本身不能创建噪声规则。完成证据核对后，本机操作员可查看脱敏采样，再用对应签名确认：
+
+```sh
+npm run alerts -- inspect-noise my-web-errors 123456
+npm run alerts -- confirm-noise my-web-errors 123456 SIGNATURE "已核对扩展源码与事件堆栈"
+npm run alerts -- clear-noise my-web-errors 123456
+```
+
+`SIGNATURE` 是 inspect 返回的 SHA-256；证据变化后旧签名不能确认新样本。命令只改本地路由，不修改 Sentry 状态，也不直接调用模型或发送消息。规则绑定来源授权、issue、完整脱敏异常堆栈和公开扩展来源；包含普通 Web 脚本或缺失堆栈的样本不可确认。所有栈帧必须属于 `app:///` 或 Chromium 扩展地址，并且已由操作员查证。无法根据这些字段判定身份的事件继续分析。
+
+匹配规则的样本不创建修复任务，经持久化 outbox 以普通聊天消息发到来源私聊汇总：首批立即发送，此后每来源最多一小时一次、每批最多 20 个 issue。重复采到同一事件不累加；无事件 ID 时使用 lastSeen/计数作为降级标识。汇总中的采样次数不是实际错误总数。版本变化而来源与堆栈仍完全一致时，确定性复核后仍走汇总；来源或堆栈变化、证据缺失、规则撤销时重新进入分析并保留配额/冷却限制。普通网络错误不能仅凭标题套用此规则。
+
+升级为 schema 14 时，已有首次任务迁入分析台账，不重复消耗预算；首次重采样只建立旧 issue 基线，不重放历史任务。告警接单、追问和结果都直接在私聊里交流，不要求填写任务表单；授权操作仍需明确确认。新分析任务拥有独立工作区、会话和发布审批，携带历史任务/PR 及计数对比，不继承旧发布例外。轮询和 Webhook 都只复核最新样本，并非逐事件分类：不同来源混在同一 issue 时不能据此声称所有事件都来自扩展。
+
 ## 验证
 
-`npm run check` 中的测试全部使用模拟 Sentry/执行器，不调用真实订阅或飞书。真实接入需分别记录：只读 API check、来源启用后的真实问题建单、Codex 根因分析/验证、私聊回执、PR 发布。单独一个 API 成功或本机测试不能代替这些验收。
+`npm run check` 中的测试全部使用模拟 Sentry/执行器，不调用真实订阅或飞书。真实接入需分别记录：只读 API check、官方 MCP OAuth 与真实只读工具调用（若启用）、Sentry 实际投递和验签（若启用）、来源启用后的真实问题建单、Codex 根因分析/验证、私聊回执、PR 发布。单独一个 API 成功或本机测试不能代替这些验收。
 
 接口依据：[组织 Issue 列表](https://docs.sentry.io/api/events/list-an-organizations-issues/)、[Issue 详情](https://docs.sentry.io/api/events/retrieve-an-issue/)、[Issue 事件](https://docs.sentry.io/api/events/retrieve-an-issue-event/)。

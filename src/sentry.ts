@@ -3,6 +3,7 @@ import type { AlertSource } from './alert-config.js';
 export interface AlertEvidence {
   issueId: string; title: string; url: string; firstSeen: string; lastSeen: string;
   count: number; userCount: number; release: string; environment: string; exception: unknown[];
+  eventId?: string; eventAt?: string; extensionOrigins?: string[]; completeStack?: boolean;
 }
 export interface IssuePage { issues: Array<{id: string}>; next?: string }
 export interface AlertConnector {
@@ -24,7 +25,20 @@ const record = (v: unknown): Record<string, any> => v && typeof v === 'object' &
 function sourceFile(value: unknown): string {
   if (typeof value !== 'string') return '';
   try { const u = new URL(value); return redactAlertText(decodeURIComponent(u.pathname).split(/[?#]/)[0],200); }
-  catch { return redactAlertText(value.split(/[?#]/)[0],200); }
+  catch {
+    const path=value.split(/[?#]/)[0];
+    try {return redactAlertText(decodeURIComponent(path),200);} catch {return redactAlertText(path,200);}
+  }
+}
+export function scriptLocation(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  try {
+    const u=new URL(value);
+    if (!['https:','http:','chrome-extension:','moz-extension:','webpack:','app:'].includes(u.protocol)) return '';
+    // Preserve the origin needed to distinguish first-party code from injected scripts.
+    // Never retain userinfo, query strings, fragments, source context or frame variables.
+    return `${u.protocol}//${redactAlertText(u.host,160)}${sourceFile(u.pathname)}`;
+  } catch {return sourceFile(value);}
 }
 
 export class SentryConnector implements AlertConnector {
@@ -71,14 +85,27 @@ export class SentryConnector implements AlertConnector {
     if (environment !== source.sentry.environment) throw Error('Sentry environment mismatch');
     const entries = Array.isArray(event.entries) ? event.entries : [];
     const values = entries.find((e: any) => e?.type === 'exception')?.data?.values;
+    const context=record(record(event.contexts).browser_extension_source);
+    // Public Chromium extension IDs only; never copy arbitrary contexts or per-profile Firefox UUIDs.
+    const origins=context.evidence==='original_exception_stack' && Array.isArray(context.origins)
+      && context.origins.length>0 && context.origins.length<=3
+      && context.origins.every((v:unknown)=>typeof v==='string' && /^chrome-extension:\/\/[a-p]{32}$/.test(v))
+      ? [...new Set<string>(context.origins)].sort() : [];
+    const completeStack=Array.isArray(values) && values.length>0 && values.length<=3 && values.every((v:unknown)=>{
+      const frames=record(record(v).stacktrace).frames;
+      return Array.isArray(frames) && frames.length>0 && frames.length<=20;
+    });
     const exception = (Array.isArray(values) ? values : []).slice(0,3).map(record).map(e => ({
       type:redactAlertText(e.type,100), value:redactAlertText(e.value),
       frames:(Array.isArray(e.stacktrace?.frames) ? e.stacktrace.frames : []).slice(-20).map(record).map((f: Record<string, any>) => ({
-        filename:sourceFile(f.filename),function:redactAlertText(f.function,150),
+        filename:sourceFile(f.filename),absPath:scriptLocation(f.absPath || f.abs_path || f.filename),function:redactAlertText(f.function,150),
+        sourceLink:scriptLocation(f.sourceLink),mappingErrors:(Array.isArray(f.errors) ? f.errors : []).slice(0,5).map((error:unknown)=>redactAlertText(record(error).type,100)).filter(Boolean),
         line:count(f.lineNo),column:count(f.colNo),inApp:f.inApp === true,
       })),
     }));
     return {issueId,title:redactAlertText(issue.title),url:`${hosts[source.sentry.region]}/organizations/${encodeURIComponent(source.sentry.organization)}/issues/${issueId}/`,
+      eventId:typeof event.eventID==='string' && /^[a-f0-9]{32}$/.test(event.eventID) ? event.eventID : '',
+      eventAt:date(event.dateCreated),extensionOrigins:origins,completeStack,
       firstSeen:date(issue.firstSeen),lastSeen:date(issue.lastSeen),count:count(issue.count),userCount:count(issue.userCount),
       release:typeof record(event.release).version === 'string' && /^[a-zA-Z0-9_.+-]{1,100}$/.test(record(event.release).version) ? record(event.release).version : '',environment:source.sentry.environment,exception};
   }

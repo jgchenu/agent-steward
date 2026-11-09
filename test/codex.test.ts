@@ -46,6 +46,17 @@ test('requires subscription before starting inference and resumes stored thread'
   assert.equal(rpc.closed, true);
 });
 
+test('bound alert execution passes scoped MCP configuration and requires evidence before clarification',async()=>{
+  const rpc=new FakeRpc();rpc.onTurn=()=>rpc.finish();
+  const scope={organization:'example',project:'web',environment:'production'};
+  let received:unknown;
+  const executor=new CodexExecutor('unused',(_command,_cwd,mcp)=>{received=mcp;return rpc;});
+  await executor.run({...task,sentryMcp:scope},{path:'.',sandbox:'read-only'},setup(rpc).hooks,AbortSignal.timeout(5000));
+  assert.deepEqual(received,scope);
+  assert.match(rpc.params['thread/start'].developerInstructions,/obtain missing issue\/event\/release\/stack evidence before asking/);
+  assert.match(rpc.params['thread/start'].developerInstructions,/does not filter environments/);
+});
+
 test('API-only or missing authentication stops before any thread or turn', async () => {
   const rpc = new FakeRpc(); rpc.subscription = async () => { throw new Error('subscription required'); };
   await assert.rejects(setup(rpc).run(), /subscription required/);
@@ -99,6 +110,19 @@ test('multi-question responses require complete, explicit answers', () => {
   assert.throws(() => inputAnswers(questions, '{"a":"yes"}'), /b/);
   assert.deepEqual(inputAnswers(questions, '{"a":"yes","b":"no"}'),
     { a: { answers: ['yes'] }, b: { answers: ['no'] } });
+});
+
+test('multiple business questions are asked sequentially as prose while preserving the protocol response',async()=>{
+  const rpc=new FakeRpc(),requests:HumanRequest[]=[],s=setup(rpc,requests);
+  rpc.onTurn=()=>{
+    rpc.emit('tool/requestUserInput',{questions:[{id:'audience',question:'写给谁？'},{id:'tone',question:'希望什么语气？'}]},8);
+    assert.equal(requests.length,1);assert.match(requests[0].description,/写给谁/);
+    requests[0].resolve('新用户');requests[0].resolve('duplicate');
+    assert.equal(requests.length,2);assert.equal(rpc.writes.length,0);assert.match(requests[1].description,/语气/);
+    requests[1].resolve('简单自然');requests[1].resolve('duplicate');
+    assert.deepEqual(rpc.writes,[{id:8,result:{answers:{audience:{answers:['新用户']},tone:{answers:['简单自然']}}}}]);rpc.finish();
+  };
+  await s.run();
 });
 
 

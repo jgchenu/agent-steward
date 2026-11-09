@@ -18,6 +18,7 @@ export interface Attachment {
 export type PermissionMode = 'ask' | 'auto' | 'sandbox-auto' | 'full-access';
 export interface ResourceBinding { kind: 'code-project'; id: string }
 export interface Task {
+  sentryMcp?: import('./sentry-mcp.js').SentryMcp;
   requesterId?: string | null; requesterRevoked?: number;
   resources?: ResourceBinding[];
   orchestration?: 'legacy' | 'langgraph-v1'; orchestrationRunId?: string | null;
@@ -37,6 +38,7 @@ export interface Incoming {
   id: string; senderId: string; chatId: string; text: string;
   chatType: 'p2p' | 'group'; senderType: string;
   conversation?: Conversation; botMentioned?: boolean; mentionsOthers?: boolean;
+  replyToMessageId?: string;
 }
 export interface Check { name: string; command: string; args: string[]; timeoutSeconds?: number }
 export interface Project {

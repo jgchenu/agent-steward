@@ -21,12 +21,12 @@ const message=(text:string,topic='topic',botMentioned=true):Incoming=>({id:Strin
   conversation:{anchorId:topic,sourceId:String(seq),threadId:topic,scope:'thread'}});
 const base:Config={ownerId:'owner',stateDir:tmpdir(),codexCommand:'unused',maxRunMinutes:1,groupChats:true,projects:{}};
 
-test('the task form defaults to no resource and works with zero code grants without allowing write escalation',async()=>{
+test('task entry invites conversation without forms; legacy callbacks cannot escalate zero code grants',async()=>{
   const store=new Store(':memory:');let runs=0;
   const engine=new Engine(store,base,{run:async(t)=>{runs++;assert.deepEqual(t.resources,[]);return 'summary';}},channel);
   try{
     const home=JSON.stringify(buildCard(store,base,'group',{kind:'home',conversation:message('').conversation}));
-    assert.match(home,/"initial_option":"__conversation__"/);assert.match(home,/归纳客服反馈/);
+    assert.doesNotMatch(home,/"tag":"form"|select_static/);assert.match(home,/直接发消息/);
     const actionId=store.action('group',{op:'new',conversation:message('').conversation});
     const action={id:'start',actionId,senderId:'owner',chatId:'group',messageId:'card',fields:{project:CONVERSATION,mode:'read-only',body:'整理客服反馈'}};
     assert.equal(engine.handleAction({...action,senderId:'other'}).toast.type,'error');

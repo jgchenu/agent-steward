@@ -1,4 +1,5 @@
 import { desktopApprovalPlan } from './desktop-hooks.js';
+import { sentryMcpOverrides, type SentryMcp } from '../sentry-mcp.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
@@ -14,7 +15,7 @@ export class CodexRpc {
   private exited: Promise<void>;
   private desktopHooks: Array<{key:string;command:string}>;
   private cwd: string;
-  constructor(command: string, cwd: string) {
+  constructor(command: string, cwd: string, sentryMcp?: SentryMcp) {
     this.cwd=cwd;
     const desktop=desktopApprovalPlan(); this.desktopHooks=desktop.hooks;
     const env = { ...process.env };
@@ -22,7 +23,7 @@ export class CodexRpc {
       if (/^(FEISHU_|STEWARD_)|^(OPENAI_API_KEY|CODEX_API_KEY|ANTHROPIC_API_KEY)$/.test(key)) delete env[key];
     }
     this.child = spawn(command, ['app-server', '--listen', 'stdio://', '-c', 'model_provider="openai"',
-      '-c', 'forced_login_method="chatgpt"', ...desktop.overrides.flatMap(value=>['-c',value])], { cwd, env, stdio: 'pipe', detached: process.platform !== 'win32' });
+      '-c', 'forced_login_method="chatgpt"', ...[...desktop.overrides,...sentryMcpOverrides(sentryMcp)].flatMap(value=>['-c',value])], { cwd, env, stdio: 'pipe', detached: process.platform !== 'win32' });
     this.exited = new Promise(resolve => this.child.once('close', () => resolve()));
     // Drain stderr without retaining potentially sensitive local diagnostic output.
     this.child.stderr.resume();

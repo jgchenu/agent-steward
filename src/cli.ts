@@ -1,4 +1,5 @@
 import { AlertPoller } from './alerts.js';
+import { startAlertWebhook } from './alert-webhook.js';
 import { startWorkspaceConsole } from './workspace-console.js';
 import { consolePort } from './console-entry.js';
 import { listCodexProjects, pinCodexGrants, type CodexProject } from './codex-projects.js';
@@ -64,6 +65,8 @@ async function main(): Promise<void> {
   }
   const engine = new Engine(store, config, mode === 'demo' ? new DemoExecutor() : new WorkspaceExecutor(config, store, new CodexExecutor(config.codexCommand, undefined, config.approvalsReviewer)), channel);
   const alerts = mode === 'feishu' ? new AlertPoller(store,config) : undefined;
+  const webhook = mode === 'feishu' && process.env.STEWARD_ALERT_WEBHOOK_PORT !== undefined
+    ? await startAlertWebhook(store,config,Number(process.env.STEWARD_ALERT_WEBHOOK_PORT)) : undefined;
   let configRevision = '';
   const refreshProjects = () => {
     if (mode === 'demo') return;
@@ -89,6 +92,7 @@ async function main(): Promise<void> {
   const shutdown = async () => {
     if (closing) return; closing = true;
     clearInterval(configTimer); clearInterval(catalogTimer); feishu?.close(); consoleApp?.server.close();
+    webhook?.close(); webhook?.closeAllConnections();
     await alerts?.stop(); await engine.stop(); clearPermissionRuntime(config.stateDir); store.close(); release(); process.exit(0);
   };
   process.on('SIGINT', () => void shutdown()); process.on('SIGTERM', () => void shutdown());
