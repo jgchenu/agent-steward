@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { setTimeout } from 'node:timers/promises';
 import { alertSources, alertSourceKey } from '../src/alert-config.js';
 import { alertTopic, openAlertTopic, recordTopicMessage, syncAlertTopics, receiveAlertEvidence, alertGroupContext, alertUpdateCurrent } from '../src/alert-collaboration.js';
+import { buildCard } from '../src/channels/cards.js';
 import { AlertPoller } from '../src/alerts.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -19,9 +20,9 @@ function fixture(path=':memory:') {
     alertSources:{web:{kind:'sentry',enabled:true,project:'web',chatId:'oc_dm',collaborationChatId:'oc_group',mode:'read-only',pollSeconds:60,maxTasksPerDay:5,
       sentry:{region:'us',organization:'example',projectId:'123',environment:'production',tokenEnv:'STEWARD_SENTRY_TEST_TOKEN'}}}};
   const key=alertSourceKey(config,'web')!;
-  function intake(issueId='1') {
+  function intake(issueId='1', group=false) {
     return store.transaction(()=>{
-      const task=store.create('oc_dm','web','private original requirements');
+      const task=store.create(group ? 'oc_group' : 'oc_dm','web','private original requirements');
       store.db.prepare('INSERT INTO alert_runs VALUES (?,?,?,?,?,?)').run(task.id,'web',key,issueId,'signature',task.createdAt);
       openAlertTopic(store,config,'web',key,issueId,task);
       return task;
@@ -206,4 +207,89 @@ test('obsolete wait notifications are retired, and restoring a group can deliver
     assert.equal(sent.filter(x=>x.id===rootId).length,1);
     assert.equal(sent.some(x=>JSON.stringify(x.view)===JSON.stringify(wait)),false);
   } finally {await engine.stop();f.store.close();}
+});
+
+
+test('group alert waits for root receipt; only the owner can approve in its original topic',async()=>{
+  const f=fixture(),sent:Array<{chat:string,text:string,view?:View}>=[];
+  let runs=0,decisions=0,request='';
+  const engine=new Engine(f.store,f.config,{run:async(_t,_p,h,signal)=>{
+    runs++;
+    return new Promise<string>((resolve,reject)=>{
+      signal.addEventListener('abort',()=>reject(signal.reason),{once:true});
+      request=h.request({kind:'approval',description:'Run the specific configured check',resolve:a=>{decisions++;resolve(a);}});
+    });
+  }},{send:async(chat,text,_id,view)=>{sent.push({chat,text,view});},context:async()=>{throw Error('Machine intake must not read unrelated group history');}});
+  try {
+    const task=f.intake('1',true);engine.start();await engine.flush();await setTimeout(20);
+    assert.equal(runs,0);assert.equal(f.store.get(task.id)!.status,'queued');
+    recordTopicMessage(f.store,f.topic(),'root',undefined,true,'reply:root-receipt:0');
+    engine.receive(message({text:`/status ${task.id}`,botMentioned:true}));await until(()=>!!request);await engine.flush();
+    assert.equal(f.store.get(task.id)!.chatId,'oc_group');assert.equal(f.store.get(task.id)!.conversation!.anchorId,'root');
+    engine.receive(message({text:'好的'}));
+    engine.receive(message({text:`/approve ${request}`,senderId:'delegate'}));
+    engine.receive(message({text:`/approve ${request}`,chatId:'oc_dm',chatType:'p2p',conversation:undefined}));
+    engine.receive(message({text:`/approve ${request}`,botMentioned:true,conversation:{anchorId:'other',sourceId:'other',scope:'thread'}}));
+    assert.equal(decisions,0);assert.equal(f.store.requests(task.id).length,1);
+    buildCard(f.store,f.config,'oc_group',{kind:'task',taskId:task.id});
+    const row=f.store.db.prepare("SELECT id FROM card_actions WHERE json_extract(intent,'$.op')='approve' AND json_extract(intent,'$.taskId')=? ORDER BY rowid DESC LIMIT 1").get(task.id)!;
+    const action={id:'approval-card',senderId:'owner',chatId:'oc_group',actionId:String(row.id),messageId:'approval-message',fields:{}};
+    assert.equal(engine.handleAction({...action,senderId:'delegate'}).toast.type,'error');
+    assert.equal(engine.handleAction(action).toast.type,'success');await until(()=>f.store.get(task.id)?.status==='review');
+    assert.equal(engine.handleAction(action).toast.type,'error');assert.equal(decisions,1);
+    await engine.flush();assert.equal(sent.some(x=>x.chat==='oc_dm' && x.view && 'taskId' in x.view && x.view.taskId===task.id),false);
+    assert.equal(f.store.directTask('oc_dm'),undefined);
+  } finally {await engine.stop();f.store.close();}
+});
+
+test('group recurrence retains root, moves control binding and leaves old private tasks private',()=>{
+  const f=fixture();try {
+    const legacy=f.intake();f.store.set(legacy.id,'review');recordTopicMessage(f.store,f.topic(),'root','thread',true);
+    const first=f.intake('1',true);assert.equal(f.store.get(first.id)!.conversation!.anchorId,'root');
+    assert.equal(f.store.get(legacy.id)!.chatId,'oc_dm');assert.equal(f.store.get(legacy.id)!.conversation,undefined);
+    f.store.set(first.id,'review');const second=f.intake('1',true);
+    assert.equal(f.store.conversationTask('oc_group',{anchorId:'root',sourceId:'root',scope:'thread'})!.id,second.id);
+    assert.equal(f.store.list().length,3);assert.equal(updates(f.store).filter(r=>JSON.parse(String(r.view)).root).length,1);
+  } finally {f.store.close();}
+});
+
+test('changing destination suppresses pending group approval cards, without moving them to a new chat',async()=>{
+  const f=fixture(),sent:string[]=[];const engine=new Engine(f.store,f.config,{run:async()=>''},{send:async(chat)=>{sent.push(chat);}});
+  try {
+    const task=f.intake('1',true);recordTopicMessage(f.store,f.topic(),'root','thread',true);
+    f.store.set(task.id,'waiting_approval');f.store.enqueue('oc_group','private operation details',{kind:'task',taskId:task.id});
+    f.config.alertSources!.web.collaborationChatId='oc_different';await engine.flush();
+    assert.deepEqual(sent,[]);assert.equal(f.store.get(task.id)!.chatId,'oc_group');
+    const legacy=f.intake('2');f.store.set(legacy.id,'failed');f.config.alertSources!.web.enabled=false;
+    f.store.enqueue('oc_dm','来源授权变化，请核对配置。',{kind:'reply',taskId:legacy.id});await engine.flush();
+    assert.deepEqual(sent,['oc_dm']);
+  } finally {await engine.stop();f.store.close();}
+});
+
+test('ordinary business answers stay in the group; delegate evidence supplements rather than replaces topic context',async()=>{
+  const f=fixture();f.config.langGraphPilot=true;const runs:Task[]=[],sent:Array<{chat:string,view?:View}>=[];
+  const engine=new Engine(f.store,f.config,{run:async(t,_p,h)=>{
+    runs.push(t);h.thread('group-session');if(runs.length===1)h.askClarification!('哪个浏览器能复现？');return 'analysis';
+  }},{send:async(chat,_text,_id,view)=>{sent.push({chat,view});},context:async()=>({summary:'owner topic context',capturedAt:'',truncated:false,messages:[{id:'owner-answer',author:'owner',text:'Chrome'}]})});
+  try {
+    const task=f.intake('1',true);recordTopicMessage(f.store,f.topic(),'root',undefined,true,'reply:root:0');engine.start();
+    await until(()=>f.store.get(task.id)?.status==='waiting_input' && !engine.permissionState().active);
+    engine.receive(message({senderId:'delegate',text:'切换模型后出现'}));assert.equal(f.store.get(task.id)!.status,'waiting_input');
+    engine.receive(message({text:'Chrome',conversation:{anchorId:'root',sourceId:'human-answer',parentId:'root',threadId:'thread',scope:'thread'}}));
+    await until(()=>runs.length===2 && f.store.get(task.id)?.status==='review');await engine.flush();
+    assert.equal(runs[1].threadId,'group-session');assert.equal(runs[1].id,task.id);
+    assert.deepEqual(runs[1].contextSnapshot!.messages.map(m=>m.text),['Chrome','切换模型后出现']);
+    assert.equal(sent.every(m=>m.chat==='oc_group'),true);
+    assert.equal(sent.some(m=>m.view?.kind==='reply' && 'taskId' in m.view && m.view.taskId===task.id),true);
+  } finally {await engine.stop();f.store.close();}
+});
+
+test('reopening the database preserves the root control binding without migrating private tasks',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'steward-group-task-')),path=join(dir,'db');const f=fixture(path);let store=f.store;
+  try {
+    const task=f.intake('1',true);recordTopicMessage(store,f.topic(),'root','thread',true);store.close();store=new Store(path);
+    const bound=store.conversationTask('oc_group',{anchorId:'root',sourceId:'reply',threadId:'thread',scope:'thread'})!;
+    assert.equal(bound.id,task.id);assert.equal(bound.chatId,'oc_group');assert.equal(bound.requesterId,null);
+    assert.equal(bound.conversation!.anchorId,'root');assert.equal(store.directTask('oc_dm'),undefined);
+  } finally {store.close();rmSync(dir,{recursive:true,force:true});}
 });
