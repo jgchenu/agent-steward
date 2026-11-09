@@ -10,12 +10,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { alertSources, alertSourceKey, type AlertSource } from '../src/alert-config.js';
 import { AlertPoller, assertAlertAuthorized } from '../src/alerts.js';
-import { SentryConnector, scriptLocation, type AlertConnector, type AlertEvidence } from '../src/sentry.js';
+import { SentryConnector, scriptLocation, sentryIssueUrl, type AlertConnector, type AlertEvidence } from '../src/sentry.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { commandEnv } from '../src/process.js';
 import type { Config } from '../src/types.js';
-import { confirmAlertNoise, clearAlertNoise, noiseSignature, ALERT_RECHECK_MS } from '../src/alert-triage.js';
+import { confirmAlertNoise, clearAlertNoise, noiseSignature, flushNoiseDigests, ALERT_RECHECK_MS, NOISE_DIGEST_MS } from '../src/alert-triage.js';
 
 const source: AlertSource = {kind:'sentry',enabled:true,project:'web',chatId:'oc_owner_dm',mode:'workspace-write',pollSeconds:60,maxTasksPerDay:5,
   sentry:{region:'us',organization:'example',projectId:'123',environment:'production',tokenEnv:'STEWARD_SENTRY_TEST_TOKEN'}};
@@ -36,6 +36,47 @@ const extensionEvidence=(id='1'):AlertEvidence=>({...evidence(id),eventId:'a'.re
   extensionOrigins:[`chrome-extension://${'a'.repeat(32)}`],exception:[{type:'ReferenceError',value:'M_ID',
     frames:[{absPath:'app:///executors/200.js',line:761,column:18,inApp:true}]}]});
 const hour=(f:ReturnType<typeof fixture>)=>{for(let i=0;i<ALERT_RECHECK_MS/60_000;i++) f.advance();};
+
+test('browser links stay on the authorized organization while API requests retain their region',async()=>{
+  for (const [region,host] of [['us','us.sentry.io'],['eu','de.sentry.io'],['global','sentry.io']] as const) {
+    const scoped={...source,sentry:{...source.sentry,region}};
+    const connector=new SentryConnector((async(input)=>{
+      const url=new URL(String(input));assert.equal(url.hostname,host);
+      return Response.json(url.pathname.includes('/events/') ? {tags:[{key:'environment',value:'production'}]}
+        : {id:'1',project:{id:'123'},permalink:'https://evil.example/issues/1/?token=PRIVATE'});
+    }) as typeof fetch,{STEWARD_SENTRY_TEST_TOKEN:'PRIVATE'});
+    assert.equal((await connector.evidence(scoped,'1',new AbortController().signal)).url,'https://example.sentry.io/issues/1/?project=123');
+  }
+  assert.equal(sentryIssueUrl({...source,sentry:{...source.sentry,organization:'legacy_org'}},'1'),
+    'https://sentry.io/organizations/legacy_org/issues/1/?project=123');
+  assert.throws(()=>sentryIssueUrl(source,'1/?secret=PRIVATE'),/Invalid issue/);
+});
+
+test('daily noise summaries retain the watermark across restart and repair cached links',async()=>{
+  let e=extensionEvidence();const f=fixture({list:async()=>({issues:[{id:'1'}]}),evidence:async()=>e});
+  try {
+    await f.poller.tick();f.advance();await f.poller.tick();f.store.set(f.store.list()[0].id,'review');
+    confirmAlertNoise(f.store,f.config,'web','1',noiseSignature(e)!,'verified',f.clock());
+    f.advance();await f.poller.tick();const sentAt=Number(f.store.db.prepare('SELECT sentAt FROM alert_digests').get()!.sentAt);
+    const first=String(f.store.db.prepare('SELECT text FROM outbox ORDER BY rowid DESC LIMIT 1').get()!.text);
+    assert.match(first,/https:\/\/example.sentry.io\/issues\/1\/\?project=123/);
+    assert.doesNotMatch(first,/us.sentry.io/);assert.match(first,/截至 .* UTC/);
+    e={...e,eventId:'b'.repeat(32)};f.advance();await f.poller.tick();
+    f.advance();await f.poller.tick(); // repeat event stays a single pending sample
+    await f.poller.stop();const reopened=new Store(f.path);
+    try {
+      flushNoiseDigests(reopened,f.config,sentAt+NOISE_DIGEST_MS-1);
+      assert.equal(reopened.db.prepare('SELECT count(*) n FROM outbox').get()!.n,2);
+      assert.equal(reopened.db.prepare('SELECT pendingNoise FROM alert_observations').get()!.pendingNoise,1);
+      flushNoiseDigests(reopened,f.config,sentAt+NOISE_DIGEST_MS);
+      assert.equal(reopened.db.prepare('SELECT count(*) n FROM outbox').get()!.n,3);
+      const next=String(reopened.db.prepare('SELECT text FROM outbox ORDER BY rowid DESC LIMIT 1').get()!.text);
+      assert.notEqual(next,first);assert.match(next,/1 次新增采样匹配/);
+      flushNoiseDigests(reopened,f.config,sentAt+2*NOISE_DIGEST_MS);
+      assert.equal(reopened.db.prepare('SELECT count(*) n FROM outbox').get()!.n,3);
+    } finally {reopened.close();}
+  } finally {await f.close();}
+});
 
 test('unseen releases and stacks create isolated recurrences; seen signatures and restart do not replay',async()=>{
   let e=evidence('1');const connector:AlertConnector={list:async()=>({issues:[{id:'1'}]}),evidence:async()=>e};
@@ -110,7 +151,8 @@ test('noise requires exact complete extension evidence and an explicit local con
     f.advance();await f.poller.tick();assert.equal(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n,2);
     e={...e,release:'v2',eventId:'b'.repeat(32)};f.advance();await f.poller.tick();assert.equal(f.store.list().length,1);
     assert.equal(f.store.db.prepare('SELECT pendingNoise FROM alert_observations').get()!.pendingNoise,1);
-    hour(f);await f.poller.tick();assert.equal(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n,3);
+    hour(f);await f.poller.tick();assert.equal(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n,2);
+    for(let i=1;i<24;i++) hour(f);await f.poller.tick();assert.equal(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n,3);
     e={...e,extensionOrigins:[]};hour(f);await f.poller.tick();assert.equal(f.store.list().length,2);
     assert.match(f.store.list()[1].prompt,/不再匹配/);
   } finally {await f.close();}
@@ -125,7 +167,7 @@ test('a blocked issue does not starve confirmed noise later on the page; revocat
     assert.equal(f.store.list().length,3);assert.equal(f.store.db.prepare('SELECT error FROM alert_cursors').get()!.error,'capacity_wait');
     assert.equal(f.store.db.prepare("SELECT pendingNoise FROM alert_observations WHERE issueId='1'").get()!.pendingNoise,1);
     const receipts=f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n;
-    f.config.alertSources!.web.enabled=false;hour(f);await f.poller.tick();
+    f.config.alertSources!.web.enabled=false;for(let i=0;i<24;i++) hour(f);await f.poller.tick();
     assert.equal(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n,receipts);
     f.config.alertSources!.web.enabled=true;await f.poller.tick();assert.equal(Number(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n),Number(receipts)+1);
   } finally {await f.close();}

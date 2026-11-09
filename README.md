@@ -22,7 +22,7 @@ Owner gate → Engine scheduler → SQLite tasks, events, requests and outbox
 
 For group screenshots, voice messages, videos and PDFs, see [media setup and reading limits](docs/media.md). Audio transcription runs locally; no paid speech API is used.
 
-For opt-in Sentry issue intake, diagnosis and isolated repair tasks, see [monitoring source setup](docs/alerts.md). Each source maps to a locally authorized project and owner DM. With an optional collaboration group, new issue tasks keep analysis, questions and owner-only approvals in the same durable group topic. Existing DM tasks retain their private origin. Changed evidence can create bounded recurrence tasks; locally confirmed extension samples go to hourly digests. PR publication retains its existing confirmation.
+For opt-in Sentry issue intake, diagnosis and isolated repair tasks, see [monitoring source setup](docs/alerts.md). Each source maps to a locally authorized project and owner DM. With an optional collaboration group, new issue tasks keep analysis, questions and owner-only approvals in the same durable group topic. Existing DM tasks retain their private origin. Changed evidence can create bounded recurrence tasks; locally confirmed extension samples go to daily digests. PR publication retains its existing confirmation.
 
 ## Try it without accounts
 

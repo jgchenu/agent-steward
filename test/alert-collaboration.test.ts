@@ -77,6 +77,8 @@ test('root and replies survive restart, retry without cards and bind only collab
   };
   try {
     f.intake();const root=updates(store)[0],view=JSON.parse(String(root.view)) as View;
+    assert.match(String(root.text),/https:\/\/example.sentry.io\/issues\/1\/\?project=123/);
+    assert.doesNotMatch(String(root.text),/us.sentry.io/);
     await channel(store).send('oc_group',String(root.text),String(root.id),view);
     store.close();store=new Store(path);
     await channel(store).send('oc_group',String(root.text),String(root.id),view);assert.equal(sent.length,1);

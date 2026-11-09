@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { alertSourceKey } from './alert-config.js';
 import { alertBindingForTask } from './alert-provenance.js';
 import { requesterAllowed } from './requesters.js';
+import { sentryIssueUrl } from './sentry.js';
 import type { Store } from './store.js';
 import type { Config, ContextSnapshot, Incoming, Task, View } from './types.js';
 
@@ -30,8 +31,7 @@ export function openAlertTopic(store: Store, config: Config, sourceId: string, s
   const topic=alertTopic(store,id)!;
   bindGroupTask(store,topic);
   if (!created) enqueueUpdate(store,topic,`run:${task.id}`,'这个问题出现了需要复查的证据或影响变化，我会在原话题继续跟进。');
-  const host=source.sentry.region==='global' ? 'sentry.io' : `${source.sentry.region}.sentry.io`;
-  const url=`https://${host}/organizations/${source.sentry.organization}/issues/${issueId}/`;
+  const url=sentryIssueUrl(source,issueId);
   enqueueUpdate(store,topic,'root',`我开始跟进这个监控问题，先核对事件、版本和源码，再判断是否需要修复。\n${url}\n后续进展会接在这个话题里。补充复现线索时请回复我的消息或 @我；${task.chatId===topic.chatId ? '分析、补证和具体操作确认都在这个话题里，由任务主人批准。' : '需要授权的操作会单独在原私聊中确认。'}`,true);
 }
 
