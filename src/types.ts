@@ -54,6 +54,7 @@ export interface EvidenceImage {
   id: string; taskId: string; path: string; sha256: string; caption: string; scope: 'local-preview' | 'deployed'; capturedAt: string;
 }
 export interface BaselineComparison {
+  cleanupPending?: boolean;
   baseSha: string; fingerprint: string; validationKey: string; capturedAt: string;
   equivalent: boolean; eligible: boolean; reason: string;
   probes: Array<{check: string; file: string; attempt: number; exitCode: number; failureCount: number; digest: string}>;

@@ -3,11 +3,51 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assessFailures, probeFiles, checkEvidence, runCheck } from '../src/check-comparison.js';
+import { assessFailures, probeFiles, checkEvidence, runCheck, compareBaseline } from '../src/check-comparison.js';
+import type { DeliveryReport, RunHooks } from '../src/types.js';
 
 const vitest=(message='boom')=>({numFailedTests:1,numFailedTestSuites:2,numTotalTests:1,unhandledErrors:[],testResults:[{
  name:'/repo/a.test.ts',status:'failed',message:'',assertionResults:[{fullName:'suite case',status:'failed',failureMessages:[message]}],
 }]});
+
+for (const outcome of ['matched', 'unmatched', 'cancelled'] as const) {
+ test(`baseline cleanup timeout preserves ${outcome} verification outcome`,async()=>{
+  const root=mkdtempSync(join(tmpdir(),'steward-cleanup-'));
+  const controller=new AbortController(),cancelled=new Error('owner cancelled');
+  const check={name:'test',command:process.execPath,args:['-e',"console.error('old failure');process.exit(1)"],failureFormat:'exact' as const};
+  const report:DeliveryReport={workspace:{taskId:'task',source:root,path:root,branch:'task',baseSha:'base',baseRef:'main'},
+   mode:'workspace-write',capturedAt:'',files:['a.ts'],diffStat:'',fingerprint:'patch',headSha:'base',checks:[],ready:false,validationKey:'checks'};
+  const hooks:RunHooks={thread(){},progress(){},request(){return '';},resolved(){}};
+  let cleanupAttempts=0;
+  try {
+   const first=await runCheck(outcome==='unmatched'?{...check,args:['-e',"console.error('new failure');process.exit(1)"]}:check,
+    root,join(root,'patched-1'),controller.signal);
+   const git=async(_cwd:string,args:string[])=>{
+    if(args[0]==='worktree'&&args[1]==='remove'){
+     cleanupAttempts++;throw new DOMException('cleanup timed out','TimeoutError');
+    }
+    if(args[0]==='status'&&outcome==='cancelled'){controller.abort(cancelled);throw cancelled;}
+    return '';
+   };
+   const pending=compareBaseline(report,[check],[first],root,hooks,controller.signal,git,async()=>true);
+   if(outcome==='cancelled')await assert.rejects(pending,e=>e===cancelled);
+   else {
+    const result=await pending;
+    assert.equal(result.eligible,outcome==='matched');
+    assert.equal(result.cleanupPending,true);
+    if(outcome==='matched'){
+     assert.equal(result.equivalent,true);
+     assert.deepEqual(result.checks[0].roundFailureCounts,[1,1,1,1]);
+     assert.equal(result.checks[0].status,'failed');
+    }else assert.match(result.reason,/未在未修改基线中复现/);
+   }
+   assert.equal(cleanupAttempts,1);
+   const receipt=JSON.parse(readFileSync(join(root,'cleanup.json'),'utf8'));
+   assert.equal(receipt.status,'pending');assert.ok(receipt.baseline.startsWith(join(root,'baseline-')));
+   assert.equal(report.ready,false);
+  }finally{rmSync(root,{recursive:true,force:true});}
+ });
+}
 test('comparison preserves failure identity, stacks, multiplicity and unhandled errors',()=>{
  const baseline=checkEvidence('vitest',JSON.stringify(vitest()),'/repo',1);
  const same=checkEvidence('vitest',JSON.stringify(vitest()).replaceAll('/repo','/other'),'/other',1);
