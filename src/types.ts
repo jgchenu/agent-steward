@@ -67,7 +67,7 @@ export interface DeliveryReport {
   workspace: Workspace; mode: 'read-only' | 'workspace-write'; capturedAt: string;
   files: string[]; diffStat: string; fingerprint: string; headSha: string;
   checks: Array<{ name: string; status: 'running' | 'passed' | 'failed'; log: string; exitCode?: number }>;
-  ready: boolean; validationKey?: string; authorizedKey?: string; prUrl?: string; publishedSha?: string; targetBefore?: string; error?: string;
+  ready: boolean; validationKey?: string; authorizedKey?: string; prUrl?: string; publishedSha?: string; targetBefore?: string; targetBlocked?: boolean; error?: string;
 }
 export interface Config {
   alertSources?: Record<string, import('./alert-config.js').AlertSource>;

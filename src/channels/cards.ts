@@ -115,6 +115,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     return card(exception ? '批准本次草稿 PR 例外' : report.prUrl ? '更新现有 PR' : '创建草稿 PR', `${target.repository} → ${target.baseBranch}`, 'blue', [
       ...(exception ? [box(`${report.baselineComparison!.reason}\n仅批准当前补丁发布为草稿；原有失败会写入 PR，默认检查不变。文件、目标或检查配置变化后必须重新验证并批准。`)] : []),
       box('这一步会提交改动、推送任务分支并创建或更新 GitHub PR。不会合并代码或部署。'),
+      box('检查仅覆盖任务源分支。目标分支正常前进时，可以先发布草稿供审查；这不代表与最新目标合并后的检查通过。'),
       { tag: 'collapsible_panel', expanded: true, header: { title: plain(preview.title) }, elements: [
         text(fits ? preview.body : '交付说明过长，无法完整预览。请缩小任务范围后再发布。')] },
       row(...(fits ? [button(exception ? '仅本次发布草稿' : report.prUrl ? '确认更新 PR' : '确认创建草稿 PR', { ...intent(exception?'publish-exception':'publish'), publicationKey: publicationKey(task, project, report) }, true,

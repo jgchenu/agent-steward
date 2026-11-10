@@ -87,6 +87,8 @@ export function publicationText(task: Task, report: DeliveryReport): { title: st
       ...report.baselineComparison.probes.map(p=>`- Baseline probe: ${p.check}; ${p.file}; attempt ${p.attempt}; exit ${p.exitCode}; diagnostic entries ${p.failureCount}; digest ${p.digest}`),
       'The owner must explicitly approve this exact draft exception. Failed checks remain failed. This does not authorize merge or deployment.', ''] : []),
     `Base: ${report.workspace.baseSha}`, `Task branch: ${report.workspace.branch}`,
+    `Last observed target: ${report.targetBefore ?? report.workspace.baseSha}`,
+    '验证仅覆盖任务源分支，不代表与最新目标分支合并后的结果。发布前会重新读取目标；若目标已前进，仅当仍包含此基准且 PR 为草稿时继续，否则停止并准备迁移。合并和部署仍需另行批准。',
     'The owner requested this draft PR from Agent Steward. Code checks are recorded separately from human acceptance. No merge or deployment was performed.',
   ].join('\n') };
 }
@@ -105,7 +107,7 @@ export function publicationBlocker(task: Task, project: Project | undefined, rep
     return `请求交付到 ${requested.repository} → ${requested.baseBranch}，但项目当前配置为 ${target.repository} → ${target.baseBranch}。未替换目标或发起发布，请先在本机配置正确的交付目标，并按对应基准准备和验证改动。`;
   }
   if (!report) return '尚无代码改动与验证记录，请先完成执行。';
-  if (report.targetBefore && report.targetBefore !== report.workspace.baseSha) return 'PR 发布暂缓：目标分支已更新。已有代码、检查记录和截图保留，需迁移现有改动并重新验证。';
+  if (report.targetBlocked) return 'PR 发布暂缓：目标历史或现有 PR 状态不允许沿用当前基准发布草稿。已有代码和检查记录保留，需迁移并重新验证。';
   if (report.workspace.baseRef !== `origin/${project.worktree.github.baseBranch}`) return '任务基准与 PR 目标不同，需先在正确基准的新副本准备改动；原副本保留。';
   if (!report.files.length) return '没有文件改动，无需创建 PR。';
   if (!project.worktree.checks.length) return '项目未配置 Steward 独立检查，需要先配置并运行项目验证；模型自报通过不能替代检查记录。';
@@ -136,7 +138,7 @@ export function canPublish(task: Task, project: Project | undefined, report: Del
 }
 
 export function publicationKey(task: Task, project: Project, report: DeliveryReport): string {
-  return createHash('sha256').update(JSON.stringify([task.id, project.path, project.worktree?.github,
+  return createHash('sha256').update(JSON.stringify(['source-validated-draft-v2',task.id, project.path, project.worktree?.github,
     report.workspace, report.fingerprint, report.validationKey, report.checks, report.baselineComparison, report.commitAuthors, publicationText(task, report)])).digest('hex');
 }
 
@@ -167,18 +169,29 @@ export async function publish(store: Store, config: Config, task: Task, project:
   await repoGit(w.path, ['fetch', 'origin', `refs/heads/${target.baseBranch}:refs/remotes/origin/${target.baseBranch}`], signal);
   report.targetBefore = await repoGit(w.path, ['rev-parse', `origin/${target.baseBranch}`], signal);
   store.saveDelivery(task.id, report);
-  if (report.targetBefore !== w.baseSha) {
-    report.authorizedKey = undefined; store.saveDelivery(task.id,report);
-    throw new TargetBranchMoved(`origin/${target.baseBranch}`,w.baseSha,report.targetBefore);
-  }
   const list = async () => JSON.parse(await gh(w.path, ['pr', 'list', '--repo', target.repository, '--head', w.branch,
     '--state', 'all', '--json', 'number,url,state,baseRefName,headRefName'], signal)) as Array<{ number: number; url: string; state: string; baseRefName: string; headRefName: string }>;
   let prs = await list();
-  if(exception && prs.length){
+  const advanced=report.targetBefore!==w.baseSha;
+  let draftOnly=!prs.length;
+  if((exception || advanced) && prs.length){
     const existing=JSON.parse(await gh(w.path,['pr','view',String(prs[0].number),'--repo',target.repository,'--json','isDraft'],signal));
-    if(existing.isDraft!==true)throw Error('例外只适用于草稿 PR；现有 PR 已进入审查，未推送。');
+    draftOnly=existing.isDraft===true;
+    if(exception && !draftOnly)throw Error('例外只适用于草稿 PR；现有 PR 已进入审查，未推送。');
   }
   if (prs.some(p => p.state !== 'OPEN' || p.baseRefName !== target.baseBranch) || prs.length > 1) throw new Error('任务分支已有关闭、合并或目标不同的 PR，请创建新任务。');
+  if(advanced){
+    let ancestor=false;
+    if(draftOnly){
+      try{await repoGit(w.path,['merge-base','--is-ancestor',w.baseSha,report.targetBefore],signal);ancestor=true;}
+      catch{signal.throwIfAborted();}
+    }
+    if(!draftOnly || !ancestor){
+      report.targetBlocked=true;report.authorizedKey=undefined;store.saveDelivery(task.id,report);
+      throw new TargetBranchMoved(`origin/${target.baseBranch}`,w.baseSha,report.targetBefore);
+    }
+    store.event(task.id,'draft_target_advanced',JSON.stringify({validatedBase:w.baseSha,targetBefore:report.targetBefore,scope:'draft only; integration not validated'}));
+  }
   const remote = await repoGit(w.path, ['ls-remote', '--heads', 'origin', w.branch], signal);
   if (remote) {
     await repoGit(w.path, ['fetch', 'origin', `refs/heads/${w.branch}`], signal);
@@ -213,7 +226,7 @@ export async function publish(store: Store, config: Config, task: Task, project:
   const pr = prs[0]; if (!pr) throw new Error('未能回读 PR。');
   const verified = JSON.parse(await gh(w.path, ['pr', 'view', String(pr.number), '--repo', target.repository,
     '--json', 'url,state,headRefName,headRefOid,baseRefName,isDraft'], signal));
-  if ((exception && verified.isDraft!==true) || verified.state !== 'OPEN' || verified.headRefName !== w.branch || verified.baseRefName !== target.baseBranch
+  if (((exception || advanced) && verified.isDraft!==true) || verified.state !== 'OPEN' || verified.headRefName !== w.branch || verified.baseRefName !== target.baseBranch
     || verified.headRefOid !== head || verified.url !== `https://github.com/${target.repository}/pull/${pr.number}`) throw new Error('PR 回读身份不一致，请在 GitHub 检查。');
   store.saveDelivery(task.id, { ...report, headSha: head, prUrl: verified.url, publishedSha: head, error: undefined });
   if(exception)store.event(task.id,'draft_exception_published',JSON.stringify({url:verified.url,head,base:w.baseSha}));
