@@ -230,8 +230,16 @@ export async function compareBaseline(report: DeliveryReport, checks: Check[], f
       : '两轮基线与补丁检查的失败内容一致，未发现新增失败；全仓检查仍未通过。';
   } catch(e) {signal.throwIfAborted();result.reason=e instanceof Error?e.message:'基线对照失败';}
   finally {
-    if(added)await git(report.workspace.source,['worktree','remove','--force',baseline],AbortSignal.timeout(10000));
-    else rmSync(baseline,{recursive:true,force:true});
+    // Dependency trees can outlast the bounded cleanup budget. Cleanup must not
+    // replace a completed comparison, a rejected comparison, or cancellation.
+    try {
+      if(added)await git(report.workspace.source,['worktree','remove','--force',baseline],AbortSignal.timeout(10000));
+      else rmSync(baseline,{recursive:true,force:true});
+    } catch {
+      result.cleanupPending=true;
+      try { writeFileSync(join(dir,'cleanup.json'),JSON.stringify({status:'pending',baseline}),{mode:0o600}); }
+      catch { /* Delivery still records cleanupPending if artifact storage fails. */ }
+    }
   }
   return result;
 }
