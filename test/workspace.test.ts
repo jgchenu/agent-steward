@@ -231,7 +231,8 @@ test('publication rejects wrong origin, changed target, and closed PR before pus
     };
     await assert.rejects(publish(f.store, f.config, f.task, f.project, signal(), async () => JSON.stringify([{ state: 'CLOSED', baseRefName: 'main' }]), transport), /关闭/);
     f.g('commit', '--allow-empty', '-m', 'upstream changed'); f.g('push', 'origin', 'main');
-    await assert.rejects(publish(f.store, f.config, f.task, f.project, signal(), gh, transport), /目标分支已更新/);
+    const readyPr=async (_cwd:string,args:string[])=>JSON.stringify(args[1]==='list'?[{number:1,state:'OPEN',baseRefName:'main',headRefName:report.workspace.branch}]:{isDraft:false});
+    await assert.rejects(publish(f.store, f.config, f.task, f.project, signal(), readyPr, transport), /目标分支已更新/);
     assert.equal(pushes, 0);
   } finally { f.close(); }
 });
@@ -428,14 +429,14 @@ test('UI screenshot outputs are collected separately and never enter the code in
   }finally{f.close();}
 });
 
-for (const accept of [false,true]) test(`target movement preserves checked work and prepares migration; accept=${accept}`,async()=>{
+for (const accept of [false,true]) test(`target movement on a ready PR preserves checked work and prepares migration; accept=${accept}`,async()=>{
  const f=fixture(),messages:string[]=[];let gitWrites=0,ghCalls=0;
  const transport:typeof git=async(cwd,args,sig)=>{
   if(args[0]==='remote')return 'https://github.com/test/repo.git';
   if(['add','commit','push'].includes(args[0]))gitWrites++;
   return git(cwd,args,sig);
  };
- const engine=new Engine(f.store,f.config,{run:async t=>t.nextAction==='publish' ? publish(f.store,f.config,t,f.project,signal(),async()=>{ghCalls++;return '[]'},transport) : 'adaptation scheduled'},
+ const engine=new Engine(f.store,f.config,{run:async t=>t.nextAction==='publish' ? publish(f.store,f.config,t,f.project,signal(),async(_cwd,args)=>{ghCalls++;return JSON.stringify(args[1]==='list'?[{number:1,state:'OPEN',baseRefName:'main',headRefName:f.store.delivery(t.id)!.workspace.branch}]:{isDraft:false});},transport) : 'adaptation scheduled'},
   {send:async(_,text)=>{messages.push(text)}});
  const wait=async(check:()=>boolean)=>{for(let i=0;i<300&&!check();i++)await delay(10);assert.ok(check())};
  try{
@@ -449,7 +450,7 @@ for (const accept of [false,true]) test(`target movement preserves checked work 
   assert.deepEqual(f.store.get(f.task.id)!.baselineOptions,{migrateChanges:true,delivery:null});
   assert.equal(f.store.delivery(f.task.id)!.ready,true);assert.equal(f.store.delivery(f.task.id)!.authorizedKey,undefined);
   assert.equal(canPublish(f.store.get(f.task.id)!,f.project,f.store.delivery(f.task.id)),false);
-  assert.equal(f.store.list().length,1);assert.equal(gitWrites,0);assert.equal(ghCalls,0);
+  assert.equal(f.store.list().length,1);assert.equal(gitWrites,0);assert.equal(ghCalls,2);
   assert.match(f.store.getRequest(f.store.requests(f.task.id)[0].id)!.description,/只读快照/);
   assert.equal(readFileSync(join(report.workspace.path,'README.md'),'utf8'),'changed\n');
   engine.receive({id:'decision',senderId:'owner',senderType:'user',chatId:'dm',chatType:'p2p',text:(accept?'/approve ':'/deny ')+f.store.requests(f.task.id)[0].id});
@@ -465,6 +466,54 @@ for (const accept of [false,true]) test(`target movement preserves checked work 
  }finally{await engine.stop();f.close()}
 });
 
+
+test('advanced targets allow source-validated drafts without migrating or rerunning checks',async()=>{
+ for(const scenario of ['create','update','exception','unrelated','ancestry-error'] as const){
+  const f=fixture();let writes=0,creates=0,edits=0;
+  try{
+   if(scenario==='exception')f.project.worktree!.checks=[{name:'baseline failure',command:process.execPath,args:['-e',"console.error('old');process.exit(1)"],failureFormat:'exact'}];
+   await f.executor.run(f.task,f.project,hooks,signal());
+   const report=f.store.delivery(f.task.id)!,originalChecks=structuredClone(report.checks);
+   const key=publicationKey(f.task,f.project,report);
+   f.store.saveDelivery(f.task.id,{...report,...(scenario==='exception'?{exceptionAuthorizedKey:key}:{authorizedKey:key})});
+   f.g('commit','--allow-empty','-m','upstream advanced');f.g('push','origin','main');
+   const target=scenario==='unrelated'?f.g('commit-tree','HEAD^{tree}','-m','unrelated root'):f.g('rev-parse','main');
+   const pr={number:1,url:'https://github.com/test/repo/pull/1',state:'OPEN',baseRefName:'main',headRefName:report.workspace.branch,isDraft:true};
+   const gh=async(cwd:string,args:string[],sig:AbortSignal)=>{
+    if(args[1]==='list')return JSON.stringify(scenario==='update'||creates?[pr]:[]);
+    if(args[1]==='view')return JSON.stringify({...pr,headRefOid:await git(cwd,['rev-parse','HEAD'],sig)});
+    if(args[1]==='create'||args[1]==='edit'){
+     if(args[1]==='create'){creates++;assert.ok(args.includes('--draft'));}else edits++;
+     const body=readFileSync(args[args.indexOf('--body-file')+1],'utf8');
+     assert.ok(body.includes(`Base: ${report.workspace.baseSha}`));assert.ok(body.includes(`Last observed target: ${target}`));
+     assert.match(body,/不代表与最新目标分支合并后的结果/);return '';
+    }
+    throw Error('unexpected GitHub operation');
+   };
+   const transport:typeof git=async(cwd,args,sig)=>{
+    if(args[0]==='remote')return 'https://github.com/test/repo.git';
+    if(args[0]==='rev-parse'&&args[1]==='origin/main')return target;
+    if(args[0]==='merge-base'&&scenario==='ancestry-error')throw Error('cannot inspect history');
+    if(['add','commit','push'].includes(args[0]))writes++;
+    return git(cwd,args,sig);
+   };
+   if(scenario==='unrelated'||scenario==='ancestry-error'){
+    await assert.rejects(publish(f.store,f.config,f.task,f.project,signal(),gh,transport),/目标分支已更新/);
+    assert.equal(writes,0);assert.equal(f.store.delivery(f.task.id)!.targetBlocked,true);
+    assert.equal(canPublish(f.task,f.project,f.store.delivery(f.task.id)),false);
+   }else{
+    await publish(f.store,f.config,f.task,f.project,signal(),gh,transport);
+    const after=f.store.delivery(f.task.id)!;
+    assert.equal(creates,scenario==='update'?0:1);assert.equal(edits,scenario==='update'?1:0);
+    assert.equal(after.workspace.baseSha,report.workspace.baseSha);assert.equal(after.targetBefore,target);
+    assert.deepEqual(after.checks,originalChecks);assert.equal(after.ready,scenario!=='exception');
+    assert.equal(after.exceptionAuthorizedKey,undefined);assert.equal(after.prUrl,pr.url);
+    assert.equal(f.g('rev-parse','main'),target,'publication cannot change main');
+    assert.equal(f.store.list().length,1,'no migration task');
+   }
+  }finally{f.close();}
+ }
+});
 
 test('semantic merge preview avoids local checks and rejects unsubmitted edits',async()=>{
  for(const scenario of ['clean','dirty','edited'] as const){
@@ -541,7 +590,7 @@ test('independent stable baseline failures enable only a scoped draft exception;
     assert.match(card,/仅本次发布草稿/);assert.match(card,/全仓检查仍未通过/);
     assert.equal(canRequestDraftException({...f.task,requesterId:'delegate'},f.project,report),false);
     assert.equal(canRequestDraftException(f.task,f.project,{...report,fingerprint:'changed'}),false);
-    assert.equal(canRequestDraftException(f.task,f.project,{...report,targetBefore:'new-target'}),false);
+    assert.equal(canRequestDraftException(f.task,f.project,{...report,targetBefore:'new-target',targetBlocked:true}),false);
     const changedProject=structuredClone(f.project);changedProject.worktree!.checks[0].args.push('changed');
     assert.equal(canRequestDraftException(f.task,changedProject,report),false);
     f.store.resume(f.task.id,'more');assert.equal(f.store.delivery(f.task.id)?.baselineComparison,undefined);
@@ -591,6 +640,35 @@ test('automatic baseline probes retain all attempts and allow only reproduced dr
     assert.equal(comparison.probes.length,3);assert.match(comparison.reason,/未在未修改基线中复现/);
    }else assert.match(comparison.reason,scenario==='malformed'?/不完整/:/改变了源码/);
    assert.equal(f.g('worktree','list','--porcelain').includes('baseline-'),false);
+  }finally{f.close();}
+ }
+});
+
+test('unattributed rejections use at most two complete baseline probes and still require exact evidence',async()=>{
+ for(const scenario of ['matched','unmatched','malformed','mutating'] as const){
+  const f=fixture();
+  try{
+   const script=`
+    const fs=require('node:fs'),path=require('node:path'),out=process.argv[1];
+    const full=out.includes(path.join('probes','0','full'));
+    if(full && ${JSON.stringify(scenario)}==='malformed'){fs.writeFileSync(out,'{}');process.exit(1);}
+    if(full && ${JSON.stringify(scenario)}==='mutating')fs.writeFileSync('README.md','mutated');
+    const failed=fs.readFileSync('README.md','utf8')==='changed\\n' || (full && ${JSON.stringify(scenario)}==='matched' && path.basename(path.dirname(out))==='2');
+    fs.writeFileSync(out,JSON.stringify({numTotalTests:1,numFailedTests:0,numFailedTestSuites:0,
+      unhandledErrors:failed?[{message:'timer rejection',stack:'source.js:1'}]:[],
+      testResults:[{name:path.join(process.cwd(),'a.test.ts'),status:'passed',assertionResults:[{fullName:'case',status:'passed',failureMessages:[]}]}]}));
+    process.exit(failed?1:0);
+   `;
+   f.project.worktree!.checks=[{name:'test fixture',command:process.execPath,args:['-e',script,'{report}'],failureFormat:'vitest',timeoutSeconds:10}];
+   await f.executor.run(f.task,f.project,hooks,signal());
+   const report=f.store.delivery(f.task.id)!,comparison=report.baselineComparison!;
+   assert.equal(report.ready,false);assert.equal(report.exceptionAuthorizedKey,undefined);
+   assert.equal(comparison.eligible,scenario==='matched',comparison.reason);
+   if(scenario==='matched'||scenario==='unmatched'){
+    assert.equal(comparison.probes.length,2);
+    assert.ok(comparison.probes.every(p=>p.file==='(full Vitest check)'));
+    assert.deepEqual(comparison.probes.map(p=>p.exitCode),scenario==='matched'?[0,1]:[0,0]);
+   }else assert.match(comparison.reason,scenario==='malformed'?/不完整/:/改变了源码/);
   }finally{f.close();}
  }
 });
