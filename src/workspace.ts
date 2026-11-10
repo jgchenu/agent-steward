@@ -82,8 +82,9 @@ export function publicationText(task: Task, report: DeliveryReport): { title: st
   return { title: `Steward: ${task.prompt.split('\n')[0].slice(0, 70)} (${task.id})`, body: [
     '## Task', task.prompt, '', '## Changes', report.diffStat || 'No diff summary.', '',
     '## Validation', ...report.checks.map(c => `- ${c.name}: ${c.status}`), '',
-    ...(report.baselineComparison?.equivalent ? ['## Draft-only baseline exception',report.baselineComparison.reason,
-      ...report.baselineComparison.checks.map(c=>`- ${c.name}: ${c.status}; diagnostic entries: ${c.failureCount}; digest: ${c.digest}`),
+    ...(report.baselineComparison?.eligible ? ['## Draft-only baseline exception',report.baselineComparison.reason,
+      ...report.baselineComparison.checks.map(c=>`- ${c.name}: ${c.status}; diagnostic entries: ${c.failureCount}; rounds [patch 1, base 1, patch 2, base 2]: ${c.roundFailureCounts.join(" / ")}; digest: ${c.digest}`),
+      ...report.baselineComparison.probes.map(p=>`- Baseline probe: ${p.check}; ${p.file}; attempt ${p.attempt}; exit ${p.exitCode}; diagnostic entries ${p.failureCount}; digest ${p.digest}`),
       'The owner must explicitly approve this exact draft exception. Failed checks remain failed. This does not authorize merge or deployment.', ''] : []),
     `Base: ${report.workspace.baseSha}`, `Task branch: ${report.workspace.branch}`,
     'The owner requested this draft PR from Agent Steward. Code checks are recorded separately from human acceptance. No merge or deployment was performed.',
@@ -118,7 +119,7 @@ export function publicationBlocker(task: Task, project: Project | undefined, rep
 }
 export function baselineExceptionEligible(task: Task, project: Project, report: DeliveryReport): boolean {
   const c=report.baselineComparison, checks=project.worktree?.checks ?? [];
-  return !task.requesterId && !report.ready && !report.error && !!c?.equivalent
+  return !task.requesterId && !report.ready && !report.error && !!c?.eligible
     && c.baseSha===report.workspace.baseSha && c.fingerprint===report.fingerprint && c.validationKey===validationKey(project)
     && report.validationKey===c.validationKey && report.checks.length===checks.length && c.checks.length===checks.length
     && report.checks.some(r=>r.status==='failed')
