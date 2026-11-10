@@ -40,7 +40,7 @@ export interface Incoming {
   conversation?: Conversation; botMentioned?: boolean; mentionsOthers?: boolean;
   replyToMessageId?: string;
 }
-export interface Check { name: string; command: string; args: string[]; timeoutSeconds?: number }
+export interface Check { name: string; command: string; args: string[]; timeoutSeconds?: number; failureFormat?: 'vitest' | 'biome' | 'exact' }
 export interface Project {
   codexProjectId?: string;
   path: string; sandbox: 'read-only' | 'workspace-write'; label?: string; aliases?: string[]; description?: string; naturalMode?: 'read-only' | 'workspace-write';
@@ -53,7 +53,14 @@ export interface Workspace {
 export interface EvidenceImage {
   id: string; taskId: string; path: string; sha256: string; caption: string; scope: 'local-preview' | 'deployed'; capturedAt: string;
 }
+export interface BaselineComparison {
+  baseSha: string; fingerprint: string; validationKey: string; capturedAt: string;
+  equivalent: boolean; reason: string;
+  checks: Array<{name: string; status: 'passed' | 'failed'; failureCount: number; digest: string}>;
+}
 export interface DeliveryReport {
+  baselineComparison?: BaselineComparison;
+  exceptionAuthorizedKey?: string;
   commitAuthors?: CommitAuthor[];
   evidenceIds?: string[]; evidenceWarning?: string;
   workspace: Workspace; mode: 'read-only' | 'workspace-write'; capturedAt: string;
@@ -116,7 +123,7 @@ export interface CardAction {
 export interface Intent {
   requesterId?: string;
   op: 'dispatch' | 'home' | 'list' | 'status' | 'result' | 'followup' | 'new' | 'continue' | 'done' | 'cancel' | 'approve' | 'deny' | 'answer'
-    | 'delivery' | 'publication' | 'publish' | 'baseline' | 'restart' | 'source';
+    | 'delivery' | 'publication' | 'publish' | 'publish-exception' | 'baseline' | 'restart' | 'source';
   conversation?: Conversation; project?: string; prompt?: string; selectionKey?: string; taskId?: string; requestId?: string; revision?: string; page?: number; publicationKey?: string;
 }
 export interface Channel {

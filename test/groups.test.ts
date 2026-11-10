@@ -232,3 +232,14 @@ test('context resources are released after both successful and failed executions
     finally{await engine.stop();store.close()}
   }
 });
+
+test('blocked PR publication is a plain explanation in the original topic, not an authorization card',async()=>{
+ const store=new Store(':memory:'),channel=new FeishuChannel('fake','fake',store,config),sent:any[]=[];
+ (channel as any).client={im:{message:{reply:async(p:any)=>{sent.push(p);return {code:0,data:{message_id:'reply',thread_id:'topic'}};},create:async()=>{throw Error('wrong destination');}}}};
+ try{
+  const task=store.create('group','demo','check PR','read-only',ref());
+  await channel.send('group','generic failure','blocked-pr',{kind:'publication',taskId:task.id});
+  assert.equal(sent.length,1);assert.equal(sent[0].path.message_id,'root');assert.equal(sent[0].data.msg_type,'post');
+  assert.match(sent[0].data.content,/只读分析/);assert.ok(!sent[0].data.content.includes('callback'));
+ }finally{store.close();}
+});

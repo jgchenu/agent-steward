@@ -1,3 +1,4 @@
+import { publicationBlocker, canRequestDraftException } from '../workspace.js';
 import { alertTopic, alertUpdateCurrent, recordTopicMessage } from '../alert-collaboration.js';
 import { evidenceBytes } from '../evidence.js';
 import { createHash } from 'node:crypto';
@@ -111,6 +112,11 @@ export class FeishuChannel implements Channel {
     }
     const scopedTask = view && 'taskId' in view ? this.store.get(view.taskId) : undefined;
     if (view && scopedTask?.conversation) view = { ...view, conversation: scopedTask.conversation };
+    if(view?.kind==='publication' && scopedTask && scopedTask.chatId===chatId){
+      const project=this.config.projects[scopedTask.project],report=this.store.delivery(scopedTask.id);
+      const blocker=publicationBlocker(scopedTask,project,report,view.publicationTarget,canRequestDraftException(scopedTask,project,report));
+      if(blocker){text=blocker;view={...view,kind:'reply'};}
+    }
     if (view?.kind === 'evidence') {
       if (!scopedTask || scopedTask.chatId !== chatId || view.evidenceIds.length > 3) throw Error('截图不属于当前任务。');
       for (const id of view.evidenceIds) {

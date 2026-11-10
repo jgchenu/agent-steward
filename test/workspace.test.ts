@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Store } from '../src/store.js';
-import { WorkspaceExecutor, canPublish, git, inventory, prepareWorkspace, publish, publicationKey } from '../src/workspace.js';
+import { WorkspaceExecutor, canPublish, canRequestDraftException, git, inventory, prepareWorkspace, publish, publicationKey } from '../src/workspace.js';
 import { commandEnv, runCommand } from '../src/process.js';
 import { loadConfig } from '../src/config.js';
 import { Engine } from '../src/engine.js';
@@ -517,4 +517,88 @@ test('default LangGraph defers checks until clarification finishes and preserves
     assert.equal(views.filter(v=>v.kind==='publication').length,1);
     assert.equal(readFileSync(join(f.source,'README.md'),'utf8'),'base\n');
   }finally{await engine.stop();f.close();}
+});
+
+test('independent stable baseline failures enable only a scoped draft exception; changed failures remain blocked',async()=>{
+ for(const scenario of ['stable','regression','flaky','mutating'] as const){
+  const f=fixture();
+  try{
+   f.project.worktree!.checks=[{name:'existing failure',command:process.execPath,failureFormat:'exact',args:['-e',
+    scenario==='regression'?"console.error(require('fs').readFileSync('README.md','utf8'));process.exit(1)":
+    scenario==='flaky'?"console.error(Math.random());process.exit(1)":
+    scenario==='mutating'?"require('fs').writeFileSync('README.md','mutated');console.error('same');process.exit(1)":
+    "console.error('same diagnostic');process.exit(1)"],timeoutSeconds:10},
+    {name:'later check',command:process.execPath,args:['-e','process.exit(0)']}];
+   await f.executor.run(f.task,f.project,hooks,signal());
+   const report=f.store.delivery(f.task.id)!;
+   assert.equal(report.ready,false);assert.equal(canPublish(f.task,f.project,report),false);
+   assert.equal(report.checks.length,2,'later checks must not be skipped');
+   assert.equal(canRequestDraftException(f.task,f.project,report),scenario==='stable');
+   assert.equal(report.exceptionAuthorizedKey,undefined);
+   if(scenario==='stable'){
+    f.store.set(f.task.id,'review');
+    const card=JSON.stringify(buildCard(f.store,f.config,'dm',{kind:'publication',taskId:f.task.id}));
+    assert.match(card,/仅本次发布草稿/);assert.match(card,/全仓检查仍未通过/);
+    assert.equal(canRequestDraftException({...f.task,requesterId:'delegate'},f.project,report),false);
+    assert.equal(canRequestDraftException(f.task,f.project,{...report,fingerprint:'changed'}),false);
+    assert.equal(canRequestDraftException(f.task,f.project,{...report,targetBefore:'new-target'}),false);
+    const changedProject=structuredClone(f.project);changedProject.worktree!.checks[0].args.push('changed');
+    assert.equal(canRequestDraftException(f.task,changedProject,report),false);
+    f.store.resume(f.task.id,'more');assert.equal(f.store.delivery(f.task.id)?.baselineComparison,undefined);
+   }
+   assert.equal(f.g('worktree','list','--porcelain').includes('baseline-'),false,'temporary baseline cleaned');
+  }finally{f.close();}
+ }
+});
+
+test('group draft exception requires owner, topic, fresh revision and exact comparison; replay cannot publish twice',async()=>{
+ const f=fixture();let published=0;
+ f.config.groupChats=true;
+ f.project.worktree!.checks[0]={name:'baseline failure',command:process.execPath,args:['-e',"console.error('old');process.exit(1)"],failureFormat:'exact'};
+ const conversation={anchorId:'root',sourceId:'root',threadId:'thread',scope:'thread' as const};
+ f.store.saveConversation(f.task.id,conversation);
+ const engine=new Engine(f.store,f.config,{run:async()=>{published++;return 'published (simulated)';}},{send:async()=>{}});
+ try{
+  await f.executor.run(f.task,f.project,hooks,signal());f.store.set(f.task.id,'review');
+  const task=f.store.get(f.task.id)!,report=f.store.delivery(task.id)!;
+  const issue=(key=publicationKey(task,f.project,report),revision=task.updatedAt)=>f.store.action('dm',{
+   op:'publish-exception',taskId:task.id,revision,publicationKey:key,conversation});
+  const callback=(actionId:string)=>({id:'click-'+actionId,senderId:'owner',chatId:'dm',actionId,messageId:'card',fields:{}});
+  const action=callback(issue());
+  assert.equal(engine.handleAction({...action,senderId:'other'}).toast.type,'error');
+  assert.equal(engine.handleAction({...action,chatId:'other-chat'}).toast.type,'error');
+  assert.equal(engine.handleAction(callback(issue('wrong-key'))).toast.type,'error');
+  assert.equal(engine.handleAction(callback(issue(undefined,'old-revision'))).toast.type,'error');
+  assert.equal(engine.handleAction(action).toast.type,'success');
+  assert.equal(engine.handleAction({...action,id:'replay'}).toast.type,'error');
+  for(let n=0;n<100&&published===0;n++)await delay(5);
+  assert.equal(published,1);assert.equal(f.store.delivery(task.id)?.ready,false);
+  const event=f.store.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='draft_exception_authorized'").get(task.id) as {body:string};
+  assert.equal(JSON.parse(event.body).actorId,'owner');
+ }finally{await engine.stop();f.close();}
+});
+
+test('draft exception publisher consumes approval, verifies draft state and does not authorize retries or merge',async()=>{
+ for(const existingReady of [false,true]){
+  const f=fixture();
+  try{
+   f.project.worktree!.checks[0]={name:'baseline failure',command:process.execPath,args:['-e',"console.error('old');process.exit(1)"],failureFormat:'exact'};
+   await f.executor.run(f.task,f.project,hooks,signal());const report=f.store.delivery(f.task.id)!;
+   f.store.saveDelivery(f.task.id,{...report,exceptionAuthorizedKey:publicationKey(f.task,f.project,report)});
+   let creates=0,pushes=0;
+   const pr={number:1,url:'https://github.com/test/repo/pull/1',state:'OPEN',baseRefName:'main',headRefName:report.workspace.branch,isDraft:!existingReady};
+   const gh=async(cwd:string,args:string[],sig:AbortSignal)=>{
+    if(args[1]==='list')return JSON.stringify(existingReady||creates?[pr]:[]);
+    if(args[1]==='create'){creates++;assert.ok(args.includes('--draft'));assert.match(readFileSync(args[args.indexOf('--body-file')+1],'utf8'),/Draft-only baseline exception/);return '';}
+    if(args[1]==='view')return JSON.stringify({...pr,headRefOid:await git(cwd,['rev-parse','HEAD'],sig)});
+    throw Error('unexpected GitHub operation');
+   };
+   const repoGit:typeof git=async(cwd,args,sig)=>{if(args[0]==='remote')return 'https://github.com/test/repo.git';if(args[0]==='push')pushes++;return git(cwd,args,sig);};
+   if(existingReady){await assert.rejects(publish(f.store,f.config,f.task,f.project,signal(),gh,repoGit),/只适用于草稿/);assert.equal(pushes,0);}
+   else{await publish(f.store,f.config,f.task,f.project,signal(),gh,repoGit);assert.equal(pushes,1);assert.equal(creates,1);assert.equal(f.store.delivery(f.task.id)?.ready,false);}
+   assert.equal(f.store.delivery(f.task.id)?.exceptionAuthorizedKey,undefined);
+   f.store.recover();
+   await assert.rejects(publish(f.store,f.config,f.task,f.project,signal(),gh,repoGit),/配置验证全部通过/);
+  }finally{f.close();}
+ }
 });

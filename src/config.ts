@@ -66,6 +66,7 @@ export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.
       if (w.checks.length > 10 || w.checks.some(c => !c || typeof c.name !== 'string' || !c.name.trim()
         || typeof c.command !== 'string' || !c.command || /[\r\n\0]/.test(c.command)
         || !Array.isArray(c.args) || c.args.some(a => typeof a !== 'string' || a.includes('\0'))
+        || (c.failureFormat !== undefined && !['vitest','biome','exact'].includes(c.failureFormat))
         || (c.timeoutSeconds !== undefined && (!Number.isFinite(c.timeoutSeconds) || c.timeoutSeconds < 1 || c.timeoutSeconds > 1800)))) {
         throw new Error(`Invalid validation checks: ${name}`);
       }

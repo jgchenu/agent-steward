@@ -229,7 +229,7 @@ export class Store {
     this.db.prepare('DELETE FROM context_snapshots WHERE taskId=?').run(id);
     this.db.prepare("UPDATE tasks SET prompt=?, result=NULL, nextAction='execute', baselineOptions=NULL WHERE id=?").run(prompt, id);
     const report = this.delivery(id);
-    if (report) this.saveDelivery(id, { ...report, ready: false });
+    if (report) this.saveDelivery(id, { ...report, ready: false, baselineComparison: undefined, exceptionAuthorizedKey: undefined, authorizedKey: undefined });
     this.set(id, 'queued');
     this.event(id, 'followup', prompt);
   }
@@ -329,7 +329,7 @@ export class Store {
     this.event(taskId, 'human_response', `${wait.requestId}: ${answer}`);
     this.event(taskId, 'followup', answer);
     const report = this.delivery(taskId);
-    if (report) this.saveDelivery(taskId, {...report,ready:false,authorizedKey:undefined});
+    if (report) this.saveDelivery(taskId, {...report,ready:false,authorizedKey:undefined,baselineComparison:undefined,exceptionAuthorizedKey:undefined});
     this.set(taskId, 'queued');
   }
   expireOperations(): void {
