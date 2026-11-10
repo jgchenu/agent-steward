@@ -2,7 +2,7 @@ import { CONVERSATION } from '../conversation.js';
 import { codeSourceSummary, codeSourceDetails, configuredCheckSummary } from '../code-source.js';
 import type { Config, Intent, Status, View } from '../types.js';
 import { Store } from '../store.js';
-import { canPublish, publicationKey, publicationText, publicationBlocker } from '../workspace.js';
+import { canPublish, canRequestDraftException, publicationKey, publicationText, publicationBlocker } from '../workspace.js';
 
 type Element = Record<string, unknown>;
 const plain = (content: string) => ({ tag: 'plain_text', content });
@@ -106,16 +106,18 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     row(button('返回任务', intent('status')), ...(report ? [button('查看交付', intent('delivery'))] : [])),
   ]);
   if (view.kind === 'publication') {
-    const blocker = publicationBlocker(task, project, report, view.publicationTarget);
+    const exception=canRequestDraftException(task,project,report);
+    const blocker = publicationBlocker(task, project, report, view.publicationTarget, exception);
     if (!report || blocker) return card('暂不能交付 PR', projectLabel(task.project), 'orange', [
       box(blocker ?? '请先完成代码验证。'), button('返回任务', intent('status'), true)]);
     const target = project.worktree!.github!, preview = publicationText(task, report);
     const fits = Buffer.byteLength(preview.body) < 20_000;
-    return card(report.prUrl ? '更新现有 PR' : '创建草稿 PR', `${target.repository} → ${target.baseBranch}`, 'blue', [
+    return card(exception ? '批准本次草稿 PR 例外' : report.prUrl ? '更新现有 PR' : '创建草稿 PR', `${target.repository} → ${target.baseBranch}`, 'blue', [
+      ...(exception ? [box(`${report.baselineComparison!.reason}\n仅批准当前补丁发布为草稿；原有失败会写入 PR，默认检查不变。文件、目标或检查配置变化后必须重新验证并批准。`)] : []),
       box('这一步会提交改动、推送任务分支并创建或更新 GitHub PR。不会合并代码或部署。'),
       { tag: 'collapsible_panel', expanded: true, header: { title: plain(preview.title) }, elements: [
         text(fits ? preview.body : '交付说明过长，无法完整预览。请缩小任务范围后再发布。')] },
-      row(...(fits ? [button(report.prUrl ? '确认更新 PR' : '确认创建草稿 PR', { ...intent('publish'), publicationKey: publicationKey(task, project, report) }, true,
+      row(...(fits ? [button(exception ? '仅本次发布草稿' : report.prUrl ? '确认更新 PR' : '确认创建草稿 PR', { ...intent(exception?'publish-exception':'publish'), publicationKey: publicationKey(task, project, report) }, true,
         `将这些改动发布到 ${target.repository} 的任务分支，目标 ${target.baseBranch}。不会自动合并。`)] : []), button('返回交付', intent('delivery'))),
     ]);
   }
@@ -127,7 +129,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     if (page > 0) nav.push(button('上一页', { ...intent('delivery'), page: page - 1 }));
     if (page + 1 < pages) nav.push(button('下一页', { ...intent('delivery'), page: page + 1 }));
     const actions: Element[] = [];
-    if (canPublish(task, project, report) && ['review', 'completed', 'failed'].includes(task.status)) actions.push(button('预览 PR 交付', intent('publication'), true));
+    if ((canPublish(task, project, report) || canRequestDraftException(task,project,report)) && ['review', 'completed', 'failed'].includes(task.status)) actions.push(button('预览 PR 交付', intent('publication'), true));
     const link = prButton(); if (link) actions.push(link);
     return card('项目交付', `${projectLabel(task.project)} · ${modeLabel}`, color, [
       box(`${report.files.length} 个改动文件 · ${report.ready ? '配置验证全部通过' : '尚未满足发布条件'}\n${report.workspace.branch}`),

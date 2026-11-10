@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 
-export interface CommandResult { code: number; stdout: string; truncated: boolean }
+export interface CommandResult { code: number; stdout: string; truncated: boolean; terminated?: boolean }
 export function commandEnv(check = false): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -37,13 +37,13 @@ export function runCommand(command: string, args: string[], cwd: string, signal:
     child.stdout.on('data', chunk => collect(chunk, true)); child.stderr.on('data', chunk => collect(chunk, false));
     log?.on('error', () => { spawnError = true; stop(); });
     child.on('error', () => { spawnError = true; });
-    child.once('close', code => {
+    child.once('close', (code, terminationSignal) => {
       clearTimeout(timer); clearTimeout(hardKill); signal.removeEventListener('abort', stop);
       const finish = () => {
         if (signal.aborted) reject(signal.reason ?? new Error('已取消'));
         else if (spawnError) reject(new Error(`无法启动命令或保存验证日志：${command}`));
         else if (stopped) reject(new Error(`命令超时：${command}`));
-        else resolve({ code: code ?? 1, stdout: output, truncated });
+        else resolve({ code: code ?? 1, stdout: output, truncated, ...(terminationSignal ? {terminated:true} : {}) });
       };
       if (log && !log.destroyed) log.end(finish); else finish();
     });

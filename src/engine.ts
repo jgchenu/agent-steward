@@ -14,7 +14,7 @@ import { baselinePreview, restartAtBaseline, validBaseRef } from './baseline.js'
 import { parseBaselineProposal } from './delivery-preparation.js';
 import { namedProjects, projectAnswer, projectGrantKey } from './routing.js';
 import { Store } from './store.js';
-import { canPublish, publicationBlocker, publicationKey, TargetBranchMoved } from './workspace.js';
+import { canPublish, canRequestDraftException, publicationBlocker, publicationKey, TargetBranchMoved } from './workspace.js';
 import { mergeIntent, mergePullRequest } from './merge.js';
 import { parseMergeProposal, type MergeProposal } from './operation-intent.js';
 import { TaskOrchestrator } from './orchestration.js';
@@ -376,7 +376,7 @@ export class Engine {
     if (i.op === 'new' && i.conversation && this.store.conversationTask(action.chatId, i.conversation,requesterId)) return fail('此话题已绑定任务，请继续原任务；新任务请另起话题。');
     if (i.taskId && (!task || task.chatId !== action.chatId)) return fail('任务不属于当前会话。');
     const current = i.conversation && this.store.conversationTask(action.chatId, i.conversation,task?.requesterId ?? requesterId);
-    if (task && current && task.id !== current.id && ['dispatch','continue','done','cancel','approve','deny','answer','publish','restart'].includes(i.op)) return fail('话题已转到另一个项目，旧操作已失效。');
+    if (task && current && task.id !== current.id && ['dispatch','continue','done','cancel','approve','deny','answer','publish','publish-exception','restart'].includes(i.op)) return fail('话题已转到另一个项目，旧操作已失效。');
     if (i.op === 'dispatch') {
       const p = i.project && this.config.projects[i.project];
       if (!p || !i.prompt || !i.selectionKey || i.prompt.length > 16000) return fail('该项目已撤销授权，请重新派活。');
@@ -388,7 +388,7 @@ export class Engine {
         text: `${p.naturalMode === 'workspace-write' ? '/edit' : '/new'} ${i.project} ${i.prompt}` }, action.actionId);
       return { toast: { type: 'success', content: '收到，开始处理。' } };
     }
-    const mutating = ['new', 'continue', 'done', 'cancel', 'approve', 'deny', 'answer', 'publish', 'restart'].includes(i.op);
+    const mutating = ['new', 'continue', 'done', 'cancel', 'approve', 'deny', 'answer', 'publish', 'publish-exception', 'restart'].includes(i.op);
     if (mutating && task && i.revision !== task.updatedAt) return fail('任务状态已变化，请刷新后再操作。');
     const body = typeof action.fields.body === 'string' ? action.fields.body.trim() : '';
     if (['new', 'continue', 'answer', 'restart'].includes(i.op) && (!body || body.length > 1000)) return fail('请填写 1–1000 字的内容。');
@@ -400,16 +400,18 @@ export class Engine {
       const project = this.config.projects[String(action.fields.project)];
       if (action.fields.mode === 'workspace-write' && (project?.sandbox !== 'workspace-write' || (!project?.worktree && project?.workspaceMode !== 'direct'))) return fail('请先选择已授权且支持修改的代码资源。');
     }
-    if (i.op === 'publish') {
+    if (i.op === 'publish' || i.op === 'publish-exception') {
+      const exception=i.op==='publish-exception';
+      if(exception && action.senderId!==this.config.ownerId)return fail('草稿例外必须由机器人主人批准。');
       if (!task || this.active.has(task.id) || !['review', 'completed', 'failed'].includes(task.status)
-        || !canPublish(task, this.config.projects[task.project], this.store.delivery(task.id))) return fail('尚不具备 PR 交付条件，请检查文件与验证结果。');
+        || !(exception ? canRequestDraftException : canPublish)(task, this.config.projects[task.project], this.store.delivery(task.id))) return fail('尚不具备 PR 交付条件，请检查文件与验证结果。');
       const report = this.store.delivery(task.id)!, project = this.config.projects[task.project];
       if (i.publicationKey !== publicationKey(task, project, report)) return fail('交付内容或目标已变化，请重新预览后确认。');
       this.store.transaction(() => {
         if (!this.store.consume('card:' + action.id) || !this.store.useAction(action.actionId)) return;
-        this.store.saveDelivery(task.id, { ...report, authorizedKey: i.publicationKey });
+        this.store.saveDelivery(task.id, { ...report, authorizedKey: exception ? undefined : i.publicationKey, exceptionAuthorizedKey: exception ? i.publicationKey : undefined });
         this.store.queuePublication(task.id);
-        this.store.event(task.id, 'publication_authorized', JSON.stringify({actorId:action.senderId,scope:'source-branch push and draft PR only'}));
+        this.store.event(task.id, exception?'draft_exception_authorized':'publication_authorized', JSON.stringify({actorId:action.senderId,scope:'source-branch push and draft PR only',key:i.publicationKey,baselineComparison:exception?report.baselineComparison:undefined}));
         this.store.enqueue(task.chatId, '正在准备草稿 PR', { kind: 'task', taskId: task.id });
       });
       this.tick(); void this.flush();
@@ -700,7 +702,7 @@ export class Engine {
           const publicationTarget = { repository: publication.repository || target?.repository || '',
             baseBranch: publication.baseBranch || target?.baseBranch || '' };
           this.store.event(task.id, 'publication_proposed', JSON.stringify(publicationTarget));
-          this.store.enqueue(task.chatId, publicationBlocker(task, project, report, publicationTarget) ?? '已接到 PR 交付请求，请核对交付预览。',
+          this.store.enqueue(task.chatId, publicationBlocker(task, project, report, publicationTarget, canRequestDraftException(task,project,report)) ?? '已接到 PR 交付请求，请核对交付预览。',
             {kind:'publication',taskId:task.id,fresh:true,publicationTarget});
         }
       });
