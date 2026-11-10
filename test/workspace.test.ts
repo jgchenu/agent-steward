@@ -551,6 +551,50 @@ test('independent stable baseline failures enable only a scoped draft exception;
  }
 });
 
+test('automatic baseline probes retain all attempts and allow only reproduced draft failures',async()=>{
+ for(const scenario of ['reproduced','unmatched','malformed','mutating'] as const){
+  const f=fixture();
+  try{
+   writeFileSync(join(f.source,'a.test.ts'),'// baseline test fixture\n');
+   f.g('add','a.test.ts');f.g('commit','-m','test fixture');f.g('push');
+   const script=`
+    const fs=require('node:fs'),path=require('node:path');
+    const report=process.argv[1],file=process.argv[2],probe=!!file;
+    const patched=fs.readFileSync('README.md','utf8')==='changed\\n';
+    if(probe && ${JSON.stringify(scenario)}==='malformed'){fs.writeFileSync(report,'{}');process.exit(1);}
+    if(probe && ${JSON.stringify(scenario)}==='mutating')fs.writeFileSync('README.md','mutated');
+    const fail=patched || (probe && ${JSON.stringify(scenario)}!=='unmatched' && path.basename(path.dirname(report))==='3');
+    fs.writeFileSync(report,JSON.stringify({numFailedTests:fail?1:0,numFailedTestSuites:fail?1:0,numTotalTests:2,unhandledErrors:[],testResults:[{
+      name:path.join(process.cwd(),'a.test.ts'),status:fail?'failed':'passed',message:'',
+      stewardSourceHash:require('node:crypto').createHash('sha256').update(fs.readFileSync('a.test.ts')).digest('hex'),assertionResults:[{fullName:'time '+Date.now()+Math.random(),status:'passed',failureMessages:[]},{
+        fullName:'menu opens',status:fail?'failed':'passed',failureMessages:fail?['expected rename item']:[]
+      }]
+    }]}));process.exit(fail?1:0);
+   `;
+   f.project.worktree!.checks=[{name:'test fixture',command:process.execPath,args:['-e',script,'{report}'],failureFormat:'vitest',timeoutSeconds:10}];
+   await f.executor.run(f.task,f.project,hooks,signal());f.store.set(f.task.id,'review');
+   const report=f.store.delivery(f.task.id)!,comparison=report.baselineComparison!;
+   assert.equal(report.ready,false);assert.equal(canPublish(f.task,f.project,report),false);
+   assert.equal(comparison.eligible,scenario==='reproduced',comparison.reason);
+   assert.equal(canRequestDraftException(f.task,f.project,report),scenario==='reproduced');
+   assert.equal(comparison.equivalent,false);assert.equal(report.exceptionAuthorizedKey,undefined);
+   assert.equal(report.prUrl,undefined);
+   if(scenario==='reproduced'){
+    assert.deepEqual(comparison.probes.map(p=>p.exitCode),[0,0,1]);
+    assert.deepEqual(comparison.checks[0].roundFailureCounts,[2,0,2,0]);
+    assert.match(comparison.reason,/不能证明失败频率未增加/);
+    const card=JSON.stringify(buildCard(f.store,f.config,'dm',{kind:'publication',taskId:f.task.id}));
+    assert.match(card,/不能证明失败频率未增加/);assert.match(card,/Baseline probe/);
+    const legacy=structuredClone(report);delete (legacy.baselineComparison as any).eligible;
+    assert.equal(canRequestDraftException(f.task,f.project,legacy),false,'legacy comparison requires fresh validation');
+   }else if(scenario==='unmatched'){
+    assert.equal(comparison.probes.length,3);assert.match(comparison.reason,/未在未修改基线中复现/);
+   }else assert.match(comparison.reason,scenario==='malformed'?/不完整/:/改变了源码/);
+   assert.equal(f.g('worktree','list','--porcelain').includes('baseline-'),false);
+  }finally{f.close();}
+ }
+});
+
 test('group draft exception requires owner, topic, fresh revision and exact comparison; replay cannot publish twice',async()=>{
  const f=fixture();let published=0;
  f.config.groupChats=true;

@@ -55,8 +55,9 @@ export interface EvidenceImage {
 }
 export interface BaselineComparison {
   baseSha: string; fingerprint: string; validationKey: string; capturedAt: string;
-  equivalent: boolean; reason: string;
-  checks: Array<{name: string; status: 'passed' | 'failed'; failureCount: number; digest: string}>;
+  equivalent: boolean; eligible: boolean; reason: string;
+  probes: Array<{check: string; file: string; attempt: number; exitCode: number; failureCount: number; digest: string}>;
+  checks: Array<{name: string; status: 'passed' | 'failed'; failureCount: number; digest: string; roundFailureCounts: number[]; variable: boolean}>;
 }
 export interface DeliveryReport {
   baselineComparison?: BaselineComparison;

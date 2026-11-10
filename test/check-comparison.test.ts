@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkEvidence, runCheck } from '../src/check-comparison.js';
+import { assessFailures, probeFiles, checkEvidence, runCheck } from '../src/check-comparison.js';
 
 const vitest=(message='boom')=>({numFailedTests:1,numFailedTestSuites:2,numTotalTests:1,unhandledErrors:[],testResults:[{
  name:'/repo/a.test.ts',status:'failed',message:'',assertionResults:[{fullName:'suite case',status:'failed',failureMessages:[message]}],
@@ -50,4 +50,57 @@ test('generated Vitest adapter captures unhandled completion errors rather than 
    '{vitestReporter}']},root,join(root,'run'),AbortSignal.timeout(5000));
   assert.equal(run.evidence?.failureCount,1);assert.equal(run.record.status,'failed');
  }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test('baseline evidence retains every failure and uses per-run multiplicity, never retry totals',()=>{
+ const old=checkEvidence('vitest',JSON.stringify(vitest()),'/repo',1);
+ const extra=checkEvidence('vitest',JSON.stringify({...vitest(),unhandledErrors:[{message:'warning rejection'}]}),'/repo',1);
+ assert.equal(assessFailures([old,extra],[extra,old]).covered,true);
+ assert.equal(assessFailures([old,extra],[extra,old]).variable,true);
+ const changed=checkEvidence('vitest',JSON.stringify(vitest('new stack')),'/repo',1);
+ assert.equal(assessFailures([old,changed],[old,old]).covered,false);
+ assert.equal(assessFailures([old,extra],[old,old]).covered,false,'unhandled failures cannot disappear in retries');
+ const doubled=checkEvidence('vitest',JSON.stringify({...vitest(),unhandledErrors:[{message:'warning rejection'},{message:'warning rejection'}]}),'/repo',1);
+ assert.equal(assessFailures([doubled,doubled],[extra,extra],[extra,extra,extra]).covered,false);
+ assert.equal(assessFailures([{...old,exitCode:99},old],[old,old]).unknownExit,true);
+});
+
+test('baseline exceptions preserve executed test identities and require new tests to pass',()=>{
+ const old=checkEvidence('vitest',JSON.stringify(vitest()),'/repo',1);
+ const add=(status:string)=>({...old,tests:[...old.tests,JSON.stringify(['<workspace>/a.test.ts','new case',status])]});
+ assert.equal(assessFailures([add('passed'),add('passed')],[old,old]).variable,false);
+ for(const status of ['skipped','pending','todo','failed']){
+  assert.throws(()=>assessFailures([add(status),old],[old,old]),/新增用例/);
+  const skipped={...old,tests:[JSON.stringify(['<workspace>/a.test.ts','suite case',status==='failed'?'skipped':status])]};
+  assert.throws(()=>assessFailures([skipped,old],[old,old]),/跳过/);
+ }
+ assert.throws(()=>assessFailures([{...old,tests:[]},old],[old,old]),/缺失/);
+ assert.throws(()=>assessFailures([old,old],[{...old,tests:[...old.tests,...old.tests]},old]),/缺失/);
+});
+
+test('targeted baseline files cannot escape the worktree or inject CLI arguments',()=>{
+ const root=mkdtempSync(join(tmpdir(),'steward-probe-paths-'));
+ try{
+  const baseline=join(root,'repo');mkdirSync(baseline);writeFileSync(join(baseline,'a.test.ts'),'');
+  writeFileSync(join(root,'outside.test.ts'),'');
+  symlinkSync(root,join(baseline,'linked'));symlinkSync(join(root,'outside.test.ts'),join(baseline,'link.test.ts'));
+  const names=['a.test.ts','../outside.test.ts','linked/outside.test.ts','link.test.ts','--config.test.ts','missing.test.ts','a.ts','a.test.ts\n--help'];
+  assert.deepEqual(probeFiles(names.map(n=>JSON.stringify(['<workspace>/'+n,'case',['error']])),baseline),['a.test.ts']);
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test('dynamic passing names require observed baseline variation and unchanged source, positions and outcomes',()=>{
+ const passing=(name:string,hash='a'.repeat(64))=>checkEvidence('vitest',JSON.stringify({numFailedTests:0,numFailedTestSuites:0,numTotalTests:1,unhandledErrors:[],testResults:[{
+  name:'/repo/a.test.ts',status:'passed',stewardSourceHash:hash,assertionResults:[{fullName:name,status:'passed',failureMessages:[]}]
+ }]}),'/repo',0);
+ const bases=[passing('date 1'),passing('date 2')],patches=[passing('date 3'),passing('date 4')];
+ assert.equal(assessFailures(patches,bases).covered,true);
+ assert.equal(assessFailures(patches,bases).variable,true);
+ assert.throws(()=>assessFailures([passing('date 3','b'.repeat(64)),patches[1]],bases),/缺失/);
+ assert.throws(()=>assessFailures(patches,[bases[0],bases[0]]),/缺失/,'a stable baseline name cannot be arbitrarily renamed');
+ const skipped={...patches[0],tests:patches[0].tests.map(t=>{const a=JSON.parse(t);a[2]='skipped';return JSON.stringify(a);})};
+ assert.throws(()=>assessFailures([skipped,patches[1]],bases),/跳过/);
+ assert.throws(()=>assessFailures([{...patches[0],tests:[]},patches[1]],bases),/缺失/);
+ const extra=JSON.stringify(['<workspace>/a.test.ts','extra','passed','a'.repeat(64),1]);
+ assert.throws(()=>assessFailures([{...patches[0],tests:[...patches[0].tests,extra]},patches[1]],bases),/缺失/);
 });
