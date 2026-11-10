@@ -46,9 +46,10 @@ test('generated Vitest adapter captures unhandled completion errors rather than 
   writeFileSync(join(root,'node_modules/vitest/package.json'),JSON.stringify({type:'module',exports:{'./reporters':'./reporters.js'}}));
   writeFileSync(join(root,'node_modules/vitest/reporters.js'),`export class JsonReporter {async onFinished(){await this.writeReport(JSON.stringify({numFailedTests:0,numFailedTestSuites:0,numTotalTests:0,testResults:[]}));}}`);
   const run=await runCheck({name:'test',command:process.execPath,failureFormat:'vitest',args:['--input-type=module','-e',
-   `const {default:R}=await import(process.argv[1]);await new R().onFinished([], [{name:'Error',message:'unhandled',stack:'a.ts:1'}]);process.exit(1)`,
-   '{vitestReporter}']},root,join(root,'run'),AbortSignal.timeout(5000));
+   `const {default:R}=await import(process.argv[1]);await new R().onFinished([], [{name:'Error',message:'unhandled',stack:'a.ts:1',VITEST_TEST_PATH:process.argv[2]}]);process.exit(1)`,
+   '{vitestReporter}',join(root,'a.test.ts')]},root,join(root,'run'),AbortSignal.timeout(5000));
   assert.equal(run.evidence?.failureCount,1);assert.equal(run.record.status,'failed');
+  assert.equal(JSON.parse(run.evidence!.failures[0])[1].testFile,'<workspace>/a.test.ts');
  }finally{rmSync(root,{recursive:true,force:true});}
 });
 
@@ -86,6 +87,7 @@ test('targeted baseline files cannot escape the worktree or inject CLI arguments
   symlinkSync(root,join(baseline,'linked'));symlinkSync(join(root,'outside.test.ts'),join(baseline,'link.test.ts'));
   const names=['a.test.ts','../outside.test.ts','linked/outside.test.ts','link.test.ts','--config.test.ts','missing.test.ts','a.ts','a.test.ts\n--help'];
   assert.deepEqual(probeFiles(names.map(n=>JSON.stringify(['<workspace>/'+n,'case',['error']])),baseline),['a.test.ts']);
+  assert.deepEqual(probeFiles(names.map(n=>JSON.stringify(['unhandled',{testFile:'<workspace>/'+n,message:'timer'}])),baseline),['a.test.ts']);
  }finally{rmSync(root,{recursive:true,force:true});}
 });
 

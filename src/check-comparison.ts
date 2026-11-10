@@ -69,7 +69,7 @@ export async function runCheck(check: Check, cwd: string, dir: string, signal: A
     writeFileSync(reporter,`import { JsonReporter } from ${JSON.stringify(moduleUrl)};
 import { writeFileSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-const errors = xs => xs.map(e => ({name:e?.name ?? '',message:e?.message ?? String(e),stack:e?.stack ?? '',stacks:e?.stacks ?? []}));
+const errors = xs => xs.map(e => ({name:e?.name ?? '',message:e?.message ?? String(e),stack:e?.stack ?? '',stacks:e?.stacks ?? [],...(typeof e?.VITEST_TEST_PATH==='string'?{testFile:e.VITEST_TEST_PATH}:{})}));
 export default class extends JsonReporter {
   constructor(){super({});}
   async onFinished(files,unhandled,coverage){
@@ -151,7 +151,7 @@ export function assessFailures(patches: CheckEvidence[], baselines: CheckEvidenc
 export function probeFiles(unknown: string[], baseline: string): string[] {
   const files=new Set<string>();
   for(const record of unknown){
-    const item=JSON.parse(record),name=Array.isArray(item)?item[0]:undefined;
+    const item=JSON.parse(record),name=Array.isArray(item)?(item[0]==='unhandled'?item[1]?.testFile:item[0]):undefined;
     if(typeof name!=='string'||!name.startsWith('<workspace>/'))continue;
     const file=name.slice('<workspace>/'.length);
     if(!/^[a-zA-Z0-9_][^\r\n\0]*\.(test|spec)\.[cm]?[jt]sx?$/.test(file)||file.split(/[\\/]/).some(s=>s==='..'||s==='.'||s.startsWith('-')))continue;
@@ -205,6 +205,19 @@ export async function compareBaseline(report: DeliveryReport, checks: Check[], f
           result.probes.push({check:c.name,file,attempt,exitCode:run.evidence.exitCode,failureCount:run.evidence.failureCount,digest:run.evidence.digest});
           assessment=assessFailures(patches,baselines,probes);
         }
+      }
+      // A process-level rejection may not identify a test file. Repeat the trusted
+      // full check on the pristine base rather than guessing a file from its stack.
+      for(let attempt=1;c.failureFormat==='vitest' && attempt<=2
+        && assessment.unknown.some(record=>JSON.parse(record)[0]==='unhandled');attempt++){
+        hooks.progress(`正在补查基线：未处理异常 · 完整检查第 ${attempt} 次`);
+        const run=await runCheck({...c,timeoutSeconds:Math.min(c.timeoutSeconds??300,900)},baseline,
+          join(dir,'probes',String(i),'full',String(attempt)),signal);
+        if(!run.evidence)throw Error(`「${c.name}」完整基线补查诊断不完整，不能申请例外。`);
+        if(await git(baseline,['status','--porcelain','--untracked-files=all'],signal)||!await unchanged())throw Error('完整基线补查改变了源码，不能使用该证据');
+        probes.push(run.evidence);
+        result.probes.push({check:c.name,file:'(full Vitest check)',attempt,exitCode:run.evidence.exitCode,failureCount:run.evidence.failureCount,digest:run.evidence.digest});
+        assessment=assessFailures(patches,baselines,probes);
       }
       if(!assessment.covered)throw Error(`「${c.name}」仍有 ${assessment.unknown.length} 条失败或未知退出码未在未修改基线中复现，不能申请例外。`);
       variable ||= assessment.variable;

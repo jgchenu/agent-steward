@@ -644,6 +644,35 @@ test('automatic baseline probes retain all attempts and allow only reproduced dr
  }
 });
 
+test('unattributed rejections use at most two complete baseline probes and still require exact evidence',async()=>{
+ for(const scenario of ['matched','unmatched','malformed','mutating'] as const){
+  const f=fixture();
+  try{
+   const script=`
+    const fs=require('node:fs'),path=require('node:path'),out=process.argv[1];
+    const full=out.includes(path.join('probes','0','full'));
+    if(full && ${JSON.stringify(scenario)}==='malformed'){fs.writeFileSync(out,'{}');process.exit(1);}
+    if(full && ${JSON.stringify(scenario)}==='mutating')fs.writeFileSync('README.md','mutated');
+    const failed=fs.readFileSync('README.md','utf8')==='changed\\n' || (full && ${JSON.stringify(scenario)}==='matched' && path.basename(path.dirname(out))==='2');
+    fs.writeFileSync(out,JSON.stringify({numTotalTests:1,numFailedTests:0,numFailedTestSuites:0,
+      unhandledErrors:failed?[{message:'timer rejection',stack:'source.js:1'}]:[],
+      testResults:[{name:path.join(process.cwd(),'a.test.ts'),status:'passed',assertionResults:[{fullName:'case',status:'passed',failureMessages:[]}]}]}));
+    process.exit(failed?1:0);
+   `;
+   f.project.worktree!.checks=[{name:'test fixture',command:process.execPath,args:['-e',script,'{report}'],failureFormat:'vitest',timeoutSeconds:10}];
+   await f.executor.run(f.task,f.project,hooks,signal());
+   const report=f.store.delivery(f.task.id)!,comparison=report.baselineComparison!;
+   assert.equal(report.ready,false);assert.equal(report.exceptionAuthorizedKey,undefined);
+   assert.equal(comparison.eligible,scenario==='matched',comparison.reason);
+   if(scenario==='matched'||scenario==='unmatched'){
+    assert.equal(comparison.probes.length,2);
+    assert.ok(comparison.probes.every(p=>p.file==='(full Vitest check)'));
+    assert.deepEqual(comparison.probes.map(p=>p.exitCode),scenario==='matched'?[0,1]:[0,0]);
+   }else assert.match(comparison.reason,scenario==='malformed'?/不完整/:/改变了源码/);
+  }finally{f.close();}
+ }
+});
+
 test('group draft exception requires owner, topic, fresh revision and exact comparison; replay cannot publish twice',async()=>{
  const f=fixture();let published=0;
  f.config.groupChats=true;
