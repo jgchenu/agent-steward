@@ -119,6 +119,17 @@ export function alertDescription(store:Store,task:Task):AlertAssessment|undefine
   for(const row of rows){try{const a=JSON.parse(String(row.body));if(a.verdict==='needs_fix')return a;}catch{}}
 }
 
+export function groupAlertSummary(store:Store,config:Config,topic:AlertTopic,task:Task):string {
+  const report=store.delivery(task.id), description=alertDescription(store,task);
+  const pr=publicPr(config,task,report?.prUrl),merged=store.mergeReceipt(task.id) ?? (report?.remotePr?.state==='MERGED'?{url:report.remotePr.url}:undefined);
+  const body=merged && publicPr(config,task,merged.url)
+    ? `${report?.summary?.title ?? description?.summary ?? '修复进展'}\n\n[查看已合并 PR](${merged.url})。上线和效果验证尚未确认。`
+    : report?.remotePr?.state==='CLOSED' && pr ? `${report.summary?.title ?? description?.summary ?? '修复进展'}\n\n[查看已关闭 PR](${pr})。该 PR 未合并，后续处理需重新确认。`
+    : report?.summary && task.status==='review' ? deliveryMessage({...report,prUrl:pr})
+    : `${description?.summary ?? '问题跟进'}\n\n${description?.impact ?? ''}\n${task.status==='waiting_approval'?'有一项操作需要你在本话题确认。':task.status==='waiting_input'?'还需要补充信息，具体问题见本话题。':['failed','interrupted','cancelled'].includes(task.status)?'当前处理已暂停，改动和证据已保留。':pr?`[查看修复 PR](${pr})。下一步是审查和验收。`:'改动已准备，正在确认验证结果和交付范围。'}`;
+  return `${body}\n\n[查看 Sentry 问题](${sentryIssueUrl(config.alertSources![topic.sourceId],topic.issueId)})`;
+}
+
 // Only controller facts are shared. Private prompts, questions, logs and executor prose stay private.
 export function syncAlertTopics(store: Store, config: Config): void {
   const topics=store.db.prepare('SELECT * FROM alert_topics').all() as unknown as AlertTopic[];
@@ -135,14 +146,7 @@ export function syncAlertTopics(store: Store, config: Config): void {
       // Group-owned tasks use the existing conversational results and approval cards.
       if (task.chatId===topic.chatId) {
         if(!topic.rootId || !['review','waiting_approval','waiting_input','failed','interrupted','cancelled'].includes(task.status))return;
-        const report=store.delivery(task.id), description=alertDescription(store,task);
-        const pr=publicPr(config,task,report?.prUrl),merged=store.mergeReceipt(task.id) ?? (report?.remotePr?.state==='MERGED'?{url:report.remotePr.url}:undefined);
-        const body=merged && publicPr(config,task,merged.url)
-          ? `${report?.summary?.title ?? description?.summary ?? '修复进展'}\n\n[查看已合并 PR](${merged.url})。上线和效果验证尚未确认。`
-          : report?.remotePr?.state==='CLOSED' && pr ? `${report.summary?.title ?? description?.summary ?? '修复进展'}\n\n[查看已关闭 PR](${pr})。该 PR 未合并，后续处理需重新确认。`
-          : report?.summary && task.status==='review' ? deliveryMessage({...report,prUrl:pr})
-          : `${description?.summary ?? '问题跟进'}\n\n${description?.impact ?? ''}\n${task.status==='waiting_approval'?'有一项操作需要你在本话题确认。':task.status==='waiting_input'?'还需要补充信息，具体问题见本话题。':['failed','interrupted','cancelled'].includes(task.status)?'当前处理已暂停，改动和证据已保留。':pr?`[查看修复 PR](${pr})。下一步是审查和验收。`:'改动已准备，正在确认验证结果和交付范围。'}`;
-        const text=`${body}\n\n[查看 Sentry 问题](${sentryIssueUrl(config.alertSources![topic.sourceId],topic.issueId)})`;
+        const text=groupAlertSummary(store,config,topic,task);
         const key=`summary:${task.id}:${task.updatedAt}:`+createHash('sha256').update(text).digest('hex');
         if(!store.db.prepare('INSERT OR IGNORE INTO alert_topic_updates VALUES (?,?)').run(topic.id,key).changes)return;
         store.enqueue(topic.chatId,text,{kind:'alert-collaboration',topicId:topic.id,updateRoot:true,snapshot:{taskId:task.id,revision:task.updatedAt}});
