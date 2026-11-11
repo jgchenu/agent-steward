@@ -505,3 +505,14 @@ test('alert assessment is structured, read-only and cannot mix a verdict with pu
     assert.ok(rpc.params['turn/start'].outputSchema.required.includes('alertAssessment'));
   }
 });
+
+test('delivery summary travels in structured output separately from task instructions and grants no publication',async()=>{
+ const rpc=new FakeRpc(),f=setup(rpc);let summary:unknown;
+ const value={title:'修复提交失败后无法重试',problem:'失败后按钮无法再次点击。',change:'失败时恢复按钮状态。',validation:'相关用例通过。',remaining:['浏览器验收未完成']};
+ f.hooks.reportDeliverySummary=s=>{summary=s;};
+ rpc.onTurn=()=>{rpc.emit('item/completed',{item:{type:'agentMessage',phase:'final_answer',text:JSON.stringify({message:'修复已准备好。',publication:null,deliverySummary:value})}});rpc.finish();};
+ await f.run({...task,mode:'workspace-write'});assert.deepEqual(summary,value);
+ assert.ok(rpc.params['turn/start'].outputSchema.required.includes('deliverySummary'));
+ assert.match(rpc.params['thread/start'].developerInstructions,/public editorial content/);
+ assert.equal(rpc.calls.some(x=>x.includes('publish')),false);
+});

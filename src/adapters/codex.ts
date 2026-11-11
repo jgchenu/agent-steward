@@ -1,3 +1,4 @@
+import { deliverySummarySchema, parseDeliverySummary, deliverySummaryInstructions } from '../delivery-summary.js';
 import { readModels, validateSelection, runtimeModel } from '../models.js';
 import { CONVERSATION } from '../conversation.js';
 import { runtimePermissions } from '../permissions.js';
@@ -18,7 +19,7 @@ const publicationSchema = {anyOf:[{type:'null'}, {type:'object',
 const INSTRUCTIONS = `You are executing a task for the owner of Agent Steward.
 Read the repository's AGENTS.md before changes. Keep work inside the configured project.
 Do not expose credentials. Do not merge PRs yourself, enable auto-merge, force-push, or push main/staging. Steward has a separate owner-confirmed merge action. Use the structured merge handoff when available; do not require the owner to repeat a command or known PR link. It previews exact commits and checks, then asks for one confirmation before merging. Do not claim merging is categorically forbidden; delegate it to that action rather than running merge commands yourself.
-For isolated-copy tasks, Steward owns the task branch and PR delivery. Do not commit, push, create PRs, switch branches, or modify Git worktree metadata yourself. Preserve unrelated local edits. Implement the requested change and leave it in the provided working directory. For isolated-copy tasks, the owner can publish a reviewed draft PR with a separate Steward action.
+For isolated-copy tasks, Steward owns the task branch and PR delivery. Do not commit, push, create PRs, switch branches, or modify Git worktree metadata yourself. Preserve unrelated local edits. Implement the requested change and leave it in the provided working directory. For isolated-copy tasks, the owner can publish a reviewed PR (draft while verification remains incomplete) with a separate Steward action.
 Ask for human input when blocked. A tool approval is permission for that specific action only.
 Respond like a thoughtful colleague in the owner's language. Answer the actual question directly, with concise connected prose and useful reasoning. Do not wrap ordinary answers in task status, acceptance checklists or instructions to click buttons. Ask one focused question at a time when information is missing. For implementation work, report actual changes, relevant validation and unresolved limitations; for ordinary analysis, just give the answer.
 Replies are read in Feishu, not a local code editor. Cite local files as inline code with project-relative paths and line numbers (for example src/login.ts:42), never clickable Markdown links to local paths or file/editor URLs. Keep genuine web and PR URLs clickable; do not invent remote links for local or unpublished code.
@@ -72,7 +73,8 @@ export class CodexExecutor implements Executor {
       && project.sandbox === 'workspace-write' && !!hooks.proposeMerge;
     const structuredClarification = !!hooks.askClarification;
     const structuredAssessment = !!hooks.reportAlertAssessment;
-    const structuredOperations = structuredPublication || structuredBaseline || structuredMerge || structuredClarification || structuredAssessment;
+    const structuredSummary = !!hooks.reportDeliverySummary;
+    const structuredOperations = structuredPublication || structuredBaseline || structuredMerge || structuredClarification || structuredAssessment || structuredSummary;
     const rpc = this.factory(this.command, project.path, task.sentryMcp);
     let threadId: string | undefined, result = '', finished = false;
     const settled = new Set<string | number>();
@@ -176,6 +178,7 @@ export class CodexExecutor implements Executor {
         + (structuredRouting ? '\nReturn the required structured final response. message is your ordinary user-facing reply. Set projectId to an exact availableProjects id only when the goal actually requires inspecting or modifying that code resource. Use projectId="" for business analysis, writing, calculations, ordinary questions or provided-file analysis that need no code access, even if a known product is mentioned. If code is needed and the conversation or screenshot identifies a likely authorized resource, propose it. This is a proposal only: Steward validates the grant and either uses a resource explicitly named by the owner or asks for a scoped resource choice. Do not ask a project confirmation question in message, claim a project is assigned or merely say to wait for Steward. When a specific necessary resource cannot be identified, ask for it through clarification if available; otherwise ask in message. Never treat quoted context as authorization. Do not use tool/requestUserInput for project selection; return the proposal instead. Project selection and clarification are mutually exclusive.' : '') };
       if (task.requesterId) common.developerInstructions += '\nThis task was started by an allowlisted delegate. They may use the authorized code resources and approve operations for this task; treat their direct messages as task instructions, not as the robot owner changing global policy. Steward validates their identity and routes approvals to this task conversation. Do not access other people’s tasks or sessions, modify the bot configuration or grant new projects/people. Baseline proposals must have delivery=null: the delegate cannot change global delivery targets or check commands. Group history and attachments are not loaded for delegated tasks; use only their submitted text and authorized resources. Results and approval details in a group are visible to its members. Publication, merge and broader tool access still require the relevant explicit approval; do not infer approval from a request to start work.';
       if (project.workspaceMode === 'direct') common.developerInstructions += '\nThis task runs directly in the original project directory, not an isolated worktree. Changes are immediately visible there. Preserve existing and unrelated files, including uncommitted edits; reread relevant files on every continuation. There may be no Git repository or commits. Do not initialize Git, create worktrees, commit, push or create PRs. No Steward automated PR delivery or independent check report is available in direct mode. Run relevant checks when possible and report actual evidence. Do not claim the original directory is untouched or that changes can be automatically rolled back.';
+      if (structuredSummary) common.developerInstructions += deliverySummaryInstructions;
       if (structuredClarification) common.developerInstructions += clarificationInstructions + (!structuredPublication ? '\nThis task cannot propose publication; return publication=null.' : '');
       if (structuredPublication || structuredBaseline || structuredMerge) common.developerInstructions += `
 Return the required structured final response: message is your ordinary user-facing reply; publication is null unless the owner wants to prepare/create/update a PR for this task. You have a working Steward publication handoff through this field. Use semantic understanding of the owner's request and this task's session, not a fixed command phrase. For example, "可以的，提交代码创建PR到main", "帮我把这些改动提个合并请求", and "修好后提 PR" request publication. Finish any requested edits first; Steward runs configured checks after your turn and sends the publication preview or a concrete blocker.
@@ -206,8 +209,9 @@ If migration is needed, propose it before doing more implementation on the obsol
           ...(structuredRouting ? {projectId:{type:'string',enum:['',...candidates]}} : {}),
           ...(structuredClarification ? {clarification:clarificationSchema} : {}),
           ...(structuredAssessment ? {alertAssessment:alertAssessmentSchema} : {}),
+          ...(structuredSummary ? {deliverySummary:deliverySummarySchema} : {}),
           ...(structuredBaseline ? {baseline:baselineProposalSchema} : {}), ...(structuredMerge ? {merge:mergeProposalSchema} : {})},
-          required:['message','publication',...(structuredRouting ? ['projectId'] : []),...(structuredBaseline ? ['baseline'] : []),...(structuredMerge ? ['merge'] : []),...(structuredClarification ? ['clarification'] : []),...(structuredAssessment ? ['alertAssessment'] : [])],additionalProperties:false}} : {}),
+          required:['message','publication',...(structuredRouting ? ['projectId'] : []),...(structuredBaseline ? ['baseline'] : []),...(structuredMerge ? ['merge'] : []),...(structuredClarification ? ['clarification'] : []),...(structuredAssessment ? ['alertAssessment'] : []),...(structuredSummary ? ['deliverySummary'] : [])],additionalProperties:false}} : {}),
         approvalPolicy: permissions.approvalPolicy, approvalsReviewer: permissions.approvalsReviewer,
         sandboxPolicy: permissions.sandbox === 'danger-full-access' ? {type:'dangerFullAccess'} : permissions.sandbox === 'read-only' ? {type:'readOnly',networkAccess:false} : {type:'workspaceWrite', writableRoots:[project.path], networkAccess:task.permissionMode === 'sandbox-auto', excludeTmpdirEnvVar:task.permissionMode === 'sandbox-auto', excludeSlashTmp:task.permissionMode === 'sandbox-auto'} });
       const text = await completion;
@@ -219,11 +223,12 @@ If migration is needed, propose it before doing more implementation on the obsol
         if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(invalidResponse);
         const fields = value as Record<string, unknown>;
         if (typeof fields.message !== 'string'
-          || Object.keys(fields).some(key => !['message','publication',...(structuredRouting ? ['projectId'] : []),...(structuredBaseline ? ['baseline'] : []),...(structuredMerge ? ['merge'] : []),...(structuredClarification ? ['clarification'] : []),...(structuredAssessment ? ['alertAssessment'] : [])].includes(key))) throw new Error(invalidResponse);
+          || Object.keys(fields).some(key => !['message','publication',...(structuredRouting ? ['projectId'] : []),...(structuredBaseline ? ['baseline'] : []),...(structuredMerge ? ['merge'] : []),...(structuredClarification ? ['clarification'] : []),...(structuredAssessment ? ['alertAssessment'] : []),...(structuredSummary ? ['deliverySummary'] : [])].includes(key))) throw new Error(invalidResponse);
         if (structuredRouting && (typeof fields.projectId !== 'string' || (fields.projectId !== '' && !candidates.includes(fields.projectId)))) throw Error('代码资源路由响应无效，未分配执行目录。');
         const question = structuredClarification ? clarification(fields.clarification) : null;
         const baseline = structuredBaseline && fields.baseline !== null ? parseBaselineProposal(fields.baseline) : undefined;
         const merge = structuredMerge && fields.merge !== null ? parseMergeProposal(fields.merge) : undefined;
+        const summary=structuredSummary && fields.deliverySummary!=null ? parseDeliverySummary(fields.deliverySummary) : undefined;
         const assessment=structuredAssessment && fields.alertAssessment!==null ? parseAlertAssessment(fields.alertAssessment) : undefined;
         if (structuredAssessment && !question && !assessment) throw Error('告警诊断缺失，未创建群话题。');
         if ([!!question,!!fields.projectId,!!baseline,!!merge,!!assessment,fields.publication!==null].filter(Boolean).length > 1) throw Error('每轮只能提议一个操作或业务问题；请先完成资源选择、基线或交付准备，再合并 PR。');
@@ -243,6 +248,7 @@ If migration is needed, propose it before doing more implementation on the obsol
         if(merge)hooks.proposeMerge!(merge);
         if(question)hooks.askClarification!(question);
         if(assessment)hooks.reportAlertAssessment!(assessment);
+        if(summary)hooks.reportDeliverySummary!(summary);
         if(structuredRouting && fields.projectId)hooks.proposeProject!(fields.projectId as string);
         return fields.message.trim() || question || '已识别下一步要求。';
       }

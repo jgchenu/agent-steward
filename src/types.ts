@@ -61,6 +61,9 @@ export interface BaselineComparison {
   checks: Array<{name: string; status: 'passed' | 'failed'; failureCount: number; digest: string; roundFailureCounts: number[]; variable: boolean}>;
 }
 export interface DeliveryReport {
+  summary?: import('./delivery-summary.js').DeliverySummary;
+  prIsDraft?: boolean;
+  remotePr?: import('./pr-monitor.js').RemotePr & {checkedAt:string};
   baselineComparison?: BaselineComparison;
   exceptionAuthorizedKey?: string;
   commitAuthors?: CommitAuthor[];
@@ -92,6 +95,7 @@ export interface HumanRequest {
   resolve: (answer: string) => void;
 }
 export interface RunHooks {
+  reportDeliverySummary?: (summary: import('./delivery-summary.js').DeliverySummary) => void;
   reportAlertAssessment?: (assessment: import('./alert-assessment.js').AlertAssessment) => void;
   approveOperation?: (proposal: import('./operations.js').OperationProposal) => void;
   askClarification?: (question: string) => void;
@@ -115,8 +119,8 @@ export interface CommitAuthor { name: string; email: string }
 export interface PublicationTarget { repository: string; baseBranch: string }
 export interface BaselineOptions { migrateChanges: boolean; delivery: (PublicationTarget & {checks: Check[]}) | null }
 export interface BaselineProposal extends BaselineOptions { ref: string }
-export type View = ({kind:'alert-collaboration'; topicId:string; root?:boolean; snapshot?:{taskId:string; revision:string}} | { kind: 'requester-reply' } | { kind: 'evidence'; taskId: string; evidenceIds: string[] } | { kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string; fromTaskId?: string; revision?: string } | { kind: 'list'; page?: number }
-  | { kind: 'reply' | 'task' | 'followup' | 'result' | 'delivery' | 'publication' | 'baseline' | 'source'; taskId: string; page?: number })
+export type View = ({kind:'pr-overview'} | {kind:'alert-collaboration'; topicId:string; root?:boolean; updateRoot?:boolean; snapshot?:{taskId:string; revision:string}} | { kind: 'requester-reply' } | { kind: 'evidence'; taskId: string; evidenceIds: string[] } | { kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string; fromTaskId?: string; revision?: string } | { kind: 'list'; page?: number }
+  | { kind: 'publication-receipt' | 'reply' | 'task' | 'followup' | 'result' | 'delivery' | 'publication' | 'baseline' | 'source'; taskId: string; page?: number })
   & { requesterId?: string; targetMessageId?: string; fresh?: boolean; conversation?: Conversation; draft?: string; publicationTarget?: PublicationTarget };
 export interface CardAction {
   id: string; senderId: string; chatId: string; actionId: string; messageId: string;

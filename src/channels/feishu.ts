@@ -1,3 +1,4 @@
+import { ownerPrOverview } from '../pr-overview.js';
 import { publicationBlocker, canRequestDraftException } from '../workspace.js';
 import { alertTopic, alertUpdateCurrent, recordTopicMessage } from '../alert-collaboration.js';
 import { evidenceBytes } from '../evidence.js';
@@ -102,10 +103,24 @@ export class FeishuChannel implements Channel {
     await releaseMedia(snapshot, this.config.stateDir);
   }
   async send(chatId: string, text: string, deliveryId: string, view?: View): Promise<void> {
+    if(view?.kind==='pr-overview'){
+      const overview=ownerPrOverview(this.store,this.config,chatId);if(!overview)return;
+      const content=JSON.stringify({zh_cn:{content:[[{tag:'md',text:overview}]]}}),key='pr-overview:message';
+      const existing=this.store.cardMessage(chatId,key);
+      if(existing){const r=await this.client.im.message.update({path:{message_id:existing},data:{msg_type:'post',content}});if(r.code!==0)throw Error('总览更新失败');}
+      else {const r=await this.client.im.message.create({params:{receive_id_type:'chat_id'},data:{receive_id:chatId,msg_type:'post',content,uuid:deliveryId}});if(r.code!==0||!r.data?.message_id)throw Error('总览发送失败');this.store.saveCardMessage(chatId,key,r.data.message_id);}
+      return;
+    }
     const collaboration=view?.kind==='alert-collaboration' ? view : undefined;
     const topic=collaboration && alertTopic(this.store,collaboration.topicId);
     if (collaboration) {
       if (!topic || !alertUpdateCurrent(this.store,this.config,chatId,collaboration)) throw Error('群告警通知授权或进展已变化。');
+      if(collaboration.updateRoot){
+        if(!topic.rootId)throw Error('话题首条尚未送达');
+        const content=JSON.stringify({zh_cn:{content:[[{tag:'md',text:replyChunks(text).join('\n')}]]}});
+        const r=await this.client.im.message.update({path:{message_id:topic.rootId},data:{msg_type:'post',content}});
+        if(r.code!==0)throw Error('话题摘要更新失败');return;
+      }
       if (collaboration.root && topic.rootId) return;
       if (!collaboration.root && !topic.rootId) throw Error('问题话题尚未送达。');
       view={kind:'notice',...(topic.rootId ? {conversation:{anchorId:topic.rootId,sourceId:topic.rootId,scope:'thread'}} : {})};

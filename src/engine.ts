@@ -1,3 +1,5 @@
+import { deliveryMessage, draftReason } from './delivery-summary.js';
+import { syncOwnerPrOverviews } from './pr-overview.js';
 import { alertGroupContext, alertUpdateCurrent, awaitingAlertRoot, isAlertRootTurn, isGroupAlertTask, receiveAlertEvidence, syncAlertTopics } from './alert-collaboration.js';
 import { assertAlertAuthorized } from './alerts.js';
 import { isAlertAssessment, parseAlertAssessment, completeAlertAssessment, type AlertAssessment } from './alert-assessment.js';
@@ -9,7 +11,7 @@ import { viewKey } from './channels/cards.js';
 import { CONVERSATION, conversationProject } from './conversation.js';
 import { permissionMode, permissionRank } from './permissions.js';
 import { asksModelStatus, modelStatusText } from './models.js';
-import { codeSourceReceipt, codeSourceDetails, codeSourceChanged, deliveryFooter } from './code-source.js';
+import { codeSourceReceipt, codeSourceDetails, codeSourceChanged } from './code-source.js';
 import { baselinePreview, restartAtBaseline, validBaseRef } from './baseline.js';
 import { parseBaselineProposal } from './delivery-preparation.js';
 import { namedProjects, projectAnswer, projectGrantKey } from './routing.js';
@@ -411,11 +413,12 @@ export class Engine {
         if (!this.store.consume('card:' + action.id) || !this.store.useAction(action.actionId)) return;
         this.store.saveDelivery(task.id, { ...report, authorizedKey: exception ? undefined : i.publicationKey, exceptionAuthorizedKey: exception ? i.publicationKey : undefined });
         this.store.queuePublication(task.id);
-        this.store.event(task.id, exception?'draft_exception_authorized':'publication_authorized', JSON.stringify({actorId:action.senderId,scope:'source-branch push and draft PR only',key:i.publicationKey,baselineComparison:exception?report.baselineComparison:undefined}));
-        this.store.enqueue(task.chatId, '正在准备草稿 PR', { kind: 'task', taskId: task.id });
+        this.store.event(task.id, exception?'draft_exception_authorized':'publication_authorized', JSON.stringify({actorId:action.senderId,scope:draftReason(report)?'source-branch push and draft PR only':'source-branch push and PR for review; fallback to draft if target advances',key:i.publicationKey,baselineComparison:exception?report.baselineComparison:undefined}));
+        this.store.event(task.id,'publication_card',action.messageId);
+        this.store.enqueue(task.chatId,'',{kind:'publication-receipt',taskId:task.id,targetMessageId:action.messageId});
       });
       this.tick(); void this.flush();
-      return { toast: { type: 'success', content: '已排队准备草稿 PR，不会自动合并。' } };
+      return { toast: { type: 'success', content: '已收到发布授权，完成后会在这里回复。' } };
     }
     if (i.op === 'done' && task?.status !== 'review') return fail('该任务当前不需要验收。');
     if (['continue', 'followup', 'baseline', 'restart'].includes(i.op) && ((!!task && this.active.has(task.id)) ||
@@ -491,7 +494,7 @@ export class Engine {
     const queued = this.store.list().filter(t => t.status === 'queued').sort((a,b) => a.updatedAt.localeCompare(b.updatedAt));
     for (const candidate of queued) {
       if (!this.canDispatch(candidate)) {
-        if (candidate.conversation && this.channel.acknowledge) {
+        if (candidate.conversation && this.channel.acknowledge && candidate.nextAction!=='publish' && !isGroupAlertTask(this.store,candidate)) {
           const notified = this.store.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='queue_wait' ORDER BY seq DESC LIMIT 1").get(candidate.id) as {body:string} | undefined;
           if (notified?.body !== candidate.updatedAt) this.store.transaction(() => {
             this.store.event(candidate.id,'queue_wait',candidate.updatedAt);
@@ -503,7 +506,7 @@ export class Engine {
       const task = { ...candidate, permissionMode: permissionMode(this.config), modelSelection: this.config.modelSelection ? {...this.config.modelSelection} : undefined };
       const abort = new AbortController();
       this.store.set(task.id, 'running');
-      if (task.conversation && !this.channel.acknowledge) this.store.enqueue(task.chatId, '正在处理。', { kind: 'reply', taskId: task.id });
+      if (task.conversation && !this.channel.acknowledge && task.nextAction!=='publish' && !isGroupAlertTask(this.store,task)) this.store.enqueue(task.chatId, '正在处理。', { kind: 'reply', taskId: task.id });
       // Register before invoking an adapter; each task owns its abort and completion.
       const done = Promise.resolve().then(() => this.run(task, abort));
       this.active.set(task.id,{ task, abort, done });
@@ -570,7 +573,7 @@ export class Engine {
         prepared: report => {
           abort.signal.throwIfAborted();
           if (!codeSourceChanged(previousReport, report)) return;
-          this.store.enqueue(task.chatId, codeSourceReceipt(project.label ?? task.project, report), { kind: 'reply', taskId: task.id });
+          this.store.event(task.id,'code_source_receipt',codeSourceReceipt(project.label ?? task.project, report));
           void this.flush();
         },
         thread: id => this.store.thread(task.id, id),
@@ -616,7 +619,7 @@ export class Engine {
         }
         return;
       }
-      if (task.conversation && task.nextAction !== 'publish' && this.channel.acknowledge) {
+      if (task.conversation && task.nextAction !== 'publish' && this.channel.acknowledge && !isGroupAlertTask(this.store,task)) {
         try { await this.channel.acknowledge(task, abort.signal); }
         catch {
           abort.signal.throwIfAborted();
@@ -675,7 +678,8 @@ export class Engine {
       if ((publication || baseline || merge) && (!this.config.projects[task.project] || projectGrantKey(this.config.projects[task.project]) !== grantKey)) {
         throw new Error('项目交付配置已变化，请按当前配置重新准备 PR。');
       }
-      const evidence = report ? `\n\n${deliveryFooter(report, project)}` : '';
+      const publicResult=report && task.mode==='workspace-write' && (report.summary || task.nextAction==='publish' || isGroupAlertTask(this.store,task)) && !baseline && !merge
+        ? deliveryMessage(report) : result;
       this.store.transaction(() => {
         this.store.set(task.id, 'review', result);
         if (assessment) completeAlertAssessment(this.store,this.config,task,assessment);
@@ -687,7 +691,7 @@ export class Engine {
           this.store.event(next.id,'resource_bound',JSON.stringify({fromTaskId:task.id,resource:{kind:'code-project',id:automaticallySelected},source:'owner-named-model-proposal'}));
           this.store.enqueue(task.chatId,`本任务需要使用你指定的 ${selected.label ?? automaticallySelected} 代码资源，正在准备执行目录并继续。`,{kind:'reply',taskId:next.id});
         } else if (proposed) this.store.saveProjectSelection(task.id, proposed.project, proposed.grantKey);
-        this.store.enqueue(task.chatId, result + (report && task.mode === 'workspace-write' ? evidence : ''), {kind:'reply',taskId:task.id});
+        if(!(publication && isGroupAlertTask(this.store,task)))this.store.enqueue(task.chatId,publicResult,{kind:'reply',taskId:task.id});
         if (baseline) {
           this.store.event(task.id,'baseline_proposed',JSON.stringify(baseline));
           this.store.queueBaseline(task.id,baseline.ref,{migrateChanges:baseline.migrateChanges,delivery:baseline.delivery});
@@ -741,6 +745,8 @@ export class Engine {
       for (const id of this.pending.keys()) {
         if (this.store.getRequest(id)?.taskId === task.id) this.pending.delete(id);
       }
+      if(task.nextAction==='publish'){const row=this.store.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='publication_card' ORDER BY seq DESC LIMIT 1").get(task.id);
+        if(row)this.store.enqueue(task.chatId,'',{kind:'publication-receipt',taskId:task.id,targetMessageId:String(row.body)});}
       this.store.expire(task.id); this.active.delete(task.id);
       this.tick(); void this.flush();
     }
@@ -752,6 +758,7 @@ export class Engine {
   }
   private async drain(): Promise<void> {
       syncAlertTopics(this.store,this.config);
+      syncOwnerPrOverviews(this.store,this.config);
       let item;
       while ((item = this.store.outgoing())) {
         try {

@@ -1,3 +1,4 @@
+import { PublishedPrMonitor } from './pr-monitor.js';
 import { AlertPoller } from './alerts.js';
 import { startAlertWebhook } from './alert-webhook.js';
 import { startWorkspaceConsole } from './workspace-console.js';
@@ -65,6 +66,7 @@ async function main(): Promise<void> {
   }
   const engine = new Engine(store, config, mode === 'demo' ? new DemoExecutor() : new WorkspaceExecutor(config, store, new CodexExecutor(config.codexCommand, undefined, config.approvalsReviewer)), channel);
   const alerts = mode === 'feishu' ? new AlertPoller(store,config) : undefined;
+  const prs=mode==='feishu'?new PublishedPrMonitor(store,config):undefined;
   const webhook = mode === 'feishu' && process.env.STEWARD_ALERT_WEBHOOK_PORT !== undefined
     ? await startAlertWebhook(store,config,Number(process.env.STEWARD_ALERT_WEBHOOK_PORT)) : undefined;
   let configRevision = '';
@@ -93,13 +95,13 @@ async function main(): Promise<void> {
     if (closing) return; closing = true;
     clearInterval(configTimer); clearInterval(catalogTimer); feishu?.close(); consoleApp?.server.close();
     webhook?.close(); webhook?.closeAllConnections();
-    await alerts?.stop(); await engine.stop(); clearPermissionRuntime(config.stateDir); store.close(); release(); process.exit(0);
+    await prs?.stop(); await alerts?.stop(); await engine.stop(); clearPermissionRuntime(config.stateDir); store.close(); release(); process.exit(0);
   };
   process.on('SIGINT', () => void shutdown()); process.on('SIGTERM', () => void shutdown());
   engine.start();
   if (feishu) {
     await feishu.connect(message => { refreshProjects(); engine.receive(message); }, action => { refreshProjects(); return engine.handleAction(action); });
-    alerts?.start();
+    alerts?.start(); prs?.start();
     console.log('Agent Steward started. Owner-controlled Feishu tasks. Use /help; requester and group access follow local configuration.');
   } else {
     console.log(mode === 'demo' ? 'DEMO · 模拟执行器，不调用模型。输入任务或 /help。'

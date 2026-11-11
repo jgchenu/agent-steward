@@ -1,3 +1,4 @@
+import { parseDeliverySummary, draftReason, deliveryMessage } from './delivery-summary.js';
 import { compareBaseline, runCheck } from './check-comparison.js';
 import { collectEvidence, prepareEvidenceDirectory, isEvidencePath, EVIDENCE_DIRECTORY } from './evidence.js';
 import { mergeCommitAuthors } from './attribution.js';
@@ -79,8 +80,10 @@ export async function inventory(w: Workspace, signal: AbortSignal): Promise<Pick
     fingerprint: hash.digest('hex'), headSha: await git(w.path, ['rev-parse', 'HEAD'], signal) };
 }
 export function publicationText(task: Task, report: DeliveryReport): { title: string; body: string } {
-  return { title: `Steward: ${task.prompt.split('\n')[0].slice(0, 70)} (${task.id})`, body: [
-    '## Task', task.prompt, '', '## Changes', report.diffStat || 'No diff summary.', '',
+  return { title: report.summary?.title ?? `${task.project} 代码修改`, body: [
+    '## 问题与修改', report.summary ? `${report.summary.problem}\n\n${report.summary.change}` : '改动说明待补充；请审查下方文件范围。', '',
+    ...(report.summary ? ['## 验证说明', `执行器记录：${report.summary.validation}`, ...report.summary.remaining.map(x=>`- 待确认：${x}`), ''] : []),
+    ...(draftReason(report) ? ['## 为什么保留草稿',draftReason(report)!, ''] : []), '## Changes', report.diffStat || 'No diff summary.', '',
     '## Validation', ...report.checks.map(c => `- ${c.name}: ${c.status}`), '',
     ...(report.baselineComparison?.eligible ? ['## Draft-only baseline exception',report.baselineComparison.reason,
       ...report.baselineComparison.checks.map(c=>`- ${c.name}: ${c.status}; diagnostic entries: ${c.failureCount}; rounds [patch 1, base 1, patch 2, base 2]: ${c.roundFailureCounts.join(" / ")}; digest: ${c.digest}`),
@@ -138,8 +141,8 @@ export function canPublish(task: Task, project: Project | undefined, report: Del
 }
 
 export function publicationKey(task: Task, project: Project, report: DeliveryReport): string {
-  return createHash('sha256').update(JSON.stringify(['source-validated-draft-v2',task.id, project.path, project.worktree?.github,
-    report.workspace, report.fingerprint, report.validationKey, report.checks, report.baselineComparison, report.commitAuthors, publicationText(task, report)])).digest('hex');
+  return createHash('sha256').update(JSON.stringify(['readable-publication-v3',task.id, project.path, project.worktree?.github,
+    report.workspace, report.fingerprint, report.validationKey, report.checks, report.baselineComparison, report.commitAuthors, report.summary, publicationText(task, report)])).digest('hex');
 }
 
 export type Gh = (cwd: string, args: string[], signal: AbortSignal) => Promise<string>;
@@ -172,14 +175,16 @@ export async function publish(store: Store, config: Config, task: Task, project:
   const list = async () => JSON.parse(await gh(w.path, ['pr', 'list', '--repo', target.repository, '--head', w.branch,
     '--state', 'all', '--json', 'number,url,state,baseRefName,headRefName'], signal)) as Array<{ number: number; url: string; state: string; baseRefName: string; headRefName: string }>;
   let prs = await list();
+  if (prs.some(p => p.state !== 'OPEN' || p.baseRefName !== target.baseBranch) || prs.length > 1) throw new Error('任务分支已有关闭、合并或目标不同的 PR，请创建新任务。');
   const advanced=report.targetBefore!==w.baseSha;
   let draftOnly=!prs.length;
-  if((exception || advanced) && prs.length){
+  const requiresDraft=!!draftReason(report);
+  if((requiresDraft || advanced) && prs.length){
     const existing=JSON.parse(await gh(w.path,['pr','view',String(prs[0].number),'--repo',target.repository,'--json','isDraft'],signal));
     draftOnly=existing.isDraft===true;
     if(exception && !draftOnly)throw Error('例外只适用于草稿 PR；现有 PR 已进入审查，未推送。');
+    if(requiresDraft && !draftOnly && !advanced)throw Error('当前验证仍需保留草稿，现有 PR 已进入审查；未推送，请先处理验证缺口。');
   }
-  if (prs.some(p => p.state !== 'OPEN' || p.baseRefName !== target.baseBranch) || prs.length > 1) throw new Error('任务分支已有关闭、合并或目标不同的 PR，请创建新任务。');
   if(advanced){
     let ancestor=false;
     if(draftOnly){
@@ -219,18 +224,18 @@ export async function publish(store: Store, config: Config, task: Task, project:
   writeFileSync(bodyFile, text.body, { mode: 0o600 });
   if (!prs.length) {
     try { await gh(w.path, ['pr', 'create', '--repo', target.repository, '--head', w.branch, '--base', target.baseBranch,
-      '--draft', '--title', text.title, '--body-file', bodyFile], signal); }
+      ...(requiresDraft ? ['--draft'] : []), '--title', text.title, '--body-file', bodyFile], signal); }
     catch (error) { prs = await list(); if (!prs.length) throw error; }
     prs = await list();
   } else await gh(w.path, ['pr', 'edit', String(prs[0].number), '--repo', target.repository, '--title', text.title, '--body-file', bodyFile], signal);
   const pr = prs[0]; if (!pr) throw new Error('未能回读 PR。');
   const verified = JSON.parse(await gh(w.path, ['pr', 'view', String(pr.number), '--repo', target.repository,
     '--json', 'url,state,headRefName,headRefOid,baseRefName,isDraft'], signal));
-  if (((exception || advanced) && verified.isDraft!==true) || verified.state !== 'OPEN' || verified.headRefName !== w.branch || verified.baseRefName !== target.baseBranch
+  if (typeof verified.isDraft!=='boolean' || (requiresDraft && verified.isDraft!==true) || verified.state !== 'OPEN' || verified.headRefName !== w.branch || verified.baseRefName !== target.baseBranch
     || verified.headRefOid !== head || verified.url !== `https://github.com/${target.repository}/pull/${pr.number}`) throw new Error('PR 回读身份不一致，请在 GitHub 检查。');
-  store.saveDelivery(task.id, { ...report, headSha: head, prUrl: verified.url, publishedSha: head, error: undefined });
+  store.saveDelivery(task.id, { ...report, headSha: head, prUrl: verified.url, prIsDraft:verified.isDraft===true, remotePr:undefined, publishedSha: head, error: undefined });
   if(exception)store.event(task.id,'draft_exception_published',JSON.stringify({url:verified.url,head,base:w.baseSha}));
-  return `草稿 PR 已提交：${verified.url}。${exception?'已按你批准的本次基线例外发布，原有失败摘要列入 PR，检查仍标记为失败。':''}尚未合并或上线。`;
+  return deliveryMessage(store.delivery(task.id)!);
 }
 
 export class WorkspaceExecutor implements Executor {
@@ -257,7 +262,7 @@ export class WorkspaceExecutor implements Executor {
     const initial = await inventory(workspace, signal);
     let report: DeliveryReport = { workspace, mode, ...initial, capturedAt: new Date().toISOString(), checks: [], ready: false, validationKey: validationKey(project),
       commitAuthors: mergeCommitAuthors(previous?.commitAuthors),
-      ...(previous?.prUrl ? { prUrl: previous.prUrl, publishedSha: previous.publishedSha } : {}) };
+      ...(previous?.prUrl ? { prUrl: previous.prUrl, prIsDraft:previous.prIsDraft, remotePr:previous.remotePr, publishedSha: previous.publishedSha } : {}) };
     this.store.saveDelivery(task.id, report);
     try {
       signal.throwIfAborted();
@@ -267,7 +272,7 @@ export class WorkspaceExecutor implements Executor {
         missing:[...(!project.worktree.github ? ['GitHub repository/baseBranch'] : []),...(!project.worktree.checks.length ? ['Steward independent checks'] : [])],
         configurationManagedBy:'Steward; propose baseline.delivery to preview a scoped configuration update'});
       let changingBaseline=false, previewingMerge=false, awaitingClarification=false;
-      const innerHooks={...hooks,...(hooks.askClarification ? {askClarification:(question:string)=>{
+      const innerHooks={...hooks,...(mode==='workspace-write' ? {reportDeliverySummary:(value:import('./delivery-summary.js').DeliverySummary)=>{signal.throwIfAborted();report.summary=parseDeliverySummary(value);}} : {}),...(hooks.askClarification ? {askClarification:(question:string)=>{
         hooks.askClarification!(question);awaitingClarification=true;
       }} : {}),...(hooks.proposeBaseline ? {proposeBaseline:(request:Parameters<NonNullable<RunHooks['proposeBaseline']>>[0])=>{
         hooks.proposeBaseline!(request);changingBaseline=true;

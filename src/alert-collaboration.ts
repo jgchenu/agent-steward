@@ -1,3 +1,4 @@
+import { deliveryMessage } from './delivery-summary.js';
 import { createHash } from 'node:crypto';
 import { alertSourceKey } from './alert-config.js';
 import { alertBindingForTask, alertRepairTask } from './alert-provenance.js';
@@ -38,7 +39,7 @@ export function openAlertTopic(store: Store, config: Config, sourceId: string, s
 }
 
 // Derive the latest run and trusted baseline replacement; never retarget to arbitrary group work.
-function currentTask(store: Store, topic: AlertTopic): Task | undefined {
+export function currentAlertTask(store: Store, topic: AlertTopic): Task | undefined {
   // A later private reassessment must not take over a public repair topic.
   const row=store.db.prepare(`SELECT taskId FROM alert_runs r WHERE sourceKey=? AND issueId=? AND
     (NOT EXISTS(SELECT 1 FROM events WHERE taskId=r.taskId AND kind='alert_assessment_required')
@@ -69,7 +70,7 @@ function currentTask(store: Store, topic: AlertTopic): Task | undefined {
 // The root receipt is committed before the task can execute. Never move an existing DM task.
 function bindGroupTask(store: Store, topic: AlertTopic): void {
   if (!topic.rootId) return;
-  const task=currentTask(store,topic);
+  const task=currentAlertTask(store,topic);
   if (!task || task.chatId!==topic.chatId || task.conversation) return;
   const previous=store.conversationTask(topic.chatId,{anchorId:topic.rootId,sourceId:topic.rootId,scope:'thread'});
   if (previous && previous.id!==task.id) {
@@ -107,9 +108,15 @@ export function awaitingAlertRoot(store: Store, config: Config, task: Task): boo
   return !topic?.rootId || !task.conversation;
 }
 
-function publicPr(config: Config, task: Task, url?: string): string | undefined {
+export function publicPr(config: Config, task: Task, url?: string): string | undefined {
   const repository=config.projects[task.project]?.worktree?.github?.repository;
   if (repository && url && new RegExp(`^https://github\\.com/${repository.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}/pull/[1-9][0-9]*$`).test(url)) return url;
+}
+
+export function alertDescription(store:Store,task:Task):AlertAssessment|undefined {
+  const binding=alertBindingForTask(store,task.id);if(!binding)return;
+  const rows=store.db.prepare("SELECT e.body FROM events e JOIN alert_runs r ON e.taskId=r.taskId WHERE e.kind='alert_assessed' AND r.sourceKey=? AND r.issueId=? ORDER BY e.seq DESC").all(binding.sourceKey,binding.issueId);
+  for(const row of rows){try{const a=JSON.parse(String(row.body));if(a.verdict==='needs_fix')return a;}catch{}}
 }
 
 // Only controller facts are shared. Private prompts, questions, logs and executor prose stay private.
@@ -117,7 +124,7 @@ export function syncAlertTopics(store: Store, config: Config): void {
   const topics=store.db.prepare('SELECT * FROM alert_topics').all() as unknown as AlertTopic[];
   for (const topic of topics) {
     if (!topicAuthorized(config,topic)) continue;
-    const task=currentTask(store,topic);
+    const task=currentAlertTask(store,topic);
     if (!task || task.requesterId || task.requesterRevoked) continue;
     store.transaction(()=>{
       // Restoring the exact destination may retry a root retired before delivery.
@@ -126,7 +133,21 @@ export function syncAlertTopics(store: Store, config: Config): void {
       store.db.prepare('UPDATE alert_topics SET taskId=? WHERE id=?').run(task.id,topic.id);
       bindGroupTask(store,topic);
       // Group-owned tasks use the existing conversational results and approval cards.
-      if (task.chatId===topic.chatId) return;
+      if (task.chatId===topic.chatId) {
+        if(!topic.rootId || !['review','waiting_approval','waiting_input','failed','interrupted','cancelled'].includes(task.status))return;
+        const report=store.delivery(task.id), description=alertDescription(store,task);
+        const pr=publicPr(config,task,report?.prUrl),merged=store.mergeReceipt(task.id) ?? (report?.remotePr?.state==='MERGED'?{url:report.remotePr.url}:undefined);
+        const body=merged && publicPr(config,task,merged.url)
+          ? `${report?.summary?.title ?? description?.summary ?? '修复进展'}\n\n[查看已合并 PR](${merged.url})。上线和效果验证尚未确认。`
+          : report?.remotePr?.state==='CLOSED' && pr ? `${report.summary?.title ?? description?.summary ?? '修复进展'}\n\n[查看已关闭 PR](${pr})。该 PR 未合并，后续处理需重新确认。`
+          : report?.summary && task.status==='review' ? deliveryMessage({...report,prUrl:pr})
+          : `${description?.summary ?? '问题跟进'}\n\n${description?.impact ?? ''}\n${task.status==='waiting_approval'?'有一项操作需要你在本话题确认。':task.status==='waiting_input'?'还需要补充信息，具体问题见本话题。':['failed','interrupted','cancelled'].includes(task.status)?'当前处理已暂停，改动和证据已保留。':pr?`[查看修复 PR](${pr})。下一步是审查和验收。`:'改动已准备，正在确认验证结果和交付范围。'}`;
+        const text=`${body}\n\n[查看 Sentry 问题](${sentryIssueUrl(config.alertSources![topic.sourceId],topic.issueId)})`;
+        const key=`summary:${task.id}:${task.updatedAt}:`+createHash('sha256').update(text).digest('hex');
+        if(!store.db.prepare('INSERT OR IGNORE INTO alert_topic_updates VALUES (?,?)').run(topic.id,key).changes)return;
+        store.enqueue(topic.chatId,text,{kind:'alert-collaboration',topicId:topic.id,updateRoot:true,snapshot:{taskId:task.id,revision:task.updatedAt}});
+        return;
+      }
       const report=store.delivery(task.id), pr=publicPr(config,task,report?.prUrl);
       const merge=store.mergeReceipt(task.id), mergedPr=publicPr(config,task,merge?.url);
       // Monotonic terminal milestones; queued/running churn is intentionally not broadcast.
@@ -152,7 +173,7 @@ export function alertUpdateCurrent(store: Store, config: Config, chatId: string,
   const topic=alertTopic(store,view.topicId);
   if (!topic || topic.chatId!==chatId || !topicAuthorized(config,topic)) return false;
   if (!view.snapshot) return true;
-  const task=currentTask(store,topic);
+  const task=currentAlertTask(store,topic);
   return task?.id===view.snapshot.taskId && task.updatedAt===view.snapshot.revision;
 }
 
@@ -181,7 +202,7 @@ export function receiveAlertEvidence(store: Store, config: Config, message: Inco
   const topic=alertTopic(store,[...ids][0])!;
   if (!topicAuthorized(config,topic) || message.senderType!=='user'
     || (message.senderId!==config.ownerId && !requesterAllowed(config,message.senderId))) return true;
-  const task=currentTask(store,topic);
+  const task=currentAlertTask(store,topic);
   if (!task) return true;
   if (task.chatId===topic.chatId && message.senderId===config.ownerId) return false;
   const quoted=message.conversation.parentId && store.db.prepare('SELECT 1 FROM alert_topic_messages WHERE chatId=? AND messageId=?')
