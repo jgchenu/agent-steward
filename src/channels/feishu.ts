@@ -1,6 +1,6 @@
 import { ownerPrOverview } from '../pr-overview.js';
 import { publicationBlocker, canRequestDraftException } from '../workspace.js';
-import { alertTopic, alertUpdateCurrent, recordTopicMessage } from '../alert-collaboration.js';
+import { alertTopic, alertUpdateCurrent, currentAlertTask, groupAlertSummary, recordTopicMessage } from '../alert-collaboration.js';
 import { evidenceBytes } from '../evidence.js';
 import { createHash } from 'node:crypto';
 import * as lark from '@larksuiteoapi/node-sdk';
@@ -107,8 +107,9 @@ export class FeishuChannel implements Channel {
       const overview=ownerPrOverview(this.store,this.config,chatId);if(!overview)return;
       const content=JSON.stringify({zh_cn:{content:[[{tag:'md',text:overview}]]}}),key='pr-overview:message';
       const existing=this.store.cardMessage(chatId,key);
-      if(existing){const r=await this.client.im.message.update({path:{message_id:existing},data:{msg_type:'post',content}});if(r.code!==0)throw Error('总览更新失败');}
-      else {const r=await this.client.im.message.create({params:{receive_id_type:'chat_id'},data:{receive_id:chatId,msg_type:'post',content,uuid:deliveryId}});if(r.code!==0||!r.data?.message_id)throw Error('总览发送失败');this.store.saveCardMessage(chatId,key,r.data.message_id);}
+      if(existing && await updatePost(()=>this.client.im.message.update({path:{message_id:existing},data:{msg_type:'post',content}}))===0)return;
+      const r=await this.client.im.message.create({params:{receive_id_type:'chat_id'},data:{receive_id:chatId,msg_type:'post',content,uuid:deliveryId}});
+      if(r.code!==0||!r.data?.message_id)throw Error('总览发送失败');this.store.saveCardMessage(chatId,key,r.data.message_id);
       return;
     }
     const collaboration=view?.kind==='alert-collaboration' ? view : undefined;
@@ -117,9 +118,28 @@ export class FeishuChannel implements Channel {
       if (!topic || !alertUpdateCurrent(this.store,this.config,chatId,collaboration)) throw Error('群告警通知授权或进展已变化。');
       if(collaboration.updateRoot){
         if(!topic.rootId)throw Error('话题首条尚未送达');
-        const content=JSON.stringify({zh_cn:{content:[[{tag:'md',text:replyChunks(text).join('\n')}]]}});
-        const r=await this.client.im.message.update({path:{message_id:topic.rootId},data:{msg_type:'post',content}});
-        if(r.code!==0)throw Error('话题摘要更新失败');return;
+        const key=`alert-summary:${topic.id}`,recalled=`alert-root-recalled:${topic.id}`;
+        if(this.store.cardMessage(chatId,recalled))return;
+        const task=currentAlertTask(this.store,topic);if(!task)throw Error('话题任务已变化');
+        // Retry the newest state, not an older queued snapshot of the same revision.
+        const latest=groupAlertSummary(this.store,this.config,topic,task);
+        const content=JSON.stringify({zh_cn:{content:[[{tag:'md',text:replyChunks(latest).join('\n')}]]}});
+        const hash=createHash('sha256').update(content).digest('hex');
+        if(this.store.cardMessage(chatId,`${key}:content`)===hash)return;
+        const existing=this.store.cardMessage(chatId,key)??topic.rootId;
+        const code=await updatePost(()=>this.client.im.message.update({path:{message_id:existing},data:{msg_type:'post',content}}));
+        if(code===230011 && existing===topic.rootId){this.store.saveCardMessage(chatId,recalled,topic.rootId);return;}
+        if(code!==0){
+          // Editing has expired: keep the original topic and one current summary reply.
+          const uuid=createHash('sha256').update(`${key}:${existing}:${hash}`).digest('hex').slice(0,32);
+          let r;
+          try{r=await this.client.im.message.reply({path:{message_id:topic.rootId},data:{msg_type:'post',content,uuid,reply_in_thread:true}});}
+          catch(e){if(messageErrorCode(e)!==230011)throw Error('话题摘要回复失败');this.store.saveCardMessage(chatId,recalled,topic.rootId);return;}
+          if(r.code===230011){this.store.saveCardMessage(chatId,recalled,topic.rootId);return;}
+          if(r.code!==0||!r.data?.message_id)throw Error('话题摘要回复失败');
+          recordTopicMessage(this.store,topic,r.data.message_id,r.data.thread_id,false,key);
+        }
+        this.store.saveCardMessage(chatId,`${key}:content`,hash);return;
       }
       if (collaboration.root && topic.rootId) return;
       if (!collaboration.root && !topic.rootId) throw Error('问题话题尚未送达。');
@@ -223,4 +243,16 @@ export function replyChunks(text: string): string[] {
   }
   if (chunk) chunks.push(chunk);
   return chunks;
+}
+
+// Only explicit platform expiry/recall errors permit a replacement; permission,
+// network and unknown failures stay retryable without producing new messages.
+function messageErrorCode(error:unknown):number|undefined {
+  const e=error as {response?:{data?:{code?:number}}};return e?.response?.data?.code;
+}
+async function updatePost(call:()=>Promise<{code?:number}>):Promise<number> {
+  let code:number|undefined;
+  try{code=(await call()).code;}catch(e){code=messageErrorCode(e);}
+  if(code===0||code===230075||code===230011)return code;
+  throw Error('消息更新失败');
 }

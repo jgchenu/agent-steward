@@ -107,3 +107,33 @@ test('late remote results cannot overwrite a resumed task, changed project grant
   finally{await monitor.stop();f.store.close();}
  }
 });
+
+test('expired group roots get one current summary reply; retries update it with newest remote state',async()=>{
+ const f=fixture(),channel=new FeishuChannel('fake','fake',f.store,f.config),updates:any[]=[],replies:any[]=[];
+ (channel as any).client={im:{message:{update:async(p:any)=>{updates.push(p);if(p.path.message_id==='root')throw {response:{data:{code:230075}}};return {code:0};},reply:async(p:any)=>{replies.push(p);return {code:0,data:{message_id:'latest',thread_id:'thread'}};}}}};
+ try{
+  syncAlertTopics(f.store,f.config);const row=f.store.db.prepare("SELECT * FROM outbox WHERE json_extract(view,'$.updateRoot')=1").get()!,view=JSON.parse(String(row.view));
+  await channel.send('oc_group','stale queued text',String(row.id),view);
+  await channel.send('oc_group','stale queued text','another-old-outbox',view);
+  assert.equal(replies.length,1);assert.equal(replies[0].path.message_id,'root');assert.equal(replies[0].data.reply_in_thread,true);assert.doesNotMatch(replies[0].data.content,/stale queued/);
+  f.store.saveDelivery(f.task.id,{...f.report,prUrl:'https://github.com/example/web/pull/1',remotePr:{url:'https://github.com/example/web/pull/1',state:'MERGED',isDraft:false,headRefOid:'b'.repeat(40),baseRefName:'main',mergedAt:new Date().toISOString(),checkedAt:new Date().toISOString()}});
+  await channel.send('oc_group',String(row.text),'retry-old-state',view);
+  assert.equal(replies.length,1);assert.equal(updates.at(-1).path.message_id,'latest');assert.match(updates.at(-1).data.content,/已合并/);
+ }finally{f.store.close();}
+});
+test('recalled roots stop retrying; permission failures never create replacement messages',async()=>{
+ for(const code of [230011,99991672]){
+  const f=fixture(),channel=new FeishuChannel('fake','fake',f.store,f.config);let updates=0,replies=0;
+  (channel as any).client={im:{message:{update:async()=>{updates++;return {code};},reply:async()=>{replies++;return {code:0,data:{message_id:'unexpected'}};}}}};
+  try{syncAlertTopics(f.store,f.config);const row=f.store.db.prepare("SELECT * FROM outbox WHERE json_extract(view,'$.updateRoot')=1").get()!,send=()=>channel.send('oc_group',String(row.text),String(row.id),JSON.parse(String(row.view)));
+   if(code===230011){await send();await send();assert.equal(updates,1);}else await assert.rejects(send(),/消息更新失败/);
+   assert.equal(replies,0);
+  }finally{f.store.close();}
+ }
+});
+test('expired private overview is replaced once and its new message is reused',async()=>{
+ const f=fixture(),channel=new FeishuChannel('fake','fake',f.store,f.config),updates:string[]=[];let creates=0;
+ f.store.saveCardMessage('oc_dm','pr-overview:message','expired');
+ (channel as any).client={im:{message:{update:async(p:any)=>{updates.push(p.path.message_id);return {code:p.path.message_id==='expired'?230075:0};},create:async()=>{creates++;return {code:0,data:{message_id:'replacement'}};}}}};
+ try{await channel.send('oc_dm','','one',{kind:'pr-overview'});await channel.send('oc_dm','','two',{kind:'pr-overview'});assert.equal(creates,1);assert.deepEqual(updates,['expired','replacement']);}finally{f.store.close();}
+});
