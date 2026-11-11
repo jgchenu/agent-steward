@@ -170,7 +170,7 @@ test('publication attributes the recorded executor, commits validated files, reu
         if (args[1] === 'edit') { edits++; return ''; }
         const pr = { number: 1, url: 'https://github.com/test/repo/pull/1', state: 'OPEN', baseRefName: 'main', headRefName: report.workspace.branch };
         if (args[1] === 'list') return JSON.stringify(creates ? [pr] : []);
-        if (args[1] === 'view') return JSON.stringify({ ...pr, headRefOid: await git(cwd, ['rev-parse', 'HEAD'], sig) });
+        if (args[1] === 'view') return JSON.stringify({ ...pr, isDraft:true, headRefOid: await git(cwd, ['rev-parse', 'HEAD'], sig) });
         throw Error('unexpected gh command');
       };
       await publish(f.store, f.config, f.task, f.project, signal(), gh, repoGit);
@@ -723,4 +723,24 @@ test('draft exception publisher consumes approval, verifies draft state and does
    await assert.rejects(publish(f.store,f.config,f.task,f.project,signal(),gh,repoGit),/配置验证全部通过/);
   }finally{f.close();}
  }
+});
+
+for(const kind of ['ready','browser','advanced'] as const)test(`publisher creates ${kind==='ready'?'ordinary':'draft'} PR for ${kind} verification`,async()=>{
+ const f=fixture();let creates=0;
+ try{
+  await f.executor.run(f.task,f.project,hooks,signal());
+  const report={...f.store.delivery(f.task.id)!,summary:{title:'修复文档内容',problem:'文档内容错误。',change:'改为正确内容。',validation:'内容检查通过。',remaining:kind==='browser'?['浏览器验收尚未完成']:[]}};
+  f.store.saveDelivery(f.task.id,{...report,authorizedKey:publicationKey(f.task,f.project,report)});
+  if(kind==='advanced'){f.g('commit','--allow-empty','-m','upstream');f.g('push','origin','main');}
+  const transport:typeof git=async(cwd,args,sig)=>args[0]==='remote'?'https://github.com/test/repo.git':git(cwd,args,sig);
+  const gh=async(cwd:string,args:string[],sig:AbortSignal)=>{
+   if(args[1]==='create'){creates++;assert.equal(args.includes('--draft'),kind!=='ready');assert.equal(args[args.indexOf('--title')+1],'修复文档内容');return '';}
+   const pr={number:1,url:'https://github.com/test/repo/pull/1',state:'OPEN',baseRefName:'main',headRefName:report.workspace.branch,isDraft:kind!=='ready'};
+   if(args[1]==='list')return JSON.stringify(creates?[pr]:[]);
+   return JSON.stringify({...pr,headRefOid:await git(cwd,['rev-parse','HEAD'],sig)});
+  };
+  const result=await publish(f.store,f.config,f.task,f.project,signal(),gh,transport);
+  assert.equal(f.store.delivery(f.task.id)!.prIsDraft,kind!=='ready');assert.equal(creates,1);assert.match(result,/查看.*PR/);
+  if(kind==='advanced')assert.match(result,/目标分支/);
+ }finally{f.close();}
 });

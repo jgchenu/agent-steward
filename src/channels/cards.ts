@@ -1,3 +1,4 @@
+import { draftReason } from '../delivery-summary.js';
 import { CONVERSATION } from '../conversation.js';
 import { codeSourceSummary, codeSourceDetails, configuredCheckSummary } from '../code-source.js';
 import type { Config, Intent, Status, View } from '../types.js';
@@ -90,6 +91,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     if ((page + 1) * 3 < tasks.length) nav.push(button('下一页', { op: 'list', page: page + 1 }));
     return card('我的任务', `最近 ${tasks.length} 项 · 第 ${page + 1} 页 · 点击任务查看详情`, 'grey', [...(items.length ? items : [box('还没有任务。从一个小任务开始吧。')]), row(...nav)]);
   }
+  if (view.kind === 'pr-overview') throw Error('私聊总览只支持普通消息。');
   if (view.kind === 'alert-collaboration') throw Error('群告警进展只支持普通消息。');
   const task = store.get(view.taskId);
   if (!task || task.chatId !== chatId || (requesterId && (task.requesterId !== requesterId || task.requesterRevoked))) return card('任务不可用', '请重新打开任务列表', 'grey', [box('找不到当前会话中的任务。'), homeButton()]);
@@ -105,20 +107,28 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     text(codeSourceDetails(report, project, !!conversation)),
     row(button('返回任务', intent('status')), ...(report ? [button('查看交付', intent('delivery'))] : [])),
   ]);
+  if(view.kind==='publication-receipt'){
+    const finished=task.status==='review'&&task.nextAction==='publish'&&!!report?.prUrl;
+    return card(finished?'PR 已提交':task.status==='failed'?'发布未完成':'已收到发布授权',projectLabel(task.project),finished?'green':'grey',[
+      {tag:'markdown',content:finished?`[查看 PR](${report!.prUrl})。本次授权已使用，尚未合并或上线。`:task.status==='failed'?'本次发布未完成。请查看话题内的原因；再次发布需要重新确认。':'正在提交改动并创建 PR，本次按钮已使用。'},
+    ]);
+  }
   if (view.kind === 'publication') {
     const exception=canRequestDraftException(task,project,report);
     const blocker = publicationBlocker(task, project, report, view.publicationTarget, exception);
     if (!report || blocker) return card('暂不能交付 PR', projectLabel(task.project), 'orange', [
       box(blocker ?? '请先完成代码验证。'), button('返回任务', intent('status'), true)]);
-    const target = project.worktree!.github!, preview = publicationText(task, report);
+    const target = project.worktree!.github!, preview = publicationText(task, report),reason=draftReason(report);
     const fits = Buffer.byteLength(preview.body) < 20_000;
-    return card(exception ? '批准本次草稿 PR 例外' : report.prUrl ? '更新现有 PR' : '创建草稿 PR', `${target.repository} → ${target.baseBranch}`, 'blue', [
-      ...(exception ? [box(`${report.baselineComparison!.reason}\n仅批准当前补丁发布为草稿；原有失败会写入 PR，默认检查不变。文件、目标或检查配置变化后必须重新验证并批准。`)] : []),
+    return card(exception ? '确认提交修复草稿' : report.prUrl ? '更新现有 PR' : reason?'创建草稿 PR':'提交 PR 供审查', `${target.repository} → ${target.baseBranch}`, 'blue', [
+      ...(exception ? [box(`${report.baselineComparison!.equivalent?'对照检查未发现新增失败，但全量检查仍未通过。':'这次的失败已在原代码中复现，但测试有波动，仍需审查。'}\n只确认本次草稿发布。检查失败会保留在 PR 中；改动或验证范围变化后需要重新确认。`)] : []),
       box('这一步会提交改动、推送任务分支并创建或更新 GitHub PR。不会合并代码或部署。'),
-      box('检查仅覆盖任务源分支。目标分支正常前进时，可以先发布草稿供审查；这不代表与最新目标合并后的检查通过。'),
-      { tag: 'collapsible_panel', expanded: true, header: { title: plain(preview.title) }, elements: [
+      ...(reason?[box(`为什么保留草稿：${reason}`)]:[box('配置检查和已声明的必要验证完成，可以提交普通 PR 供审查；不代表获准合并。')]),
+      box('如果目标代码在确认后更新，将保留草稿，等待集成验证。'),
+      ...(report.summary?[text(report.summary.change)]:[]),
+      { tag: 'collapsible_panel', expanded: false, header: { title: plain(preview.title+' · 展开查看文件与验证') }, elements: [
         text(fits ? preview.body : '交付说明过长，无法完整预览。请缩小任务范围后再发布。')] },
-      row(...(fits ? [button(exception ? '仅本次发布草稿' : report.prUrl ? '确认更新 PR' : '确认创建草稿 PR', { ...intent(exception?'publish-exception':'publish'), publicationKey: publicationKey(task, project, report) }, true,
+      row(...(fits ? [button(exception ? '仅本次发布草稿' : report.prUrl ? '确认更新 PR' : reason?'确认创建草稿 PR':'确认提交 PR', { ...intent(exception?'publish-exception':'publish'), publicationKey: publicationKey(task, project, report) }, true,
         `将这些改动发布到 ${target.repository} 的任务分支，目标 ${target.baseBranch}。不会自动合并。`)] : []), button('返回交付', intent('delivery'))),
     ]);
   }

@@ -99,7 +99,8 @@ test('continued runs do not enqueue duplicate source receipts after preparation 
     engine.receive({id:'start',senderId:'owner',senderType:'user',chatId:'dm',chatType:'p2p',text:'/edit demo work'});
     await waitResult('result-1');
     const task = store.list()[0];
-    const receipts = () => sent.filter(text=>text.startsWith('正在处理')).length;
+    const receipts = () => Number(store.db.prepare("SELECT count(*) n FROM events WHERE kind='code_source_receipt'").get()!.n);
+    assert.equal(sent.filter(text=>text.startsWith('正在处理')).length,0);
     assert.equal(receipts(),1);
     engine.receive({id:'continue',senderId:'owner',senderType:'user',chatId:'dm',chatType:'p2p',text:`/continue ${task.id} continue`});
     await waitResult('result-2'); assert.equal(receipts(),1);
