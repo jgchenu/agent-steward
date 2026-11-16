@@ -1,3 +1,4 @@
+import {prioritizeDailyFindings} from '../daily-priority.js';
 import type { DailyReport, DailyFinding } from '../sentry-daily.js';
 const plain=(content:string)=>({tag:'plain_text',content});
 const md=(content:string,extra:Record<string,unknown>={})=>({tag:'markdown',content,...extra});
@@ -13,7 +14,8 @@ const section=(title:string,items:unknown[])=>row([column([md(`**${title}**`),..
 const item=(f:DailyFinding,description=false)=>row([column([
   md(`**${issueLink(f)}**`),
   md(`报错 ${f.count} 次　·　用户 ${f.users} 人　·　较前日 ${f.count===f.previous?'持平':`${f.count>f.previous?'↑':'↓'}${Math.abs(f.count-f.previous)} 次`}`,{text_size:'notation'}),
-  ...(description?[md(compact(f.description))]:[]),
+  ...(description?[md(f.category==='repair'?compact(f.description):'用户覆盖较多，优先核实业务影响。')]:[]),
+  ...(f.prs.some(p=>p.label==='已合并')?[md('上线核验：缺少部署版本与事件 release 对照，尚不能判断修复生效。',{text_size:'notation'})]:[]),
   ...(f.prs.length?[md(prLinks(f))]:[])
 ])]);
 export function dailyCard(d:DailyReport):Record<string,unknown>{
@@ -30,13 +32,8 @@ export function dailyCard(d:DailyReport):Record<string,unknown>{
     else if(label==='待合并 · 草稿'||label==='待合并 · 待审查')prCounts.pending++;
     else prCounts.unknown++;
   }
-  const rank=(a:DailyFinding,b:DailyFinding)=>b.users-a.users||b.count-a.count;
-  // Keep categories disjoint in the expanded view; every PR is retained in the fold.
-  const linked=d.findings.filter(f=>f.prs.length).sort(rank),progress=linked.slice(0,3);
-  const pending=d.findings.filter(f=>!f.prs.length&&!f.isNew&&(f.category==='investigate'||f.category==='repair')).sort(rank).slice(0,4);
-  const added=d.findings.filter(f=>f.isNew),fresh=added.filter(f=>!progress.includes(f)).slice(0,6);
-  const visible=new Set([...progress,...pending,...fresh]);
-  const rest=d.findings.filter(f=>!visible.has(f));
+  const {primary,secondary,other:rest}=prioritizeDailyFindings(d.findings);
+  const visible=new Set([...primary,...secondary]);
   const detail=rest.slice(0,30);
   for(const f of rest.slice(30))if(f.prs.length)detail.push(f);
   const trend=d.previousTotal?d.total===d.previousTotal?'与前日持平':`${d.total>d.previousTotal?'↑':'↓'}${(Math.abs(d.total-d.previousTotal)/d.previousTotal*100).toFixed(1)}%`:'前日无报错';
@@ -46,13 +43,16 @@ export function dailyCard(d:DailyReport):Record<string,unknown>{
     metricRow([['待合并',prCounts.pending],['已合并',prCounts.merged],['已关闭',prCounts.closed]]),
     md(`报错较前日 ${trend} · PR 按链接去重${prCounts.unknown?` · ${prCounts.unknown} 个状态待核实`:''}`,{text_size:'notation'})
   ],'8px')])];
-  if(progress.length)elements.push({tag:'hr'},section(`01　修复进展 · ${linked.length} 个问题 / ${uniquePrs.size} 个 PR${linked.length>progress.length?'（展开前 3 项）':''}`,progress.map(f=>item(f,true))));
-  if(pending.length)elements.push({tag:'hr'},section('02　仍需排查 · 暂无关联 PR',pending.map(f=>item(f))));
-  if(fresh.length)elements.push({tag:'hr'},section(`03　昨日新增 · ${d.newCount} 个 / ${added.reduce((n,f)=>n+f.count,0)} 次${fresh.length<added.length?`（此处展示 ${fresh.length} 项）`:''}`,fresh.map(f=>item(f))));
-  if(!d.findings.length)elements.push(md('昨天没有记录到错误问题。'));
-  elements.push({tag:'collapsible_panel',expanded:false,header:{title:plain('其余问题、分析详情与统计口径')},padding:'0px',vertical_spacing:'4px',elements:[
-    md(`**分类**\n已有修复分析 ${category('repair')}；待核查 ${category('investigate')}；历史噪音 ${category('noise')}；预期情况 ${category('expected')}。`),
-    ...[...visible].filter(f=>f.title.length>64||progress.includes(f)).map(f=>md(`**${safe(f.title)}**\n${safe(f.description)}`)),
+  const comparison=d.previousTotal?(d.total===d.previousTotal?'与前日持平':`较前日${d.total>d.previousTotal?'增加':'减少'} ${(Math.abs(d.total-d.previousTotal)/d.previousTotal*100).toFixed(1)}%`):'前日无报错记录';
+  const overview=!d.findings.length?'昨天没有记录到错误问题。':primary.length
+    ?`昨日报错${comparison}。优先跟进：${primary.map(f=>compact(f.title,42)).join('；')}。${primary.some(f=>f.category==='repair')?'已有修复记录需核对处理结果；':''}${primary.some(f=>f.category==='investigate')?'未归因问题先核实影响。':''}`
+    :`昨日报错${comparison}；目前仅有历史噪音或预期情况的分析记录，仍需留意来源变化。`;
+  elements.push(section('昨日总结',[md(overview),md(`重点 ${primary.length} 项 · 次要 ${secondary.length} 项 · 其他 ${rest.length} 项。分类表示排查顺序，不代表已确认的故障等级。`,{text_size:'notation'})]));
+  if(primary.length)elements.push({tag:'hr'},section('01　重点问题 · 优先跟进',primary.map(f=>item(f,true))));
+  if(secondary.length)elements.push({tag:'hr'},section('02　次要问题 · 继续观察',secondary.map(f=>item(f))));
+  elements.push({tag:'collapsible_panel',expanded:false,header:{title:plain(`03　其他 · ${rest.length} 项 / 详细分析与统计口径`)},padding:'0px',vertical_spacing:'4px',elements:[
+    md(`**分类依据**\n优先跟进有修复分析的问题，再按涉及用户数安排未归因问题；次要项优先保留新增问题。历史噪音、预期情况和未展开问题归入其他。PR 存在不代表问题严重，报错次数不等于业务影响。\n已有修复分析 ${category('repair')}；待核查 ${category('investigate')}；历史噪音 ${category('noise')}；预期情况 ${category('expected')}。`),
+    ...[...visible].filter(f=>f.title.length>64||primary.includes(f)).map(f=>md(`**${safe(f.title)}**\n${safe(f.description)}`)),
     ...detail.map(f=>md(`[${safe(f.title)}](${f.url}) · ${stats(f)}${f.isNew?' · 新增':''}\n${prLinks(f)||'暂无关联 PR 记录'}`)),
     md(`[查看当天全部 ${d.issueCount} 个问题](${d.allIssuesUrl})${rest.length>30?' · 此处列出其余问题中报错最多的 30 个，全部关联 PR 均保留。':''}`),
     md(`**口径**\n${d.date} 00:00–24:00（${safe(d.timezone)}），${safe(d.environment)}，覆盖所有状态的错误问题。人数按问题去重，不可相加；报错不等于业务失败。历史分析不代表昨日每条事件都已核实。新增按首次出现时间计算${d.unknownFirstSeen?`；${d.unknownFirstSeen} 个问题缺少首次出现时间，未计入新增`:''}。`),
