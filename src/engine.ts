@@ -1,3 +1,6 @@
+import { alertBindingForTask } from './alert-provenance.js';
+import { activityReport } from './activity-report.js';
+import { applySchedule, parseSchedule, schedules, scheduleAuthorized, scheduleCatalog, scheduleRevision, runDueSchedule, scheduledDeliveryAllowed, retireScheduledReport, reportDelivered, type ScheduleProposal } from './schedules.js';
 import { deliveryMessage, draftReason } from './delivery-summary.js';
 import { syncOwnerPrOverviews } from './pr-overview.js';
 import { alertGroupContext, alertUpdateCurrent, awaitingAlertRoot, isAlertRootTurn, isGroupAlertTask, receiveAlertEvidence, syncAlertTopics } from './alert-collaboration.js';
@@ -43,6 +46,8 @@ const HELP = `Agent Steward · 个人 Agent 分身（预览版）
 export class Engine {
   private active = new Map<string, { task: Task; abort: AbortController; done: Promise<void> }>();
   private pending = new Map<string, HumanRequest>();
+  private reportRun?:Promise<void>;
+  private reportAbort=new AbortController();
   private timer?: ReturnType<typeof setInterval>;
   private flushPromise?: Promise<void>;
   private stopped = false;
@@ -85,7 +90,7 @@ export class Engine {
     const runs = [...this.active.values()];
     const broadest = runs.map(r => r.task.permissionMode ?? 'ask').sort((a,b) => permissionRank(b)-permissionRank(a))[0];
     const selection = runs.length === 1 ? runs[0].task.modelSelection : undefined;
-    return { trustedRequesterIds:(this.config.trustedRequesters ?? []).map(p=>p.openId).sort(), permissionMode: permissionMode(this.config), activeMode: broadest, active: runs.length > 0, activeCount: runs.length, maxConcurrentTasks: this.config.maxConcurrentTasks,
+    return { trustedRequesterIds:(this.config.trustedRequesters ?? []).map(p=>p.openId).sort(), permissionMode: permissionMode(this.config), activeMode: broadest, active: runs.length > 0 || !!this.reportRun, activeCount: runs.length + (this.reportRun ? 1 : 0), maxConcurrentTasks: this.config.maxConcurrentTasks,
       ...(this.config.modelSelection ? {modelSelection:this.config.modelSelection} : {}), ...(selection ? {activeModelSelection:selection} : {}) };
   }
   start(): void {
@@ -477,6 +482,7 @@ export class Engine {
   }
   private canDispatch(task: Task): boolean {
     if (awaitingAlertRoot(this.store,this.config,task)) return false;
+    if (this.reportRun) return false;
     if (this.active.size >= (this.config.maxConcurrentTasks ?? 2) || this.active.has(task.id)) return false;
     for (const run of this.active.values()) {
       // Keep all code/Git actions serial; general read-only conversations may overlap them.
@@ -491,6 +497,11 @@ export class Engine {
     if (this.stopped) return;
     for (const id of this.store.transaction(() => revokeRequesters(this.store,this.config))) this.active.get(id)?.abort.abort(new Error('来访者授权已撤销'));
     this.store.expireOperations();
+    if(!this.active.size&&!this.reportRun&&schedules(this.store).some(s=>scheduleAuthorized(this.config,s)&&s.nextDue<=Date.now()
+      &&!this.store.db.prepare('SELECT 1 FROM schedule_runs WHERE scheduleId=? AND delivered=0 AND (outboxId IS NOT NULL OR retryAt>?)').get(s.id,Date.now()))){
+      this.reportRun=runDueSchedule(this.store,this.config,{alert_activity:(s,start,end,signal)=>activityReport(this.store,this.config,s,start,end,signal)},this.reportAbort.signal)
+        .catch(()=>{/* durable run is retried; never crash the service timer */}).finally(()=>{this.reportRun=undefined;});
+    }
     const queued = this.store.list().filter(t => t.status === 'queued').sort((a,b) => a.updatedAt.localeCompare(b.updatedAt));
     for (const candidate of queued) {
       if (!this.canDispatch(candidate)) {
@@ -534,12 +545,15 @@ export class Engine {
       let baseline: BaselineProposal | undefined;
       let merge: MergeProposal | undefined;
       let assessment: AlertAssessment | undefined;
+      let schedule:ScheduleProposal|undefined;
       const assessing=isAlertAssessment(this.store,task.id);
       const grantKey = projectGrantKey(project);
       const resources = Object.entries(this.config.projects);
       const resourceCatalog = resources.map(([id,p]) => ({id,kind:'code-project',name:p.label ?? id,aliases:[...(p.aliases ?? [])],description:p.description ?? '',capability:p.sandbox}));
       const resourceGrants = Object.fromEntries(resources.map(([id,p]) => [id,projectGrantKey(p)]));
+      const recurringRevision=scheduleRevision(this.store,this.config);
       const hooks: RunHooks = {
+        ...(!task.requesterId&&!task.requesterRevoked&&!assessing&&!alertBindingForTask(this.store,task.id)&&(!task.nextAction||task.nextAction==='execute') ? {proposeSchedule:(value:ScheduleProposal)=>{abort.signal.throwIfAborted();if(schedule)throw Error('每轮只能设置一个定时安排。');if(scheduleRevision(this.store,this.config)!==recurringRevision)throw Error('定时配置或授权已变化，请按最新安排重试。');schedule=parseSchedule(value);}} : {}),
         ...(assessing ? {reportAlertAssessment:(value:AlertAssessment)=>{
           abort.signal.throwIfAborted();
           if (task.mode!=='read-only' || assessment) throw Error('告警初筛只能提交一次只读诊断。');
@@ -641,9 +655,10 @@ export class Engine {
       if (groupEvidence) executionTask={...executionTask,contextSnapshot:executionTask.contextSnapshot
         ? {...executionTask.contextSnapshot,summary:executionTask.contextSnapshot.summary+'\n'+groupEvidence.summary,
           messages:[...executionTask.contextSnapshot.messages,...groupEvidence.messages]} : groupEvidence};
-      executionTask = { ...executionTask, sentryMcp:sentryMcpForTask(this.store,this.config,task), projectCandidates: hooks.proposeProject ? Object.keys(resourceGrants) : undefined,
+      executionTask = { ...executionTask, scheduleRevision:recurringRevision, sentryMcp:sentryMcpForTask(this.store,this.config,task), projectCandidates: hooks.proposeProject ? Object.keys(resourceGrants) : undefined,
         projectCandidateGrants: hooks.proposeProject ? resourceGrants : undefined,
         routingContext: JSON.stringify({ currentProject: task.project === CONVERSATION ? null : project.label ?? task.project,
+        recurringReports:hooks.proposeSchedule?scheduleCatalog(this.store,this.config,task):undefined,
         resources: task.resources ?? [],
         resourcePolicy: 'Tasks need no space by default. Propose a code project only when completing the goal requires its files. Business wording and named products alone do not require code access.',
         workflow: {availableOperations:[...(hooks.proposePublication ? ['publication'] : []),...(hooks.proposeBaseline ? ['baseline'] : []),...(hooks.proposeMerge ? ['merge_preview'] : [])],
@@ -674,13 +689,14 @@ export class Engine {
         else result = `${result}\n\n这次使用 ${candidate.label ?? proposed.project} 代码资源处理，对吗？回复“对的”即可分配工作区并继续，也可以直接告诉我其他项目名称。`;
       }
       const report = this.store.delivery(task.id);
-      if ([!!proposed,!!publication,!!baseline,!!merge].filter(Boolean).length > 1) throw Error('每轮只能提议一个 Steward 操作。');
+      if ([!!schedule,!!proposed,!!publication,!!baseline,!!merge].filter(Boolean).length > 1) throw Error('每轮只能提议一个 Steward 操作。');
       if ((publication || baseline || merge) && (!this.config.projects[task.project] || projectGrantKey(this.config.projects[task.project]) !== grantKey)) {
         throw new Error('项目交付配置已变化，请按当前配置重新准备 PR。');
       }
-      const publicResult=report && task.mode==='workspace-write' && (report.summary || task.nextAction==='publish' || isGroupAlertTask(this.store,task)) && !baseline && !merge
+      let publicResult=report && task.mode==='workspace-write' && (report.summary || task.nextAction==='publish' || isGroupAlertTask(this.store,task)) && !baseline && !merge
         ? deliveryMessage(report) : result;
       this.store.transaction(() => {
+        if(schedule){if(scheduleRevision(this.store,this.config)!==recurringRevision)throw Error('定时配置或授权已变化，请按最新安排重试。');result=applySchedule(this.store,this.config,task,schedule);publicResult=result;}
         this.store.set(task.id, 'review', result);
         if (assessment) completeAlertAssessment(this.store,this.config,task,assessment);
         if (automaticallySelected) {
@@ -759,10 +775,11 @@ export class Engine {
   private async drain(): Promise<void> {
       syncAlertTopics(this.store,this.config);
       syncOwnerPrOverviews(this.store,this.config);
-      let item;
+      let item:import('./store.js').Outgoing|undefined;
       while ((item = this.store.outgoing())) {
         try {
           const view = item.view ? JSON.parse(item.view) as View : undefined;
+          if(view?.kind==='scheduled-report'&&!scheduledDeliveryAllowed(this.store,this.config,view.runId,item.chatId)){this.store.transaction(()=>{this.store.retireOutgoing(item!.id);retireScheduledReport(this.store,view.runId);});continue;}
           if (view?.kind==='alert-collaboration' && !alertUpdateCurrent(this.store,this.config,item.chatId,view)) { this.store.retireOutgoing(item.id);continue; }
           if (view && 'taskId' in view) {
             const task=this.store.get(view.taskId);
@@ -773,13 +790,13 @@ export class Engine {
           }
           if (view?.requesterId && (!requesterAllowed(this.config,view.requesterId) || (view.conversation && !this.config.groupChats)
             || ('taskId' in view && this.store.get(view.taskId)?.requesterRevoked))) { this.store.delivered(item.id);continue; }
-          await this.channel.send(item.chatId, item.text, item.id, view); this.store.delivered(item.id);
+          await this.channel.send(item.chatId, item.text, item.id, view); this.store.transaction(()=>{this.store.delivered(item!.id);if(view?.kind==='scheduled-report')reportDelivered(this.store,view.runId);});
         }
         catch { this.store.retry(item.id, item.attempts); }
       }
   }
   async stop(): Promise<void> {
-    this.stopped = true; clearInterval(this.timer);
+    this.stopped = true; clearInterval(this.timer);this.reportAbort.abort();await this.reportRun;
     const runs = [...this.active.values()];
     for (const run of runs) run.abort.abort(new Error('服务停止'));
     await Promise.all(runs.map(run => run.done));

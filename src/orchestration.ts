@@ -1,3 +1,4 @@
+import { parseSchedule, type ScheduleProposal } from './schedules.js';
 import { Annotation, Command, END, START, StateGraph, interrupt } from '@langchain/langgraph';
 import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite';
 import { projectGrantKey } from './routing.js';
@@ -8,6 +9,7 @@ import type { BaselineProposal, Executor, Project, PublicationTarget, RunHooks, 
 import type { MergeProposal } from './operation-intent.js';
 
 interface Outcome {
+  schedule?:ScheduleProposal; scheduleRevision?:string;
   message: string; question: string | null;
   projectId?: string; projectGrantKey?: string;
   publication?: PublicationTarget; baseline?: BaselineProposal; merge?: MergeProposal;
@@ -47,6 +49,7 @@ export class TaskOrchestrator {
         this.store.db.prepare('INSERT INTO graph_operations VALUES (?,?,?,NULL)').run(id,task.id,grant);
         const outcome: Outcome = {message:'',question:null};
         const capture: RunHooks = {...hooks,
+          ...(hooks.proposeSchedule ? {proposeSchedule:(p:ScheduleProposal)=>{outcome.schedule=parseSchedule(p);outcome.scheduleRevision=task.scheduleRevision;}} : {}),
           ...(hooks.reportAlertAssessment ? {reportAlertAssessment:(a:AlertAssessment)=>{outcome.alertAssessment=parseAlertAssessment(a);}} : {}),
           askClarification: question => {outcome.question=clarification(question);},
           ...(hooks.proposeProject ? {proposeProject:(id:string)=>{
@@ -60,7 +63,7 @@ export class TaskOrchestrator {
         };
         outcome.message = await executor.run({...task,prompt:state.prompt,threadId:this.store.get(task.id)!.threadId},project,capture,signal);
         signal.throwIfAborted();
-        if ([!!outcome.question,!!outcome.projectId,!!outcome.publication,!!outcome.baseline,!!outcome.merge,!!outcome.alertAssessment].filter(Boolean).length > 1) throw Error('每轮只能提出一个业务问题或操作。');
+        if ([!!outcome.schedule,!!outcome.question,!!outcome.projectId,!!outcome.publication,!!outcome.baseline,!!outcome.merge,!!outcome.alertAssessment].filter(Boolean).length > 1) throw Error('每轮只能提出一个业务问题或操作。');
         this.store.db.prepare('UPDATE graph_operations SET result=? WHERE id=?').run(JSON.stringify(outcome),id);
         return {outcome};
       })
@@ -95,6 +98,7 @@ export class TaskOrchestrator {
       if(task.projectCandidateGrants?.[outcome.projectId] !== outcome.projectGrantKey) throw Error('代码资源授权已变化，保存的提议不能继续。');
       hooks.proposeProject?.(outcome.projectId);
     }
+    if (outcome.schedule) {if(outcome.scheduleRevision!==task.scheduleRevision)throw Error('定时配置或授权已变化，旧提议不能继续。');hooks.proposeSchedule?.(parseSchedule(outcome.schedule));}
     if (outcome.publication) hooks.proposePublication?.(outcome.publication);
     if (outcome.baseline) hooks.proposeBaseline?.(outcome.baseline);
     if (outcome.merge) hooks.proposeMerge?.(outcome.merge);
