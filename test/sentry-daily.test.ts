@@ -21,7 +21,7 @@ test('daily rejects partial/mis-scoped or looping inventory instead of claiming 
 });
 test('approved card is a single bounded hierarchy with truthful PR status and safe remote prose',()=>{
   const card=dailyCard({title:'Example',date:'2026-11-15',timezone:'Asia/Shanghai',environment:'production',checkedAt:'2026-11-16T02:00:00Z',total:50,previousTotal:100,issueCount:1,newCount:0,unknownFirstSeen:0,allIssuesUrl:'https://example.sentry.io/issues/',findings:[{id:'1',title:'<at id=all>Oops</at>',count:50,users:3,firstSeen:'2025-01-01',url:'https://example.sentry.io/issues/1/',previous:100,isNew:false,category:'repair',description:'已有修复',prs:[{url:'https://github.com/example/app/pull/1',label:'已合并'}]}]});
-  const json=JSON.stringify(card);assert.match(json,/已合并不代表已部署/);assert.match(json,/50.0%/);assert.doesNotMatch(json,/<at|"callback"|"form"/);assert.ok((card.body as {elements:unknown[]}).elements.length<=5);
+  const json=JSON.stringify(card);assert.match(json,/已合并不代表已部署/);assert.match(json,/50.0%/);assert.doesNotMatch(json,/<at|"callback"|"form"/);assert.ok((card.body as {elements:unknown[]}).elements.filter((e:any)=>e.tag!=='hr').length<=5);
 });
 
 test('top PR summary deduplicates associations and includes draft, closed and unknown states',()=>{
@@ -45,11 +45,28 @@ test('dense card bounds expanded categories without duplicating issues or losing
   const d={title:'Example',date:'2026-11-15',timezone:'Asia/Shanghai',environment:'production',checkedAt:'now',total:100,previousTotal:100,issueCount:50,newCount:8,unknownFirstSeen:0,allIssuesUrl:'https://example.sentry.io/issues/',findings};
   const card=dailyCard(d),elements=(card.body as any).elements;assert.equal(elements.filter((e:any)=>e.tag!=='hr').length,5);
   assert.equal((card.header as any).title.content,'Example｜Sentry 报错与修复进展');
-  assert.equal(elements.filter((e:any)=>e.tag==='hr').length,3);
+  assert.equal(elements.filter((e:any)=>e.tag==='hr').length,2);
   const expanded=JSON.stringify(elements.slice(0,-1));assert.doesNotMatch(expanded,/background_style|heading-1/);
   for(const f of findings){const count=expanded.split(`](${f.url})`).length-1;assert.ok(count<=1);}
-  assert.equal((expanded.match(/https:\/\/example.sentry.io\/issues\/\d+\//g)||[]).length,13);
+  assert.equal((expanded.match(/https:\/\/example.sentry.io\/issues\/\d+\//g)||[]).length,8);
   for(const f of findings.filter(f=>f.prs.length))assert.ok(JSON.stringify(card).includes(f.prs[0].url));
-  assert.match(expanded,/展开前 3 项/);assert.match(expanded,/此处展示 6 项/);
+  assert.match(expanded,/昨日总结/);assert.match(expanded,/重点问题/);assert.match(expanded,/次要问题/);assert.match(JSON.stringify(card),/其他/);
   assert.match(JSON.stringify(dailyCard({...d,total:0,findings:[],issueCount:0,newCount:0})),/昨天没有记录到错误问题/);
+});
+
+
+test('priority is an evidence-aware agenda: no title-based severity or volume-based noise promotion',async()=>{
+  const {prioritizeDailyFindings}=await import('../src/daily-priority.js');
+  const make=(id:string,category:'repair'|'noise'|'expected'|'investigate',users:number,count:number,isNew=false)=>({id,title:'Payment outage CRITICAL',category,users,count,isNew,previous:0,firstSeen:'2026-11-15',url:'https://example.sentry.io/issues/'+id,description:'recorded',prs:[]});
+  const repair=make('1','repair',1,1),unknown=make('2','investigate',40,50),noise=make('3','noise',1000,99999),expected=make('4','expected',900,90000),newIssue=make('5','investigate',1,2,true);
+  const classified=prioritizeDailyFindings([noise,expected,newIssue,unknown,repair]);
+  assert.deepEqual(classified.primary.map(x=>x.id),['1','2']);assert.deepEqual(classified.secondary.map(x=>x.id),['5']);assert.deepEqual(classified.other.map(x=>x.id),['3','4']);
+});
+
+test('daily summary changes with counts and PR states without claiming deployment or resolution',()=>{
+  const f={id:'1',title:'Editor error',count:50,users:40,previous:100,isNew:false,category:'repair' as const,firstSeen:'2025-01-01',url:'https://example.sentry.io/issues/1/',description:'Recorded repair',prs:[{url:'https://github.com/example/app/pull/1',label:'待合并 · 草稿'}]};
+  const d={title:'Example',date:'2026-11-15',timezone:'Asia/Shanghai',environment:'production',checkedAt:'now',total:50,previousTotal:100,issueCount:1,newCount:0,unknownFirstSeen:0,allIssuesUrl:'https://example.sentry.io/issues/',findings:[f]};
+  const before=JSON.stringify(dailyCard(d));assert.match(before,/减少 50.0%/);assert.match(before,/待合并 \*\*1\*\*/);
+  const after=JSON.stringify(dailyCard({...d,date:'2026-11-16',total:60,previousTotal:50,findings:[{...f,count:60,previous:50,prs:[{...f.prs[0],label:'已合并'}]}]}));
+  assert.match(after,/增加 20.0%/);assert.match(after,/已合并 \*\*1\*\*/);assert.match(after,/缺少部署版本与事件 release 对照/);assert.doesNotMatch(after,/线上效果待验证|修复已生效|问题已解决/);
 });
