@@ -115,7 +115,7 @@ test('merge completion patches the existing approval card and sends a concise re
    f.store.set(f.task.id,'review','旧回复：不能合并');
    send('merge','合并 PR '+url);
    await until(()=>f.store.requests(f.task.id).length>0);
-   const approval=replies.find(p=>p.data.msg_type==='interactive');assert.ok(approval);
+   const approval=replies.find(p=>p.data.content.includes('actionId'));assert.ok(approval);
    const request=f.store.requests(f.task.id)[0];
    if(outcome==='failed') f.pr.headRefOid='d'.repeat(40);
    send('answer',`${outcome==='declined'?'/deny':'/approve'} ${request.id}`);

@@ -84,7 +84,7 @@ test('root and replies survive restart, retry without cards and bind only collab
     await channel(store).send('oc_group','进展','progress',{kind:'alert-collaboration',topicId:topic.id});
     await channel(store).send('oc_group','进展','progress',{kind:'alert-collaboration',topicId:topic.id});
     assert.equal(sent.length,2);assert.equal(sent[1][1].path.message_id,'root');assert.equal(sent[1][1].data.reply_in_thread,true);
-    assert.equal(sent[1][1].data.msg_type,'post');assert.equal(store.conversationTask('oc_group',{anchorId:'root',sourceId:'x',scope:'thread'}),undefined);
+    assert.equal(sent[1][1].data.msg_type,'interactive');assert.equal(store.conversationTask('oc_group',{anchorId:'root',sourceId:'x',scope:'thread'}),undefined);
     assert.equal(store.db.prepare('SELECT count(*) n FROM alert_topic_messages').get()!.n,3);
     delete f.config.alertSources!.web.collaborationChatId;
     await assert.rejects(()=>channel(store).send('oc_group','no','revoked',{kind:'alert-collaboration',topicId:topic.id}));

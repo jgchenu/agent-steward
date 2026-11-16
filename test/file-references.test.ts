@@ -41,7 +41,7 @@ test('Feishu sends source and task-worktree citations as text, preserving web li
     await channel.send('group',text,'delivery',{kind:'reply',taskId:task.id});
     await channel.send('group',text,'delivery',{kind:'reply',taskId:task.id});
     assert.equal(sent.length,1);
-    assert.equal(JSON.parse(sent[0].data.content).zh_cn.content[0][0].text,'依据：`src/Login.tsx:131`、`config.ts#L2`。[PR](https://github.com/example/repo/pull/1)');
+    assert.equal(JSON.parse(sent[0].data.content).body.elements[0].columns[0].elements[0].content,'依据：`src/Login.tsx:131`、`config.ts#L2`。[PR](https://github.com/example/repo/pull/1)');
     assert.equal(sent[0].data.reply_in_thread,true);
     assert.equal(store.conversationTask('group',{anchorId:'out',sourceId:'followup',scope:'thread'})!.id,task.id);
   } finally { channel.close();store.close(); }

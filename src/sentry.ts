@@ -5,6 +5,7 @@ export interface AlertEvidence {
   count: number; userCount: number; release: string; environment: string; exception: unknown[];
   eventId?: string; eventAt?: string; extensionOrigins?: string[]; completeStack?: boolean;
 }
+export interface DailyIssue { id:string; title:string; count:number; users:number; firstSeen:string }
 export interface IssuePage { issues: Array<{id: string}>; next?: string }
 export interface AlertConnector {
   list(source: AlertSource, start: string, end: string, cursor: string | undefined, signal: AbortSignal): Promise<IssuePage>;
@@ -69,6 +70,26 @@ export class SentryConnector implements AlertConnector {
       bytes += value.length; if (bytes > 2_000_000) throw Error('Sentry response too large'); chunks.push(value);
     } } finally { await reader.cancel(); }
     return {data:JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown, link:response.headers.get('link')};
+  }
+  /** Full calendar-window error inventory, including resolved and ignored issues. */
+  async dailyIssues(source:AlertSource,start:string,end:string,signal:AbortSignal):Promise<DailyIssue[]> {
+    const issues=new Map<string,DailyIssue>(),seen=new Set<string>();let cursor:string|undefined;
+    for(let page=0;page<100;page++){
+      const params=new URLSearchParams({project:source.sentry.projectId,environment:source.sentry.environment,query:'issue.category:error',sort:'freq',limit:'100',start,end});
+      if(cursor)params.set('cursor',cursor);
+      const {data,link}=await this.get(source,'issues/',params,signal);
+      if(!Array.isArray(data)||data.length>100)throw Error('Sentry invalid daily page');
+      for(const value of data){const i=record(value),id=String(i.id);
+        if(String(i.project?.id)!==source.sentry.projectId||! /^[1-9][0-9]{0,30}$/.test(id)||!Number.isSafeInteger(Number(i.count))||Number(i.count)<0)throw Error('Sentry daily scope/count mismatch');
+        if(issues.has(id))throw Error('Sentry duplicate daily issue');
+        issues.set(id,{id,title:redactAlertText(i.title,140),count:Number(i.count),users:count(i.userCount),firstSeen:date(record(i.lifetime).firstSeen)});
+      }
+      const next=link?.split(',').find(x=>/rel="next"/.test(x)&&/results="true"/.test(x));
+      if(!next)return [...issues.values()];
+      cursor=next.match(/cursor="([A-Za-z0-9:_-]{1,200})"/)?.[1];
+      if(!cursor||seen.has(cursor))throw Error('Sentry invalid daily cursor');seen.add(cursor);
+    }
+    throw Error('Sentry daily inventory incomplete');
   }
   async list(source: AlertSource, start: string, end: string, cursor: string | undefined, signal: AbortSignal): Promise<IssuePage> {
     const p = new URLSearchParams({project:source.sentry.projectId,environment:source.sentry.environment,

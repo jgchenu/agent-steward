@@ -44,7 +44,7 @@ export function syncOwnerPrOverviews(store:Store,config:Config):void {
   const destinations=new Set(Object.values(config.alertSources??{}).map(s=>s.chatId));
   for(const chatId of destinations){
     const text=ownerPrOverview(store,config,chatId);if(!text)continue;
-    const hash=createHash('sha256').update(text).digest('hex');
+    const hash=createHash('sha256').update('summary-card-v1:'+text).digest('hex');
     if(store.cardMessage(chatId,'pr-overview:queued')===hash)continue;
     store.transaction(()=>{store.saveCardMessage(chatId,'pr-overview:queued',hash);store.enqueue(chatId,'',{kind:'pr-overview'});});
   }

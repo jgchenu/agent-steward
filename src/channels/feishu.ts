@@ -1,3 +1,5 @@
+import { dailyCard } from './daily-card.js';
+import { summaryCard } from './summary-card.js';
 import { ownerPrOverview } from '../pr-overview.js';
 import { publicationBlocker, canRequestDraftException } from '../workspace.js';
 import { alertTopic, alertUpdateCurrent, currentAlertTask, groupAlertSummary, recordTopicMessage } from '../alert-collaboration.js';
@@ -105,10 +107,10 @@ export class FeishuChannel implements Channel {
   async send(chatId: string, text: string, deliveryId: string, view?: View): Promise<void> {
     if(view?.kind==='pr-overview'){
       const overview=ownerPrOverview(this.store,this.config,chatId);if(!overview)return;
-      const content=JSON.stringify({zh_cn:{content:[[{tag:'md',text:overview}]]}}),key='pr-overview:message';
+      const content=JSON.stringify(summaryCard(overview,'overview')),key='pr-overview:card-message';
       const existing=this.store.cardMessage(chatId,key);
-      if(existing && await updatePost(()=>this.client.im.message.update({path:{message_id:existing},data:{msg_type:'post',content}}))===0)return;
-      const r=await this.client.im.message.create({params:{receive_id_type:'chat_id'},data:{receive_id:chatId,msg_type:'post',content,uuid:deliveryId}});
+      if(existing && await updatePost(()=>this.client.im.message.patch({path:{message_id:existing},data:{content}}))===0)return;
+      const r=await this.client.im.message.create({params:{receive_id_type:'chat_id'},data:{receive_id:chatId,msg_type:'interactive',content,uuid:deliveryId}});
       if(r.code!==0||!r.data?.message_id)throw Error('总览发送失败');this.store.saveCardMessage(chatId,key,r.data.message_id);
       return;
     }
@@ -118,22 +120,22 @@ export class FeishuChannel implements Channel {
       if (!topic || !alertUpdateCurrent(this.store,this.config,chatId,collaboration)) throw Error('群告警通知授权或进展已变化。');
       if(collaboration.updateRoot){
         if(!topic.rootId)throw Error('话题首条尚未送达');
-        const key=`alert-summary:${topic.id}`,recalled=`alert-root-recalled:${topic.id}`;
+        const key=`alert-summary-card:${topic.id}`,recalled=`alert-root-recalled:${topic.id}`;
         if(this.store.cardMessage(chatId,recalled))return;
         const task=currentAlertTask(this.store,topic);if(!task)throw Error('话题任务已变化');
         // Retry the newest state, not an older queued snapshot of the same revision.
         const latest=groupAlertSummary(this.store,this.config,topic,task);
-        const content=JSON.stringify({zh_cn:{content:[[{tag:'md',text:replyChunks(latest).join('\n')}]]}});
+        const content=JSON.stringify(summaryCard(replyChunks(latest).join('\n'),'alert'));
         const hash=createHash('sha256').update(content).digest('hex');
         if(this.store.cardMessage(chatId,`${key}:content`)===hash)return;
-        const existing=this.store.cardMessage(chatId,key)??topic.rootId;
-        const code=await updatePost(()=>this.client.im.message.update({path:{message_id:existing},data:{msg_type:'post',content}}));
+        const existing=this.store.cardMessage(chatId,key)??(this.store.cardMessage(chatId,`summary-card:${topic.rootId}`)?topic.rootId:undefined);
+        const code=existing?await updatePost(()=>this.client.im.message.patch({path:{message_id:existing},data:{content}})):230075;
         if(code===230011 && existing===topic.rootId){this.store.saveCardMessage(chatId,recalled,topic.rootId);return;}
         if(code!==0){
           // Editing has expired: keep the original topic and one current summary reply.
           const uuid=createHash('sha256').update(`${key}:${existing}:${hash}`).digest('hex').slice(0,32);
           let r;
-          try{r=await this.client.im.message.reply({path:{message_id:topic.rootId},data:{msg_type:'post',content,uuid,reply_in_thread:true}});}
+          try{r=await this.client.im.message.reply({path:{message_id:topic.rootId},data:{msg_type:'interactive',content,uuid,reply_in_thread:true}});}
           catch(e){if(messageErrorCode(e)!==230011)throw Error('话题摘要回复失败');this.store.saveCardMessage(chatId,recalled,topic.rootId);return;}
           if(r.code===230011){this.store.saveCardMessage(chatId,recalled,topic.rootId);return;}
           if(r.code!==0||!r.data?.message_id)throw Error('话题摘要回复失败');
@@ -181,14 +183,15 @@ export class FeishuChannel implements Channel {
       for (let i = 0; i < chunks.length; i++) {
         const key = `reply:${deliveryId}:${i}`;
         if (this.store.cardMessage(chatId, key)) continue;
-        const content = JSON.stringify({ zh_cn: { content: [[{ tag: 'md', text: chunks[i] }]] } });
+        const content = JSON.stringify(view?.kind==='scheduled-report'&&view.daily?dailyCard(view.daily):summaryCard(chunks[i],collaboration?'alert':view?.kind==='scheduled-report'?'report':'reply'));
         // Feishu accepts at most 50 characters, including for thread replies.
         const uuid = createHash('sha256').update(`${deliveryId}:${i}`).digest('hex').slice(0, 32);
         const result = view?.conversation
           ? await this.client.im.message.reply({ path: { message_id: view.conversation.anchorId },
-            data: { msg_type: 'post', content, uuid, reply_in_thread: true } })
-          : await this.client.im.message.create({ params: { receive_id_type: 'chat_id' }, data: { receive_id: chatId, msg_type: 'post', content, uuid } });
+            data: { msg_type: 'interactive', content, uuid, reply_in_thread: true } })
+          : await this.client.im.message.create({ params: { receive_id_type: 'chat_id' }, data: { receive_id: chatId, msg_type: 'interactive', content, uuid } });
         if (result.code !== 0 || !result.data?.message_id) throw new Error(`Feishu reply error ${result.code}`);
+        this.store.saveCardMessage(chatId,`summary-card:${result.data.message_id}`,'2.0');
         if (topic && collaboration) recordTopicMessage(this.store,topic,result.data.message_id,result.data.thread_id,!!collaboration.root && i===0,key);
         else this.store.saveCardMessage(chatId, key, result.data.message_id);
         if (scopedTask) {
