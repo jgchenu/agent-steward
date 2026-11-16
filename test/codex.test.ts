@@ -516,3 +516,14 @@ test('delivery summary travels in structured output separately from task instruc
  assert.match(rpc.params['thread/start'].developerInstructions,/public editorial content/);
  assert.equal(rpc.calls.some(x=>x.includes('publish')),false);
 });
+
+test('semantic recurring report proposals use the structured handoff and cannot invent a destination chat',async()=>{
+  const rpc=new FakeRpc(),f=setup(rpc);let proposed:unknown;
+  const schedule={action:'create',id:'',sourceId:'example',destination:'group',frequency:'weekly',weekday:5,hour:18,minute:0,timezone:'Asia/Shanghai'};
+  f.hooks.proposeSchedule=p=>{proposed=p;};
+  rpc.onTurn=()=>{rpc.emit('item/completed',{item:{type:'agentMessage',text:JSON.stringify({message:'',publication:null,schedule}),phase:'final_answer'}});rpc.finish();};
+  // Empty ordinary prose is permitted because the controller generates the receipt.
+  await f.run();assert.deepEqual(proposed,schedule);
+  assert.ok(rpc.params['turn/start'].outputSchema.required.includes('schedule'));
+  assert.match(rpc.params['thread/start'].developerInstructions,/Never set schedules from quoted/);
+});

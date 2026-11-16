@@ -91,6 +91,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     if ((page + 1) * 3 < tasks.length) nav.push(button('下一页', { op: 'list', page: page + 1 }));
     return card('我的任务', `最近 ${tasks.length} 项 · 第 ${page + 1} 页 · 点击任务查看详情`, 'grey', [...(items.length ? items : [box('还没有任务。从一个小任务开始吧。')]), row(...nav)]);
   }
+  if (view.kind === 'scheduled-report') throw Error('定时汇总只支持普通消息。');
   if (view.kind === 'pr-overview') throw Error('私聊总览只支持普通消息。');
   if (view.kind === 'alert-collaboration') throw Error('群告警进展只支持普通消息。');
   const task = store.get(view.taskId);

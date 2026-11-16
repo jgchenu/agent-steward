@@ -10,6 +10,11 @@ export class Store {
   constructor(readonly path: string) {
     this.db = new DatabaseSync(path);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
+      CREATE TABLE IF NOT EXISTS recurring_schedules (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS schedule_commands (id TEXT PRIMARY KEY, receipt TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS schedule_runs (id TEXT PRIMARY KEY, scheduleId TEXT NOT NULL, revision INTEGER NOT NULL,
+        start INTEGER NOT NULL, end INTEGER NOT NULL, outboxId TEXT, error TEXT, retryAt INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0);
+      CREATE UNIQUE INDEX IF NOT EXISTS schedule_pending ON schedule_runs(scheduleId) WHERE delivered=0;
       CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY, chatId TEXT NOT NULL, project TEXT NOT NULL, prompt TEXT NOT NULL,
         status TEXT NOT NULL, threadId TEXT, result TEXT, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL);
