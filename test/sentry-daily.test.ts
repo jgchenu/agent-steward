@@ -29,8 +29,8 @@ test('top PR summary deduplicates associations and includes draft, closed and un
   const findings=labels.map((label,i)=>({id:String(i+1),title:`Issue ${i}`,count:1,users:1,firstSeen:'2025-01-01',url:`https://example.sentry.io/issues/${i+1}/`,previous:1,isNew:false,category:'repair' as const,description:'Existing analysis',prs:[{url:`https://github.com/example/app/pull/${i+1}`,label}]}));
   findings.push({...findings[2],id:'6'});
   const data={title:'Example',date:'2026-11-15',timezone:'Asia/Shanghai',environment:'production',checkedAt:'2026-11-16T02:00:00Z',total:6,previousTotal:6,issueCount:6,newCount:0,unknownFirstSeen:0,allIssuesUrl:'https://example.sentry.io/issues/',findings};
-  const card=dailyCard(data),top=(card.body as any).elements[0].columns[0].elements;
-  const progress=top.find((x:any)=>x.tag==='markdown'&&x.content.startsWith('**PR 进度**')).content;
+  const card=dailyCard(data),top=(card.body as any).elements[0];
+  const progress=top.content;
   assert.match(progress,/待合并 \*\*2\*\*/);assert.match(progress,/已合并 \*\*1\*\*/);assert.match(progress,/已关闭 \*\*1\*\*/);assert.match(progress,/待核实 \*\*1\*\*/);
   assert.match(JSON.stringify(card),/关联 5 个 PR/);
   assert.doesNotMatch(JSON.stringify(card),/今天先看|下一步/);
@@ -38,4 +38,16 @@ test('top PR summary deduplicates associations and includes draft, closed and un
   const empty=JSON.stringify(dailyCard({...data,findings:[]}));assert.match(empty,/关联 0 个 PR/);
   findings.push({...findings[2],id:'7',prs:[{...findings[2].prs[0],label:'已关闭未合并'}]});
   const conflict=JSON.stringify(dailyCard(data));assert.match(conflict,/2 个状态待核实/);
+});
+
+test('dense card bounds expanded categories without duplicating issues or losing PRs',()=>{
+  const findings=Array.from({length:50},(_,i)=>({id:String(i+1),title:`issue-${i+1}`,count:50-i,users:50-i,firstSeen:'2025-01-01',url:`https://example.sentry.io/issues/${i+1}/`,previous:1,isNew:i>=10&&i<18,category:'investigate' as const,description:'A recorded analysis',prs:i<5?[{url:`https://github.com/example/app/pull/${i+1}`,label:'已合并'}]:[]}));
+  const d={title:'Example',date:'2026-11-15',timezone:'Asia/Shanghai',environment:'production',checkedAt:'now',total:100,previousTotal:100,issueCount:50,newCount:8,unknownFirstSeen:0,allIssuesUrl:'https://example.sentry.io/issues/',findings};
+  const card=dailyCard(d),elements=(card.body as any).elements;assert.equal(elements.length,5);
+  const expanded=JSON.stringify(elements.slice(0,-1));assert.doesNotMatch(expanded,/background_style|heading-1/);
+  for(const f of findings){const count=expanded.split(`](${f.url})`).length-1;assert.ok(count<=1);}
+  assert.equal((expanded.match(/https:\/\/example.sentry.io\/issues\/\d+\//g)||[]).length,13);
+  for(const f of findings.filter(f=>f.prs.length))assert.ok(JSON.stringify(card).includes(f.prs[0].url));
+  assert.match(expanded,/展开前 3 项/);assert.match(expanded,/此处展示 6 项/);
+  assert.match(JSON.stringify(dailyCard({...d,total:0,findings:[],issueCount:0,newCount:0})),/昨天没有记录到错误问题/);
 });
