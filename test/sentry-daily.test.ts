@@ -23,3 +23,19 @@ test('approved card is a single bounded hierarchy with truthful PR status and sa
   const card=dailyCard({title:'Example',date:'2026-11-15',timezone:'Asia/Shanghai',environment:'production',checkedAt:'2026-11-16T02:00:00Z',total:50,previousTotal:100,issueCount:1,newCount:0,unknownFirstSeen:0,allIssuesUrl:'https://example.sentry.io/issues/',findings:[{id:'1',title:'<at id=all>Oops</at>',count:50,users:3,firstSeen:'2025-01-01',url:'https://example.sentry.io/issues/1/',previous:100,isNew:false,category:'repair',description:'已有修复',prs:[{url:'https://github.com/example/app/pull/1',label:'已合并'}]}]});
   const json=JSON.stringify(card);assert.match(json,/已合并不代表已部署/);assert.match(json,/50.0%/);assert.doesNotMatch(json,/<at|"callback"|"form"/);assert.ok((card.body as {elements:unknown[]}).elements.length<=5);
 });
+
+test('top PR summary deduplicates associations and includes draft, closed and unknown states',()=>{
+  const labels=['待合并 · 草稿','待合并 · 待审查','已合并','已关闭未合并','状态暂未核实'];
+  const findings=labels.map((label,i)=>({id:String(i+1),title:`Issue ${i}`,count:1,users:1,firstSeen:'2025-01-01',url:`https://example.sentry.io/issues/${i+1}/`,previous:1,isNew:false,category:'repair' as const,description:'Existing analysis',prs:[{url:`https://github.com/example/app/pull/${i+1}`,label}]}));
+  findings.push({...findings[2],id:'6'});
+  const data={title:'Example',date:'2026-11-15',timezone:'Asia/Shanghai',environment:'production',checkedAt:'2026-11-16T02:00:00Z',total:6,previousTotal:6,issueCount:6,newCount:0,unknownFirstSeen:0,allIssuesUrl:'https://example.sentry.io/issues/',findings};
+  const card=dailyCard(data),top=(card.body as any).elements[0].columns[0].elements;
+  const progress=top.find((x:any)=>x.tag==='markdown'&&x.content.startsWith('**PR 进度**')).content;
+  assert.match(progress,/待合并 \*\*2\*\*/);assert.match(progress,/已合并 \*\*1\*\*/);assert.match(progress,/已关闭 \*\*1\*\*/);assert.match(progress,/待核实 \*\*1\*\*/);
+  assert.match(JSON.stringify(card),/关联 5 个 PR/);
+  assert.doesNotMatch(JSON.stringify(card),/今天先看|下一步/);
+  for(const f of findings)assert.ok(JSON.stringify(card).includes(f.prs[0].url));
+  const empty=JSON.stringify(dailyCard({...data,findings:[]}));assert.match(empty,/关联 0 个 PR/);
+  findings.push({...findings[2],id:'7',prs:[{...findings[2].prs[0],label:'已关闭未合并'}]});
+  const conflict=JSON.stringify(dailyCard(data));assert.match(conflict,/2 个状态待核实/);
+});
