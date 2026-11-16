@@ -8,6 +8,7 @@ import { Engine } from '../src/engine.js';
 import { CONVERSATION } from '../src/conversation.js';
 import { alertSourceKey } from '../src/alert-config.js';
 import { applySchedule, schedules, nextOccurrence, parseSchedule, runDueSchedule, scheduledDeliveryAllowed, reportDelivered, type ScheduleProposal } from '../src/schedules.js';
+import { sentryDailyReport } from '../src/sentry-daily.js';
 import { activityReport } from '../src/activity-report.js';
 import type { Config } from '../src/types.js';
 const now=Date.parse('2026-11-16T02:00:00Z');
@@ -92,11 +93,11 @@ test('owner can cancel an arrangement after its monitoring source is removed',()
   const {store,config,task}=fixture();try{applySchedule(store,config,task,proposal,now);const s=schedules(store)[0];config.alertSources={};applySchedule(store,config,{...task,id:'cancel'},{...proposal,action:'cancel',id:s.id},now);assert.equal(schedules(store)[0].state,'cancelled');}finally{store.close();}
 });
 
-test('scheduled reports are ordinary group posts, with stable provider UUID and durable send receipts',async()=>{
+test('scheduled reports are read-only group cards, with stable provider UUID and durable send receipts',async()=>{
   const {FeishuChannel}=await import('../src/channels/feishu.js');const {store,config}=fixture();
   const channel=new FeishuChannel('fake','fake',store,config);const sent:any[]=[];
   (channel as any).client={im:{message:{create:async(p:any)=>{sent.push(p);return {code:0,data:{message_id:'om_summary'}};},reply:async()=>{throw Error('must not post inside a task topic');}}}};
-  try{await channel.send('oc_team','本周处理 2 个问题。','delivery-one',{kind:'scheduled-report',runId:'run-one'});await channel.send('oc_team','本周处理 2 个问题。','delivery-one',{kind:'scheduled-report',runId:'run-one'});assert.equal(sent.length,1);assert.equal(sent[0].data.receive_id,'oc_team');assert.equal(sent[0].data.msg_type,'post');assert.ok(sent[0].data.uuid);assert.match(sent[0].data.content,/本周处理/);}finally{store.close();}
+  try{await channel.send('oc_team','本周处理 2 个问题。','delivery-one',{kind:'scheduled-report',runId:'run-one'});await channel.send('oc_team','本周处理 2 个问题。','delivery-one',{kind:'scheduled-report',runId:'run-one'});assert.equal(sent.length,1);assert.equal(sent[0].data.receive_id,'oc_team');assert.equal(sent[0].data.msg_type,'interactive');assert.ok(sent[0].data.uuid);assert.match(sent[0].data.content,/本周处理/);}finally{store.close();}
 });
 
 test('editing a paused schedule keeps it paused; overlapping schedules cannot be introduced by update',()=>{
@@ -129,3 +130,29 @@ test('an observed issue without a confirmed noise rule is never called browser-e
     assert.match(text,/正在核查/);assert.doesNotMatch(text,/已确认是浏览器扩展噪音/);
   }finally{store.close();}
 });
+
+test('Sentry daily keeps private destination, fixed yesterday window and provider across pause/resume',async()=>{
+  const {store,config,task}=fixture();try{
+    applySchedule(store,config,task,{...proposal,provider:'sentry_daily',frequency:'daily',hour:10,minute:0,destination:'private'},now-60000);
+    const s=schedules(store)[0];assert.equal(s.provider,'sentry_daily');assert.equal(s.chatId,'oc_private');
+    let calls=0;await runDueSchedule(store,config,{sentry_daily:async(_s,start,end)=>{calls++;assert.equal(new Date(start).toISOString(),'2026-11-14T16:00:00.000Z');assert.equal(new Date(end).toISOString(),'2026-11-15T16:00:00.000Z');return {text:'昨日汇总'};}},new AbortController().signal,now);
+    assert.equal(calls,1);const out=store.outgoing()!;assert.equal(out.chatId,'oc_private');
+    applySchedule(store,config,{...task,id:'pause-daily'},{...proposal,action:'pause',id:s.id},now);assert.equal(store.outgoing(),undefined);assert.equal(schedules(store)[0].provider,'sentry_daily');
+    applySchedule(store,config,{...task,id:'resume-daily'},{...proposal,action:'resume',id:s.id},now);assert.equal(schedules(store)[0].provider,'sentry_daily');assert.equal(schedules(store)[0].nextDue,now+86400000);
+  }finally{store.close();}
+});
+
+test('Sentry daily includes unhandled errors and refreshes PR status without claiming deployment',async()=>{
+  const {store,config,task}=fixture();try{
+    applySchedule(store,config,task,{...proposal,provider:'sentry_daily',frequency:'daily',destination:'private'},now);
+    const s=schedules(store)[0],t=store.create('oc_private','app','secret transcript','read-only');
+    store.db.prepare('INSERT INTO alert_runs VALUES (?,?,?,?,?,?)').run(t.id,'example',s.sourceKey,'1','',t.createdAt);
+    store.saveDelivery(t.id,{workspace:{taskId:t.id,source:'/',path:'/',branch:'x',baseSha:'a',baseRef:'main'},mode:'read-only',capturedAt:new Date().toISOString(),files:['x'],diffStat:'',fingerprint:'x',headSha:'a',checks:[],ready:true,prUrl:'https://github.com/example/app/pull/10',prIsDraft:true});
+    let pages=0,reads=0;const connector={dailyIssues:async()=>{pages++;return pages%2?[{id:'1',title:'Known',count:7,users:2,firstSeen:'2025-01-01'},{id:'2',title:'Unhandled',count:3,users:1,firstSeen:'2026-11-15T02:00:00Z'}]:[];}};
+    const result=await sentryDailyReport(store,config,s,Date.parse('2026-11-14T16:00:00Z'),Date.parse('2026-11-15T16:00:00Z'),new AbortController().signal,connector,async(_repo,url)=>{reads++;return {url,state:'MERGED',isDraft:false,headRefOid:'a',baseRefName:'main',mergedAt:new Date().toISOString()};});
+    assert.equal(pages,2);assert.equal(reads,1);assert.equal(result.daily!.total,10);assert.equal(result.daily!.newCount,1);assert.equal(result.daily!.findings[0].prs[0].label,'已合并');assert.equal(result.daily!.findings[1].category,'investigate');assert.doesNotMatch(JSON.stringify(result),/secret transcript/);
+    const unavailable=await sentryDailyReport(store,config,s,Date.parse('2026-11-14T16:00:00Z'),Date.parse('2026-11-15T16:00:00Z'),new AbortController().signal,connector,async()=>{throw Error('offline');});assert.equal(unavailable.daily!.findings[0].prs[0].label,'状态暂未核实');
+  }finally{store.close();}
+});
+
+test('report display labels do not revoke source grants',()=>{const {store,config}=fixture();try{const key=alertSourceKey(config,'example');config.alertSources!.example.reportLabel='Example 前端';assert.equal(alertSourceKey(config,'example'),key);}finally{store.close();}});

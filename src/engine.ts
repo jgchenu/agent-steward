@@ -1,3 +1,4 @@
+import { sentryDailyReport } from './sentry-daily.js';
 import { alertBindingForTask } from './alert-provenance.js';
 import { activityReport } from './activity-report.js';
 import { applySchedule, parseSchedule, schedules, scheduleAuthorized, scheduleCatalog, scheduleRevision, runDueSchedule, scheduledDeliveryAllowed, retireScheduledReport, reportDelivered, type ScheduleProposal } from './schedules.js';
@@ -499,7 +500,7 @@ export class Engine {
     this.store.expireOperations();
     if(!this.active.size&&!this.reportRun&&schedules(this.store).some(s=>scheduleAuthorized(this.config,s)&&s.nextDue<=Date.now()
       &&!this.store.db.prepare('SELECT 1 FROM schedule_runs WHERE scheduleId=? AND delivered=0 AND (outboxId IS NOT NULL OR retryAt>?)').get(s.id,Date.now()))){
-      this.reportRun=runDueSchedule(this.store,this.config,{alert_activity:(s,start,end,signal)=>activityReport(this.store,this.config,s,start,end,signal)},this.reportAbort.signal)
+      this.reportRun=runDueSchedule(this.store,this.config,{alert_activity:(s,start,end,signal)=>activityReport(this.store,this.config,s,start,end,signal),sentry_daily:(s,start,end,signal)=>sentryDailyReport(this.store,this.config,s,start,end,signal)},this.reportAbort.signal)
         .catch(()=>{/* durable run is retried; never crash the service timer */}).finally(()=>{this.reportRun=undefined;});
     }
     const queued = this.store.list().filter(t => t.status === 'queued').sort((a,b) => a.updatedAt.localeCompare(b.updatedAt));

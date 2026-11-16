@@ -239,7 +239,7 @@ test('blocked PR publication is a plain explanation in the original topic, not a
  try{
   const task=store.create('group','demo','check PR','read-only',ref());
   await channel.send('group','generic failure','blocked-pr',{kind:'publication',taskId:task.id});
-  assert.equal(sent.length,1);assert.equal(sent[0].path.message_id,'root');assert.equal(sent[0].data.msg_type,'post');
+  assert.equal(sent.length,1);assert.equal(sent[0].path.message_id,'root');assert.equal(sent[0].data.msg_type,'interactive');
   assert.match(sent[0].data.content,/只读分析/);assert.ok(!sent[0].data.content.includes('callback'));
  }finally{store.close();}
 });

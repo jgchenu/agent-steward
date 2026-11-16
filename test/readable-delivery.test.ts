@@ -18,7 +18,7 @@ function fixture(){
  const task=store.create('oc_group','web','PRIVATE transcript and internal execution instructions','workspace-write');
  const key=alertSourceKey(config,'web')!;store.db.prepare('INSERT INTO alert_runs VALUES (?,?,?,?,?,?)').run(task.id,'web',key,'1','signature',task.createdAt);
  openAlertTopic(store,config,'web',key,'1',task,{verdict:'needs_fix',summary:summary.title,impact:'统计可能中断。',explanation:'PRIVATE cause',evidence:['PRIVATE stack']});
- const topic=alertTopic(store,String(store.db.prepare('SELECT id FROM alert_topics').get()!.id))!;recordTopicMessage(store,topic,'root','thread',true);
+ const topic=alertTopic(store,String(store.db.prepare('SELECT id FROM alert_topics').get()!.id))!;recordTopicMessage(store,topic,'root','thread',true);store.saveCardMessage('oc_group','summary-card:root','2.0');
  const report:DeliveryReport={workspace:{taskId:task.id,source:'.',path:'.',branch:'fix/test',baseRef:'origin/main',baseSha:'a'.repeat(40)},mode:'workspace-write',files:['a.ts'],diffStat:'one file',fingerprint:'patch',headSha:'b'.repeat(40),capturedAt:'',checks:[{name:'test',status:'passed',log:'private'}],ready:true,summary};
  store.saveDelivery(task.id,report);store.set(task.id,'review');
  return {store,config,task:store.get(task.id)!,report,topic};
@@ -46,16 +46,16 @@ test('ordinary PR readiness requires independent checks, complete summary and un
 test('group root and owner overview update in place, deduplicate and recheck source permissions',async()=>{
  const f=fixture();const updates:any[]=[],creates:any[]=[];
  const channel=new FeishuChannel('fake','fake',f.store,f.config);
- (channel as any).client={im:{message:{update:async(p:any)=>{updates.push(p);return {code:0};},create:async(p:any)=>{creates.push(p);return {code:0,data:{message_id:'overview'}};}}}};
+ (channel as any).client={im:{message:{patch:async(p:any)=>{updates.push(p);return {code:0};},create:async(p:any)=>{creates.push(p);return {code:0,data:{message_id:'overview'}};}}}};
  try{
   syncAlertTopics(f.store,f.config);syncOwnerPrOverviews(f.store,f.config);
   const count=f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n;
   syncAlertTopics(f.store,f.config);syncOwnerPrOverviews(f.store,f.config);assert.equal(f.store.db.prepare('SELECT count(*) n FROM outbox').get()!.n,count);
   const row=f.store.db.prepare("SELECT * FROM outbox WHERE json_extract(view,'$.updateRoot')=1").get()!;
   await channel.send('oc_group',String(row.text),String(row.id),JSON.parse(String(row.view)) as View);
-  assert.equal(updates[0].path.message_id,'root');assert.equal(updates[0].data.msg_type,'post');assert.doesNotMatch(updates[0].data.content,/PRIVATE|代码来源/);
+  assert.equal(updates[0].path.message_id,'root');assert.equal(JSON.parse(updates[0].data.content).schema,'2.0');assert.doesNotMatch(updates[0].data.content,/PRIVATE|代码来源/);
   await channel.send('oc_dm','','one',{kind:'pr-overview'});await channel.send('oc_dm','','retry',{kind:'pr-overview'});
-  assert.equal(creates.length,1);assert.equal(creates[0].data.msg_type,'post');assert.equal(updates.at(-1).path.message_id,'overview');
+  assert.equal(creates.length,1);assert.equal(creates[0].data.msg_type,'interactive');assert.equal(updates.at(-1).path.message_id,'overview');
   assert.match(ownerPrOverview(f.store,f.config,'oc_dm')!,/需要你处理/);assert.equal(ownerPrOverview(f.store,f.config,'oc_group'),undefined);
   f.config.alertSources!.web.enabled=false;assert.equal(ownerPrOverview(f.store,f.config,'oc_dm'),undefined);
   await assert.rejects(channel.send('oc_group',String(row.text),'revoked',JSON.parse(String(row.view))),/授权/);
@@ -110,7 +110,7 @@ test('late remote results cannot overwrite a resumed task, changed project grant
 
 test('expired group roots get one current summary reply; retries update it with newest remote state',async()=>{
  const f=fixture(),channel=new FeishuChannel('fake','fake',f.store,f.config),updates:any[]=[],replies:any[]=[];
- (channel as any).client={im:{message:{update:async(p:any)=>{updates.push(p);if(p.path.message_id==='root')throw {response:{data:{code:230075}}};return {code:0};},reply:async(p:any)=>{replies.push(p);return {code:0,data:{message_id:'latest',thread_id:'thread'}};}}}};
+ (channel as any).client={im:{message:{patch:async(p:any)=>{updates.push(p);if(p.path.message_id==='root')throw {response:{data:{code:230075}}};return {code:0};},reply:async(p:any)=>{replies.push(p);return {code:0,data:{message_id:'latest',thread_id:'thread'}};}}}};
  try{
   syncAlertTopics(f.store,f.config);const row=f.store.db.prepare("SELECT * FROM outbox WHERE json_extract(view,'$.updateRoot')=1").get()!,view=JSON.parse(String(row.view));
   await channel.send('oc_group','stale queued text',String(row.id),view);
@@ -124,7 +124,7 @@ test('expired group roots get one current summary reply; retries update it with 
 test('recalled roots stop retrying; permission failures never create replacement messages',async()=>{
  for(const code of [230011,99991672]){
   const f=fixture(),channel=new FeishuChannel('fake','fake',f.store,f.config);let updates=0,replies=0;
-  (channel as any).client={im:{message:{update:async()=>{updates++;return {code};},reply:async()=>{replies++;return {code:0,data:{message_id:'unexpected'}};}}}};
+  (channel as any).client={im:{message:{patch:async()=>{updates++;return {code};},reply:async()=>{replies++;return {code:0,data:{message_id:'unexpected'}};}}}};
   try{syncAlertTopics(f.store,f.config);const row=f.store.db.prepare("SELECT * FROM outbox WHERE json_extract(view,'$.updateRoot')=1").get()!,send=()=>channel.send('oc_group',String(row.text),String(row.id),JSON.parse(String(row.view)));
    if(code===230011){await send();await send();assert.equal(updates,1);}else await assert.rejects(send(),/消息更新失败/);
    assert.equal(replies,0);
@@ -133,7 +133,20 @@ test('recalled roots stop retrying; permission failures never create replacement
 });
 test('expired private overview is replaced once and its new message is reused',async()=>{
  const f=fixture(),channel=new FeishuChannel('fake','fake',f.store,f.config),updates:string[]=[];let creates=0;
- f.store.saveCardMessage('oc_dm','pr-overview:message','expired');
- (channel as any).client={im:{message:{update:async(p:any)=>{updates.push(p.path.message_id);return {code:p.path.message_id==='expired'?230075:0};},create:async()=>{creates++;return {code:0,data:{message_id:'replacement'}};}}}};
+ f.store.saveCardMessage('oc_dm','pr-overview:card-message','expired');
+ (channel as any).client={im:{message:{patch:async(p:any)=>{updates.push(p.path.message_id);return {code:p.path.message_id==='expired'?230075:0};},create:async()=>{creates++;return {code:0,data:{message_id:'replacement'}};}}}};
  try{await channel.send('oc_dm','','one',{kind:'pr-overview'});await channel.send('oc_dm','','two',{kind:'pr-overview'});assert.equal(creates,1);assert.deepEqual(updates,['expired','replacement']);}finally{f.store.close();}
+});
+
+test('legacy group posts migrate to one card reply and then patch that reply',async()=>{
+ const f=fixture(),channel=new FeishuChannel('fake','fake',f.store,f.config),replies:any[]=[],patches:any[]=[];
+ f.store.db.prepare('DELETE FROM card_messages WHERE viewKey=?').run('summary-card:root');
+ (channel as any).client={im:{message:{reply:async(p:any)=>{replies.push(p);return {code:0,data:{message_id:'card-summary',thread_id:'thread'}};},patch:async(p:any)=>{patches.push(p);assert.equal(p.path.message_id,'card-summary');return {code:0};}}}};
+ try{
+  syncAlertTopics(f.store,f.config);const row=f.store.db.prepare("SELECT * FROM outbox WHERE json_extract(view,'$.updateRoot')=1").get()!,view=JSON.parse(String(row.view));
+  await channel.send('oc_group','',String(row.id),view);await channel.send('oc_group','','retry',view);
+  assert.equal(replies.length,1);assert.equal(patches.length,0);assert.equal(replies[0].data.msg_type,'interactive');assert.equal(replies[0].path.message_id,'root');
+  f.store.saveDelivery(f.task.id,{...f.report,prUrl:'https://github.com/example/web/pull/1'});
+  await channel.send('oc_group','','new-state',view);assert.equal(replies.length,1);assert.equal(patches.length,1);
+ }finally{f.store.close();}
 });

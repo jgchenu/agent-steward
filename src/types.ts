@@ -121,7 +121,7 @@ export interface CommitAuthor { name: string; email: string }
 export interface PublicationTarget { repository: string; baseBranch: string }
 export interface BaselineOptions { migrateChanges: boolean; delivery: (PublicationTarget & {checks: Check[]}) | null }
 export interface BaselineProposal extends BaselineOptions { ref: string }
-export type View = ({kind:'scheduled-report';runId:string} | {kind:'pr-overview'} | {kind:'alert-collaboration'; topicId:string; root?:boolean; updateRoot?:boolean; snapshot?:{taskId:string; revision:string}} | { kind: 'requester-reply' } | { kind: 'evidence'; taskId: string; evidenceIds: string[] } | { kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string; fromTaskId?: string; revision?: string } | { kind: 'list'; page?: number }
+export type View = ({kind:'scheduled-report';runId:string;daily?:import('./sentry-daily.js').DailyReport} | {kind:'pr-overview'} | {kind:'alert-collaboration'; topicId:string; root?:boolean; updateRoot?:boolean; snapshot?:{taskId:string; revision:string}} | { kind: 'requester-reply' } | { kind: 'evidence'; taskId: string; evidenceIds: string[] } | { kind: 'home' } | { kind: 'notice' } | { kind: 'choose-project'; draft: string; choices: string[]; selectionKey: string; fromTaskId?: string; revision?: string } | { kind: 'list'; page?: number }
   | { kind: 'publication-receipt' | 'reply' | 'task' | 'followup' | 'result' | 'delivery' | 'publication' | 'baseline' | 'source'; taskId: string; page?: number })
   & { requesterId?: string; targetMessageId?: string; fresh?: boolean; conversation?: Conversation; draft?: string; publicationTarget?: PublicationTarget };
 export interface CardAction {
