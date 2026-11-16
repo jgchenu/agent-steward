@@ -30,8 +30,8 @@ test('top PR summary deduplicates associations and includes draft, closed and un
   findings.push({...findings[2],id:'6'});
   const data={title:'Example',date:'2026-11-15',timezone:'Asia/Shanghai',environment:'production',checkedAt:'2026-11-16T02:00:00Z',total:6,previousTotal:6,issueCount:6,newCount:0,unknownFirstSeen:0,allIssuesUrl:'https://example.sentry.io/issues/',findings};
   const card=dailyCard(data),top=(card.body as any).elements[0];
-  const progress=top.content;
-  assert.match(progress,/待合并 \*\*2\*\*/);assert.match(progress,/已合并 \*\*1\*\*/);assert.match(progress,/已关闭 \*\*1\*\*/);assert.match(progress,/待核实 \*\*1\*\*/);
+  const progress=JSON.stringify(top);
+  assert.match(progress,/待合并 \*\*2\*\*/);assert.match(progress,/已合并 \*\*1\*\*/);assert.match(progress,/已关闭 \*\*1\*\*/);assert.match(progress,/1 个状态待核实/);
   assert.match(JSON.stringify(card),/关联 5 个 PR/);
   assert.doesNotMatch(JSON.stringify(card),/今天先看|下一步/);
   for(const f of findings)assert.ok(JSON.stringify(card).includes(f.prs[0].url));
@@ -43,7 +43,9 @@ test('top PR summary deduplicates associations and includes draft, closed and un
 test('dense card bounds expanded categories without duplicating issues or losing PRs',()=>{
   const findings=Array.from({length:50},(_,i)=>({id:String(i+1),title:`issue-${i+1}`,count:50-i,users:50-i,firstSeen:'2025-01-01',url:`https://example.sentry.io/issues/${i+1}/`,previous:1,isNew:i>=10&&i<18,category:'investigate' as const,description:'A recorded analysis',prs:i<5?[{url:`https://github.com/example/app/pull/${i+1}`,label:'已合并'}]:[]}));
   const d={title:'Example',date:'2026-11-15',timezone:'Asia/Shanghai',environment:'production',checkedAt:'now',total:100,previousTotal:100,issueCount:50,newCount:8,unknownFirstSeen:0,allIssuesUrl:'https://example.sentry.io/issues/',findings};
-  const card=dailyCard(d),elements=(card.body as any).elements;assert.equal(elements.length,5);
+  const card=dailyCard(d),elements=(card.body as any).elements;assert.equal(elements.filter((e:any)=>e.tag!=='hr').length,5);
+  assert.equal((card.header as any).title.content,'Example｜Sentry 报错与修复进展');
+  assert.equal(elements.filter((e:any)=>e.tag==='hr').length,3);
   const expanded=JSON.stringify(elements.slice(0,-1));assert.doesNotMatch(expanded,/background_style|heading-1/);
   for(const f of findings){const count=expanded.split(`](${f.url})`).length-1;assert.ok(count<=1);}
   assert.equal((expanded.match(/https:\/\/example.sentry.io\/issues\/\d+\//g)||[]).length,13);
