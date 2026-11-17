@@ -156,3 +156,22 @@ test('Sentry daily includes unhandled errors and refreshes PR status without cla
 });
 
 test('report display labels do not revoke source grants',()=>{const {store,config}=fixture();try{const key=alertSourceKey(config,'example');config.alertSources!.example.reportLabel='Example 前端';assert.equal(alertSourceKey(config,'example'),key);}finally{store.close();}});
+
+test('daily report group is independent from repair collaboration and paused weekly report',async()=>{
+  const {store,config,task}=fixture();try{
+    const grant=alertSourceKey(config,'example');config.alertSources!.example.reportChatId='oc_data';assert.equal(alertSourceKey(config,'example'),grant);
+    applySchedule(store,config,task,proposal,now);const weekly=schedules(store)[0];
+    applySchedule(store,config,{...task,id:'pause-weekly'},{...proposal,action:'pause',id:weekly.id},now);
+    const daily={...proposal,provider:'sentry_daily' as const,frequency:'daily' as const,hour:10,minute:0};
+    applySchedule(store,config,{...task,id:'daily-private'},{...daily,destination:'private'},now);
+    applySchedule(store,config,{...task,id:'daily-group'},daily,now);
+    const group=schedules(store).find(s=>s.provider==='sentry_daily'&&s.destination==='group')!;
+    assert.equal(group.chatId,'oc_data');assert.ok(scheduledGroup());
+    function scheduledGroup(){return schedules(store).find(s=>s.id===weekly.id)!.state==='paused'&&config.alertSources!.example.collaborationChatId==='oc_team';}
+    await runDueSchedule(store,config,{sentry_daily:async()=> '日报'},new AbortController().signal,group.nextDue);
+    assert.equal(store.outgoing()!.chatId,'oc_private');const out=store.outgoing()!;const run=JSON.parse(out.view!).runId;store.transaction(()=>{store.delivered(out.id);reportDelivered(store,run,group.nextDue);});
+    await runDueSchedule(store,config,{sentry_daily:async()=> '日报'},new AbortController().signal,group.nextDue);
+    const groupOut=store.outgoing()!;assert.equal(groupOut.chatId,'oc_data');const groupRun=JSON.parse(groupOut.view!).runId;assert.ok(scheduledDeliveryAllowed(store,config,groupRun,'oc_data'));
+    config.alertSources!.example.reportChatId='oc_changed';assert.equal(scheduledDeliveryAllowed(store,config,groupRun,'oc_data'),false);assert.equal(scheduledDeliveryAllowed(store,config,groupRun,'oc_team'),false);
+  }finally{store.close();}
+});
