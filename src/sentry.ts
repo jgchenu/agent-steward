@@ -6,6 +6,7 @@ export interface AlertEvidence {
   eventId?: string; eventAt?: string; extensionOrigins?: string[]; completeStack?: boolean;
 }
 export interface DailyIssue { id:string; title:string; count:number; users:number; firstSeen:string }
+export interface DailyContext { eventAt:string; release:string; page:'home'|'project'|'pricing'|'account'|'other'|'unknown' }
 export interface IssuePage { issues: Array<{id: string}>; next?: string }
 export interface AlertConnector {
   list(source: AlertSource, start: string, end: string, cursor: string | undefined, signal: AbortSignal): Promise<IssuePage>;
@@ -90,6 +91,23 @@ export class SentryConnector implements AlertConnector {
       if(!cursor||seen.has(cursor))throw Error('Sentry invalid daily cursor');seen.add(cursor);
     }
     throw Error('Sentry daily inventory incomplete');
+  }
+  /** Representative event within the report window; never substitute an out-of-window latest event. */
+  async dailyContext(source:AlertSource,issueId:string,start:string,end:string,signal:AbortSignal):Promise<DailyContext|undefined>{
+    if(!/^[1-9][0-9]{0,30}$/.test(issueId))throw Error('Invalid issue id');
+    const {data}=await this.get(source,`issues/${issueId}/events/`,new URLSearchParams({environment:source.sentry.environment,start,end,per_page:'1',full:'true'}),signal);
+    if(!Array.isArray(data)||data.length>1)throw Error('Invalid daily event');if(!data.length)return;
+    const e=record(data[0]),tags=new Map((Array.isArray(e.tags)?e.tags:[]).map((t:any)=>[t.key,t.value])),eventAt=date(e.dateCreated);
+    if(tags.get('environment')!==source.sentry.environment||!eventAt||Date.parse(eventAt)<Date.parse(start)||Date.parse(eventAt)>=Date.parse(end))throw Error('Daily event scope mismatch');
+    const eventProject=e.projectID??e.projectId??(typeof e.project==='object'?e.project.id:e.project);
+    if(eventProject!==undefined&&String(eventProject)!==source.sentry.projectId)throw Error('Daily event project mismatch');
+    const raw=typeof e.release==='string'?e.release:record(e.release).version;
+    const release=typeof raw==='string'&&/^[a-zA-Z0-9_.+-]{1,100}$/.test(raw)?raw:'';
+    let page:DailyContext['page']='unknown';
+    try{const path=new URL(String(tags.get('url')??record(e.request).url)).pathname.replace(/^\/(?:[a-z]{2}(?:-[a-zA-Z0-9]+)?)\//,'/');
+      page=/^\/projects?(?:\/|$)/.test(path)?'project':/^\/pricing(?:\/|$)/.test(path)?'pricing':/^\/account(?:\/|$)/.test(path)?'account':path==='/'?'home':'other';
+    }catch{/* missing page context remains explicit */}
+    return {eventAt,release,page};
   }
   async list(source: AlertSource, start: string, end: string, cursor: string | undefined, signal: AbortSignal): Promise<IssuePage> {
     const p = new URLSearchParams({project:source.sentry.projectId,environment:source.sentry.environment,
