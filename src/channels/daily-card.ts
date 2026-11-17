@@ -16,7 +16,7 @@ const item=(f:DailyFinding,description=false)=>row([column([
   md(`**${issueLink(f)}**`),
   md(`报错 ${f.count} 次　·　用户 ${f.users} 人　·　较前日 ${f.count===f.previous?'持平':`${f.count>f.previous?'↑':'↓'}${Math.abs(f.count-f.previous)} 次`}`,{text_size:'notation'}),
   ...(description?[md(compact(f.description))]:[]),
-  ...(f.prs.some(p=>p.label==='已合并')?[md('上线核验：缺少部署版本与事件 release 对照，尚不能判断修复生效。',{text_size:'notation'})]:[]),
+
   ...(f.prs.length?[md(prLinks(f))]:[])
 ])]);
 const contextFeature=(f:DailyFinding)=>({home:'首页',project:'项目页',pricing:'定价页',account:'账户页',other:'其他页面',unknown:'页面待定位'}[f.context?.page??'unknown']);
@@ -28,6 +28,17 @@ const summaryTitle=(f:DailyFinding)=>{
 const originLine=(f:DailyFinding,zone:string)=>{
   const first=f.firstSeen&&Number.isFinite(Date.parse(f.firstSeen))?new Intl.DateTimeFormat('zh-CN',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(f.firstSeen)):'未知';
   const release=f.context?.release;return `${contextFeature(f)} · 首次记录 ${first} · 样本版本 ${release?( /^[a-f0-9]{40}$/.test(release)?release.slice(0,10):safe(release)):'未取得'} · 引入版本待确认`;
+};
+const summarySentence=(f:DailyFinding,zone:string)=>{
+  const title=summaryTitle(f);
+  const when=f.firstSeen&&Number.isFinite(Date.parse(f.firstSeen))?new Intl.DateTimeFormat('zh-CN',{timeZone:zone,month:'numeric'}).format(new Date(f.firstSeen)):'';
+  const since=when?`从${when}就有记录`:'此前已有记录';
+  if(f.prs.some(p=>p.label==='已合并'))return `${title.includes('文档')?'文档恢复时报错':compact(title,28)}已有合并的 PR，接下来核对上线后的表现。`;
+  if(f.prs.length)return `${compact(title,28)}正在跟进修复，进度见下方 PR。`;
+  if(f.title.includes('Event stream idle'))return `项目页连接空闲报错${since}，是否影响正常使用还在查。`;
+  if(f.title.includes('Chat stream completed'))return `聊天流结束报错${since}，是否属于正常结束还在查。`;
+  if(f.title.includes("(setting 'innerHTML')"))return `${contextFeature(f)}内容更新时报错，${since}，触发原因还在查。`;
+  return `${compact(title,28)}，${since}，具体原因还在查。`;
 };
 export function dailyCard(d:DailyReport):Record<string,unknown>{
   // Count repair PRs, not issue-to-PR associations. Conflicting snapshots remain unknown.
@@ -62,11 +73,8 @@ export function dailyCard(d:DailyReport):Record<string,unknown>{
   ]),md('昨日完整自然日 · 报错不等于业务失败 · PR 按链接去重',{text_size:'notation'})];
   const comparison=d.previousTotal?(d.total===d.previousTotal?'与前日持平':`较前日${d.total>d.previousTotal?'增加':'减少'} ${(Math.abs(d.total-d.previousTotal)/d.previousTotal*100).toFixed(1)}%`):'前日无报错记录';
   const major=[...primary.slice(0,2),...progress.slice(0,1)];
-  const overview=!d.findings.length?'昨天没有记录到错误问题。':`昨日报错${comparison}。${progress.length?'已有修复关联记录，需结合部署和事件版本核验效果。':'主要问题仍需补查调用来源及用户影响。'}`;
-  elements.push(section('昨日总结',[
-    md(overview),...major.map(f=>md(`**[${summaryTitle(f)}](${f.url})**\n${originLine(f,d.timezone)}\n${f.category==='repair'?'已有修复分析：'+compact(f.description,100):f.description.startsWith('已有分析：')?compact(f.description,100):'归因：尚未建立事件与具体代码的因果关系。'}`)),
-    md('首次记录不等于缺陷引入；样本版本不代表全部事件版本。引入时间需核对源码变更与发布记录。',{text_size:'notation'})
-  ]));
+  const overview=!d.findings.length?'昨天没有记录到错误问题。':`昨日报错${comparison}。`;
+  elements.push(section('昨日总结',[md(overview),md(major.map(f=>'• '+summarySentence(f,d.timezone)).join('\n'))]));
   if(primary.length)elements.push(emphasized('🔶 重点关注','按排查优先级排列；业务影响尚未核实。','orange-50',primary.map(f=>item(f))));
   if(progress.length)elements.push(emphasized('🛠️ 修复进展','关联 PR 最新状态；已合并不代表已上线。','blue-50',progress.map(f=>item(f,true))));
   if(secondary.length)elements.push(section('持续观察与其他新增',secondary.map(f=>item(f))));
@@ -76,7 +84,7 @@ export function dailyCard(d:DailyReport):Record<string,unknown>{
     ...detail.map(f=>md(`[${safe(f.title)}](${f.url}) · ${stats(f)}${f.isNew?' · 新增':''}\n${prLinks(f)||'暂无关联 PR 记录'}`)),
     md(`[查看当天全部 ${d.issueCount} 个问题](${d.allIssuesUrl})${rest.length>30?' · 此处列出其余问题中报错最多的 30 个，全部关联 PR 均保留。':''}`),
     md(`**口径**\n${d.date} 00:00–24:00（${safe(d.timezone)}），${safe(d.environment)}，覆盖所有状态的错误问题。人数按问题去重，不可相加；报错不等于业务失败。历史分析不代表昨日每条事件都已核实。新增按首次出现时间计算${d.unknownFirstSeen?`；${d.unknownFirstSeen} 个问题缺少首次出现时间，未计入新增`:''}。`),
-    md(`**PR**\n昨日问题关联 ${uniquePrs.size} 个 PR，按链接去重；待合并含草稿，已关闭指未合并关闭${prCounts.unknown?`，${prCounts.unknown} 个状态待核实`:''}。关联 PR 包括修复与诊断改动，不代表对应报错已经解决。状态读取于 ${d.checkedAt}；已合并不代表已部署或问题消失，没有关联记录不代表仓库中没有修复。`)
+    md(`**PR**\n昨日问题关联 ${uniquePrs.size} 个 PR，按链接去重；待合并含草稿，已关闭指未合并关闭${prCounts.unknown?`，${prCounts.unknown} 个状态待核实`:''}。关联 PR 包括修复与诊断改动，不代表对应报错已经解决。缺少部署版本与事件 release 对照，尚不能判断修复生效。状态读取于 ${d.checkedAt}；已合并不代表已部署或问题消失，没有关联记录不代表仓库中没有修复。`)
   ]});
   return {schema:'2.0',config:{update_multi:true,enable_forward:true,width_mode:'default',summary:{content:`${d.title} 日报｜${d.total} 次报错 · ${d.newCount} 个新增问题`}},header:{title:plain(`${d.title}｜Sentry 报错与修复进展`),subtitle:plain(`${d.date} 00:00–24:00 · ${d.timezone==='Asia/Shanghai'?'北京时间':d.timezone} · ${d.environment}`),template:'blue'},body:{direction:'vertical',padding:'10px 12px',vertical_spacing:'8px',elements}};
 }
