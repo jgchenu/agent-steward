@@ -203,3 +203,5 @@ Legacy post overviews receive one new card under a versioned receipt. Legacy gro
 For a previous-calendar-day Sentry summary, tell your counterpart: “每天上午 10 点私聊发昨天的 Sentry 问题和关联 PR 状态，使用卡片，暂时不发群。” This selects the native `sentry_daily` provider rather than the handled-task weekly report. The source's existing read-only token and owner private destination are reused. Pause, resume and time changes work through the same owner conversation flow. The host must be running; failed reads retry without publishing incomplete totals. PR status is checked at generation time; merged does not mean deployed.
 
 An optional `alertSources.<id>.reportLabel` sets the card’s human-readable project name without changing source authorization.
+
+Set `alertSources.<id>.reportChatId` to use a separate group for Sentry daily cards; `collaborationChatId` continues to receive repair discussions. Ask the counterpart to add daily group delivery while keeping private delivery. Group and private schedules are managed independently; this does not resume paused weekly reports.

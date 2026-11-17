@@ -1,4 +1,4 @@
-import { SentryConnector, redactAlertText, sentryIssueUrl, type DailyIssue } from './sentry.js';
+import { SentryConnector, redactAlertText, sentryIssueUrl, type DailyIssue, type DailyContext } from './sentry.js';
 import { previousCalendarDay, type Schedule, type ReportResult } from './schedules.js';
 import { alertBindingForTask } from './alert-provenance.js';
 import { parseAlertAssessment } from './alert-assessment.js';
@@ -7,11 +7,11 @@ import { runCommand } from './process.js';
 import type { InspectPr } from './pr-monitor.js';
 import type { Config } from './types.js';
 import type { Store } from './store.js';
-export interface DailyFinding extends DailyIssue { url:string; previous:number; isNew:boolean; category:'repair'|'noise'|'expected'|'investigate'; description:string; prs:Array<{url:string;label:string}> }
+export interface DailyFinding extends DailyIssue { context?:DailyContext; url:string; previous:number; isNew:boolean; category:'repair'|'noise'|'expected'|'investigate'; description:string; prs:Array<{url:string;label:string}> }
 export interface DailyReport { title:string; date:string; timezone:string; environment:string; checkedAt:string; total:number; previousTotal:number; issueCount:number; newCount:number; unknownFirstSeen:number; findings:DailyFinding[]; allIssuesUrl:string }
 const clean=(s:string)=>redactAlertText(s,200).replace(/[\[\]<>`*_]/g,'').trim();
 const inspect:InspectPr=async(repository,url,signal)=>{const r=await runCommand('gh',['pr','view',url,'--repo',repository,'--json','url,state,isDraft,headRefOid,baseRefName,mergedAt'],process.cwd(),signal,{timeoutSeconds:10});if(r.code||r.truncated)throw Error('PR unavailable');return JSON.parse(r.stdout);};
-export async function sentryDailyReport(store:Store,config:Config,s:Schedule,start:number,end:number,signal:AbortSignal,connector:Pick<SentryConnector,'dailyIssues'>=new SentryConnector(),read:InspectPr=inspect):Promise<ReportResult>{
+export async function sentryDailyReport(store:Store,config:Config,s:Schedule,start:number,end:number,signal:AbortSignal,connector:(Pick<SentryConnector,'dailyIssues'>&Partial<Pick<SentryConnector,'dailyContext'>>)=new SentryConnector(),read:InspectPr=inspect):Promise<ReportResult>{
   const source=config.alertSources![s.sourceId],prior=previousCalendarDay(start,s.timezone);
   const current=await connector.dailyIssues(source,new Date(start).toISOString(),new Date(end).toISOString(),signal);
   const previous=await connector.dailyIssues(source,new Date(prior.start).toISOString(),new Date(prior.end).toISOString(),signal);
@@ -35,6 +35,13 @@ export async function sentryDailyReport(store:Store,config:Config,s:Schedule,sta
       cache.set(url,label);
     }
     f.prs.push({url,label:cache.get(url)!});
+  }
+  // Bounded, read-only enrichment for the same attention/repair candidates shown by the card.
+  const rank=(a:DailyFinding,b:DailyFinding)=>b.users-a.users||b.count-a.count;
+  const associated=[...findings.values()].filter(f=>f.prs.length).sort(rank).slice(0,3);
+  const attention=[...findings.values()].filter(f=>!f.prs.length&&(f.category==='repair'||f.category==='investigate')).sort((a,b)=>Number(b.category==='repair')-Number(a.category==='repair')||rank(a,b)).slice(0,3);
+  if(connector.dailyContext)for(const f of [...associated,...attention]){
+    try{f.context=await connector.dailyContext(source,f.id,new Date(start).toISOString(),new Date(end).toISOString(),signal);}catch{signal.throwIfAborted();}
   }
   const date=new Intl.DateTimeFormat('en-CA',{timeZone:s.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).format(start);
   const allIssuesUrl=new URL(`/issues/`,`https://${source.sentry.organization}.sentry.io`);

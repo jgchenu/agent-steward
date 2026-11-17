@@ -9,15 +9,26 @@ const issueLink=(f:DailyFinding)=>`[${compact(f.title,64)}](${f.url})`;
 const stats=(f:DailyFinding)=>`${f.count} 次 / ${f.users} 人 · ${f.count===f.previous?'持平':`${f.count>f.previous?'↑':'↓'}${Math.abs(f.count-f.previous)}`}（前日 ${f.previous}）`;
 const column=(elements:unknown[],spacing='4px')=>({tag:'column',width:'weighted',weight:1,vertical_spacing:spacing,elements});
 const row=(columns:unknown[])=>({tag:'column_set',flex_mode:'none',horizontal_spacing:'8px',columns});
-const metricRow=(items:Array<[string,number|string]>)=>row(items.map(([label,value])=>column([md(`${label} **${value}**`)])));
+const metric=(title:string,value:string,note:string)=>column([md(`**${title}**`,{text_align:'center'}),md(`**${value}**`,{text_size:'heading-2',text_align:'center'}),md(note,{text_align:'center'})]);
+const emphasized=(title:string,note:string,color:string,items:unknown[])=>row([{...column([md(`**${title}**`,{text_size:'heading-3'}),md(note,{text_size:'notation'}),...items.flatMap((item,i)=>i?[{tag:'hr'},item]:[item])],'8px'),padding:'12px',background_style:color}]);
 const section=(title:string,items:unknown[])=>row([column([md(`**${title}**`),...items],'8px')]);
 const item=(f:DailyFinding,description=false)=>row([column([
   md(`**${issueLink(f)}**`),
   md(`报错 ${f.count} 次　·　用户 ${f.users} 人　·　较前日 ${f.count===f.previous?'持平':`${f.count>f.previous?'↑':'↓'}${Math.abs(f.count-f.previous)} 次`}`,{text_size:'notation'}),
-  ...(description?[md(f.category==='repair'?compact(f.description):'用户覆盖较多，优先核实业务影响。')]:[]),
+  ...(description?[md(compact(f.description))]:[]),
   ...(f.prs.some(p=>p.label==='已合并')?[md('上线核验：缺少部署版本与事件 release 对照，尚不能判断修复生效。',{text_size:'notation'})]:[]),
   ...(f.prs.length?[md(prLinks(f))]:[])
 ])]);
+const contextFeature=(f:DailyFinding)=>({home:'首页',project:'项目页',pricing:'定价页',account:'账户页',other:'其他页面',unknown:'页面待定位'}[f.context?.page??'unknown']);
+const summaryTitle=(f:DailyFinding)=>{
+  // Translate known error wording only; never infer an affected business operation.
+  const wording=f.title.includes('Event stream idle')?'事件流空闲':f.title.includes('Chat stream completed')?'聊天流结束':f.title.includes("(setting 'innerHTML')")?'页面内容写入异常':'';
+  return wording?`${contextFeature(f)}：${wording}`:/^(?:TypeError|ReferenceError|Error|UnhandledRejection|AbortError|InternalError|NotFoundError):/.test(f.title)?`${contextFeature(f)}异常，调用来源待确认`:compact(f.title,56);
+};
+const originLine=(f:DailyFinding,zone:string)=>{
+  const first=f.firstSeen&&Number.isFinite(Date.parse(f.firstSeen))?new Intl.DateTimeFormat('zh-CN',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(f.firstSeen)):'未知';
+  const release=f.context?.release;return `${contextFeature(f)} · 首次记录 ${first} · 样本版本 ${release?( /^[a-f0-9]{40}$/.test(release)?release.slice(0,10):safe(release)):'未取得'} · 引入版本待确认`;
+};
 export function dailyCard(d:DailyReport):Record<string,unknown>{
   // Count repair PRs, not issue-to-PR associations. Conflicting snapshots remain unknown.
   const uniquePrs=new Map<string,string>();
@@ -32,27 +43,36 @@ export function dailyCard(d:DailyReport):Record<string,unknown>{
     else if(label==='待合并 · 草稿'||label==='待合并 · 待审查')prCounts.pending++;
     else prCounts.unknown++;
   }
-  const {primary,secondary,other:rest}=prioritizeDailyFindings(d.findings);
-  const visible=new Set([...primary,...secondary]);
+  const rank=(a:DailyFinding,b:DailyFinding)=>b.users-a.users||b.count-a.count;
+  const prioritized=prioritizeDailyFindings(d.findings);
+  const progress=d.findings.filter(f=>f.prs.length).sort(rank).slice(0,3);
+  const primary=[...prioritized.primary,...prioritized.secondary,...prioritized.other].filter(f=>!f.prs.length&&(f.category==='repair'||f.category==='investigate')).slice(0,3);
+  const selected=new Set([...primary,...progress]);
+  const secondary=d.findings.filter(f=>!selected.has(f)&&f.isNew&&f.category!=='noise'&&f.category!=='expected').slice(0,6);
+  const visible=new Set([...primary,...progress,...secondary]);
+  const rest=d.findings.filter(f=>!visible.has(f));
   const detail=rest.slice(0,30);
   for(const f of rest.slice(30))if(f.prs.length)detail.push(f);
   const trend=d.previousTotal?d.total===d.previousTotal?'与前日持平':`${d.total>d.previousTotal?'↑':'↓'}${(Math.abs(d.total-d.previousTotal)/d.previousTotal*100).toFixed(1)}%`:'前日无报错';
   const category=(c:DailyFinding['category'])=>{const a=d.findings.filter(f=>f.category===c);return `${a.length} 个 / ${a.reduce((n,f)=>n+f.count,0)} 次`;};
-  const elements:unknown[]=[row([column([
-    metricRow([['报错',d.total.toLocaleString('en-US')],['涉及问题',d.issueCount],['新增问题',d.newCount]]),
-    metricRow([['待合并',prCounts.pending],['已合并',prCounts.merged],['已关闭',prCounts.closed]]),
-    md(`报错较前日 ${trend} · PR 按链接去重${prCounts.unknown?` · ${prCounts.unknown} 个状态待核实`:''}`,{text_size:'notation'})
-  ],'8px')])];
+  const elements:unknown[]=[row([
+    metric('📊 报错概况',d.total.toLocaleString('en-US')+' 次','较前日 '+trend),
+    metric('🔎 问题分布',d.issueCount+' 个','新增 '+d.newCount+' 个'),
+    metric('🛠️ PR 进度',prCounts.merged+' 已合并',`待合并 ${prCounts.pending} · 已关闭 ${prCounts.closed}${prCounts.unknown?' · 待核实 '+prCounts.unknown:''}`)
+  ]),md('昨日完整自然日 · 报错不等于业务失败 · PR 按链接去重',{text_size:'notation'})];
   const comparison=d.previousTotal?(d.total===d.previousTotal?'与前日持平':`较前日${d.total>d.previousTotal?'增加':'减少'} ${(Math.abs(d.total-d.previousTotal)/d.previousTotal*100).toFixed(1)}%`):'前日无报错记录';
-  const overview=!d.findings.length?'昨天没有记录到错误问题。':primary.length
-    ?`昨日报错${comparison}。优先跟进：${primary.map(f=>compact(f.title,42)).join('；')}。${primary.some(f=>f.category==='repair')?'已有修复记录需核对处理结果；':''}${primary.some(f=>f.category==='investigate')?'未归因问题先核实影响。':''}`
-    :`昨日报错${comparison}；目前仅有历史噪音或预期情况的分析记录，仍需留意来源变化。`;
-  elements.push(section('昨日总结',[md(overview),md(`重点 ${primary.length} 项 · 次要 ${secondary.length} 项 · 其他 ${rest.length} 项。分类表示排查顺序，不代表已确认的故障等级。`,{text_size:'notation'})]));
-  if(primary.length)elements.push({tag:'hr'},section('01　重点问题 · 优先跟进',primary.map(f=>item(f,true))));
-  if(secondary.length)elements.push({tag:'hr'},section('02　次要问题 · 继续观察',secondary.map(f=>item(f))));
-  elements.push({tag:'collapsible_panel',expanded:false,header:{title:plain(`03　其他 · ${rest.length} 项 / 详细分析与统计口径`)},padding:'0px',vertical_spacing:'4px',elements:[
-    md(`**分类依据**\n优先跟进有修复分析的问题，再按涉及用户数安排未归因问题；次要项优先保留新增问题。历史噪音、预期情况和未展开问题归入其他。PR 存在不代表问题严重，报错次数不等于业务影响。\n已有修复分析 ${category('repair')}；待核查 ${category('investigate')}；历史噪音 ${category('noise')}；预期情况 ${category('expected')}。`),
-    ...[...visible].filter(f=>f.title.length>64||primary.includes(f)).map(f=>md(`**${safe(f.title)}**\n${safe(f.description)}`)),
+  const major=[...primary.slice(0,2),...progress.slice(0,1)];
+  const overview=!d.findings.length?'昨天没有记录到错误问题。':`昨日报错${comparison}。${progress.length?'已有修复关联记录，需结合部署和事件版本核验效果。':'主要问题仍需补查调用来源及用户影响。'}`;
+  elements.push(section('昨日总结',[
+    md(overview),...major.map(f=>md(`**[${summaryTitle(f)}](${f.url})**\n${originLine(f,d.timezone)}\n${f.category==='repair'?'已有修复分析：'+compact(f.description,100):f.description.startsWith('已有分析：')?compact(f.description,100):'归因：尚未建立事件与具体代码的因果关系。'}`)),
+    md('首次记录不等于缺陷引入；样本版本不代表全部事件版本。引入时间需核对源码变更与发布记录。',{text_size:'notation'})
+  ]));
+  if(primary.length)elements.push(emphasized('🔶 重点关注','按排查优先级排列；业务影响尚未核实。','orange-50',primary.map(f=>item(f))));
+  if(progress.length)elements.push(emphasized('🛠️ 修复进展','关联 PR 最新状态；已合并不代表已上线。','blue-50',progress.map(f=>item(f,true))));
+  if(secondary.length)elements.push(section('持续观察与其他新增',secondary.map(f=>item(f))));
+  elements.push({tag:'collapsible_panel',expanded:false,header:{title:plain(`其他 · ${rest.length} 项 / 详细分析与统计口径`)},padding:'0px',vertical_spacing:'4px',elements:[
+    md(`**分类依据**\n重点关注按已有分析及用户覆盖安排排查顺序；有关联 PR 的问题单列修复进展，其他新增问题简要展示。历史噪音、预期情况和未展开问题归入其他。PR 存在不代表问题严重，报错次数不等于业务影响。\n已有修复分析 ${category('repair')}；待核查 ${category('investigate')}；历史噪音 ${category('noise')}；预期情况 ${category('expected')}。`),
+    ...[...visible].filter(f=>f.title.length>64||primary.includes(f)||progress.includes(f)).map(f=>md(`**${safe(f.title)}**\n${originLine(f,d.timezone)}\n${safe(f.description)}`)),
     ...detail.map(f=>md(`[${safe(f.title)}](${f.url}) · ${stats(f)}${f.isNew?' · 新增':''}\n${prLinks(f)||'暂无关联 PR 记录'}`)),
     md(`[查看当天全部 ${d.issueCount} 个问题](${d.allIssuesUrl})${rest.length>30?' · 此处列出其余问题中报错最多的 30 个，全部关联 PR 均保留。':''}`),
     md(`**口径**\n${d.date} 00:00–24:00（${safe(d.timezone)}），${safe(d.environment)}，覆盖所有状态的错误问题。人数按问题去重，不可相加；报错不等于业务失败。历史分析不代表昨日每条事件都已核实。新增按首次出现时间计算${d.unknownFirstSeen?`；${d.unknownFirstSeen} 个问题缺少首次出现时间，未计入新增`:''}。`),
