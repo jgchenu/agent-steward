@@ -101,7 +101,7 @@ export class SentryConnector implements AlertConnector {
     if(tags.get('environment')!==source.sentry.environment||!eventAt||Date.parse(eventAt)<Date.parse(start)||Date.parse(eventAt)>=Date.parse(end))throw Error('Daily event scope mismatch');
     const eventProject=e.projectID??e.projectId??(typeof e.project==='object'?e.project.id:e.project);
     if(eventProject!==undefined&&String(eventProject)!==source.sentry.projectId)throw Error('Daily event project mismatch');
-    const raw=typeof e.release==='string'?e.release:record(e.release).version;
+    const raw=(typeof e.release==='string'?e.release:record(e.release).version)??tags.get('release');
     const release=typeof raw==='string'&&/^[a-zA-Z0-9_.+-]{1,100}$/.test(raw)?raw:'';
     let page:DailyContext['page']='unknown';
     try{const path=new URL(String(tags.get('url')??record(e.request).url)).pathname.replace(/^\/(?:[a-z]{2}(?:-[a-zA-Z0-9]+)?)\//,'/');

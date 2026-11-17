@@ -75,6 +75,7 @@ test('window context rejects wrong dates and environments and strips private URL
   const event={dateCreated:'2026-11-16T05:00:00Z',release:{version:'a'.repeat(40)},projectID:'123',tags:[{key:'environment',value:'production'},{key:'url',value:'https://example.com/en/project/private-id?token=secret'}]};
   const make=(e:unknown)=>new SentryConnector(async()=>new Response(JSON.stringify([e])),{TEST_TOKEN:'test'});
   const ctx=await make(event).dailyContext(source,'1','2026-11-16T00:00:00Z','2026-11-17T00:00:00Z',new AbortController().signal);
+  const tagged=await make({...event,release:undefined,tags:[...event.tags,{key:'release',value:'b'.repeat(40)}]}).dailyContext(source,'1','2026-11-16T00:00:00Z','2026-11-17T00:00:00Z',new AbortController().signal);assert.equal(tagged!.release,'b'.repeat(40));
   assert.equal(ctx!.page,'project');assert.equal(ctx!.release,'a'.repeat(40));assert.doesNotMatch(JSON.stringify(ctx),/secret|private-id/);
   await assert.rejects(make({...event,dateCreated:'2026-11-17T00:00:00Z'}).dailyContext(source,'1','2026-11-16T00:00:00Z','2026-11-17T00:00:00Z',new AbortController().signal));
   await assert.rejects(make({...event,projectID:'456'}).dailyContext(source,'1','2026-11-16T00:00:00Z','2026-11-17T00:00:00Z',new AbortController().signal));

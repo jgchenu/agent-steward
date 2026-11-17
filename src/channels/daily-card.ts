@@ -20,7 +20,11 @@ const item=(f:DailyFinding,description=false)=>row([column([
   ...(f.prs.length?[md(prLinks(f))]:[])
 ])]);
 const contextFeature=(f:DailyFinding)=>({home:'首页',project:'项目页',pricing:'定价页',account:'账户页',other:'其他页面',unknown:'页面待定位'}[f.context?.page??'unknown']);
-const summaryTitle=(f:DailyFinding)=>/^(?:TypeError|ReferenceError|Error|UnhandledRejection|AbortError|InternalError|NotFoundError):/.test(f.title)?`${contextFeature(f)}异常，调用来源待确认`:compact(f.title,56);
+const summaryTitle=(f:DailyFinding)=>{
+  // Translate known error wording only; never infer an affected business operation.
+  const wording=f.title.includes('Event stream idle')?'事件流空闲':f.title.includes('Chat stream completed')?'聊天流结束':f.title.includes("(setting 'innerHTML')")?'页面内容写入异常':'';
+  return wording?`${contextFeature(f)}：${wording}`:/^(?:TypeError|ReferenceError|Error|UnhandledRejection|AbortError|InternalError|NotFoundError):/.test(f.title)?`${contextFeature(f)}异常，调用来源待确认`:compact(f.title,56);
+};
 const originLine=(f:DailyFinding,zone:string)=>{
   const first=f.firstSeen&&Number.isFinite(Date.parse(f.firstSeen))?new Intl.DateTimeFormat('zh-CN',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(f.firstSeen)):'未知';
   const release=f.context?.release;return `${contextFeature(f)} · 首次记录 ${first} · 样本版本 ${release?( /^[a-f0-9]{40}$/.test(release)?release.slice(0,10):safe(release)):'未取得'} · 引入版本待确认`;
