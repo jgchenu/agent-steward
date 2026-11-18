@@ -65,6 +65,8 @@ export interface BaselineComparison {
 export interface DeliveryReport {
   summary?: import('./delivery-summary.js').DeliverySummary;
   prIsDraft?: boolean;
+  prBranch?: string;
+  prBranchHead?: string;
   remotePr?: import('./pr-monitor.js').RemotePr & {checkedAt:string};
   baselineComparison?: BaselineComparison;
   exceptionAuthorizedKey?: string;

@@ -1,4 +1,4 @@
-import { parseDeliverySummary, draftReason, deliveryMessage } from './delivery-summary.js';
+import { parseDeliverySummary, validBranchSlug, draftReason, deliveryMessage } from './delivery-summary.js';
 import { compareBaseline, runCheck } from './check-comparison.js';
 import { collectEvidence, prepareEvidenceDirectory, isEvidencePath, EVIDENCE_DIRECTORY } from './evidence.js';
 import { mergeCommitAuthors } from './attribution.js';
@@ -89,7 +89,10 @@ export function publicationText(task: Task, report: DeliveryReport): { title: st
       ...report.baselineComparison.checks.map(c=>`- ${c.name}: ${c.status}; diagnostic entries: ${c.failureCount}; rounds [patch 1, base 1, patch 2, base 2]: ${c.roundFailureCounts.join(" / ")}; digest: ${c.digest}`),
       ...report.baselineComparison.probes.map(p=>`- Baseline probe: ${p.check}; ${p.file}; attempt ${p.attempt}; exit ${p.exitCode}; diagnostic entries ${p.failureCount}; digest ${p.digest}`),
       'The owner must explicitly approve this exact draft exception. Failed checks remain failed. This does not authorize merge or deployment.', ''] : []),
-    `Base: ${report.workspace.baseSha}`, `Task branch: ${report.workspace.branch}`,
+    `Base: ${report.workspace.baseSha}`, report.prBranch
+      ? `PR branch: ${report.prBranch}`
+      : !report.prUrl && validBranchSlug(report.summary?.branchSlug) ? `Proposed PR branch: steward/${report.summary.branchSlug} (numbered if occupied)`
+      : `Task branch: ${report.workspace.branch}`,
     `Last observed target: ${report.targetBefore ?? report.workspace.baseSha}`,
     '验证仅覆盖任务源分支，不代表与最新目标分支合并后的结果。合并和部署需另行批准。',
     'Code checks and human acceptance are recorded separately. Agent Steward prepared this PR.',
@@ -175,9 +178,29 @@ export async function publish(store: Store, config: Config, task: Task, project:
   await repoGit(w.path, ['fetch', 'origin', `refs/heads/${target.baseBranch}:refs/remotes/origin/${target.baseBranch}`], signal);
   report.targetBefore = await repoGit(w.path, ['rev-parse', `origin/${target.baseBranch}`], signal);
   store.saveDelivery(task.id, report);
-  const list = async () => JSON.parse(await gh(w.path, ['pr', 'list', '--repo', target.repository, '--head', w.branch,
+  const list = async (branch: string) => JSON.parse(await gh(w.path, ['pr', 'list', '--repo', target.repository, '--head', branch,
     '--state', 'all', '--json', 'number,url,state,baseRefName,headRefName'], signal)) as Array<{ number: number; url: string; state: string; baseRefName: string; headRefName: string }>;
-  let prs = await list();
+  const remoteHead = (branch: string) => repoGit(w.path, ['ls-remote', '--heads', 'origin', `refs/heads/${branch}`], signal);
+  if (report.prBranch && (!report.prBranch.startsWith('steward/') || !validBranchSlug(report.prBranch.slice('steward/'.length), 64))) {
+    throw Error('任务的 PR 分支记录无效。');
+  }
+  let branch = report.prBranch ?? w.branch;
+  let prs = await list(branch);
+  const slug = report.summary?.branchSlug;
+  // Keep the original branch if a legacy publication already made any remote changes.
+  if (!report.prBranch && !report.prUrl && !prs.length && validBranchSlug(slug) && !(await remoteHead(w.branch))) {
+    for (let suffix = 1; suffix <= 100; suffix++) {
+      const candidate = `steward/${slug}${suffix === 1 ? '' : `-${suffix}`}`;
+      const reserved = store.db.prepare("SELECT 1 FROM deliveries WHERE taskId<>? AND json_extract(data,'$.prBranch')=? LIMIT 1").get(task.id, candidate);
+      if (reserved || await remoteHead(candidate) || (await list(candidate)).length) continue;
+      branch = candidate;
+      report.prBranch = candidate;
+      store.saveDelivery(task.id, report);
+      break;
+    }
+    if (!report.prBranch) throw Error('找不到可用的 PR 分支名，请调整修复摘要中的分支名。');
+    prs = await list(branch);
+  }
   if (prs.some(p => p.state !== 'OPEN' || p.baseRefName !== target.baseBranch) || prs.length > 1) throw new Error('任务分支已有关闭、合并或目标不同的 PR，请创建新任务。');
   const advanced=report.targetBefore!==w.baseSha;
   if (project.reviewOnlyPrs && advanced) {
@@ -210,9 +233,13 @@ export async function publish(store: Store, config: Config, task: Task, project:
     }
     store.event(task.id,'draft_target_advanced',JSON.stringify({validatedBase:w.baseSha,targetBefore:report.targetBefore,scope:'draft only; integration not validated'}));
   }
-  const remote = await repoGit(w.path, ['ls-remote', '--heads', 'origin', w.branch], signal);
+  const remote = await remoteHead(branch);
+  if (report.prBranch && prs.some(pr => pr.headRefName !== branch || !remote)) throw Error('PR 与已记录的发布分支不一致。');
   if (remote) {
-    await repoGit(w.path, ['fetch', 'origin', `refs/heads/${w.branch}`], signal);
+    if (report.prBranch && ![report.prBranchHead, report.publishedSha].some(sha => sha && remote.startsWith(sha + '\t'))) {
+      throw Error('远端 PR 分支已被其他提交使用，请核对分支后再继续。');
+    }
+    await repoGit(w.path, ['fetch', 'origin', `refs/heads/${branch}`], signal);
     await repoGit(w.path, ['merge-base', '--is-ancestor', 'FETCH_HEAD', 'HEAD'], signal);
   }
   const pendingFiles = [...new Set([...lines0(await repoGit(w.path, ['diff', '--name-only', '-z', 'HEAD', '--'], signal)),
@@ -230,21 +257,27 @@ export async function publish(store: Store, config: Config, task: Task, project:
   }
   if ((await inventory(w, signal)).fingerprint !== report.fingerprint) throw new Error('提交过程改变了验证过的文件，未推送；请重新验证。');
   const head = await repoGit(w.path, ['rev-parse', 'HEAD'], signal);
-  await repoGit(w.path, ['push', 'origin', `HEAD:refs/heads/${w.branch}`], signal);
-  if (!(await repoGit(w.path, ['ls-remote', '--heads', 'origin', w.branch], signal)).startsWith(head + '\t')) throw new Error('远端提交与本地不一致。');
+  if (report.prBranch) {
+    report.prBranchHead = head;
+    store.saveDelivery(task.id, report);
+  }
+  // An empty lease on initial creation requires the ref to be absent, even if another publisher raced us.
+  const createOnly = report.prBranch && !remote ? [`--force-with-lease=refs/heads/${branch}:`] : [];
+  await repoGit(w.path, ['push', ...createOnly, 'origin', `HEAD:refs/heads/${branch}`], signal);
+  if (!(await remoteHead(branch)).startsWith(head + '\t')) throw new Error('远端提交与本地不一致。');
   const dir = join(config.stateDir, 'artifacts', task.id); mkdirSync(dir, { recursive: true, mode: 0o700 });
   const bodyFile = join(dir, 'pr-body.md'), text = publicationText(task, report);
   writeFileSync(bodyFile, text.body, { mode: 0o600 });
   if (!prs.length) {
-    try { await gh(w.path, ['pr', 'create', '--repo', target.repository, '--head', w.branch, '--base', target.baseBranch,
+    try { await gh(w.path, ['pr', 'create', '--repo', target.repository, '--head', branch, '--base', target.baseBranch,
       ...(requiresDraft ? ['--draft'] : []), '--title', text.title, '--body-file', bodyFile], signal); }
-    catch (error) { prs = await list(); if (!prs.length) throw error; }
-    prs = await list();
+    catch (error) { prs = await list(branch); if (!prs.length) throw error; }
+    prs = await list(branch);
   } else await gh(w.path, ['pr', 'edit', String(prs[0].number), '--repo', target.repository, '--title', text.title, '--body-file', bodyFile], signal);
   const pr = prs[0]; if (!pr) throw new Error('未能回读 PR。');
   const verified = JSON.parse(await gh(w.path, ['pr', 'view', String(pr.number), '--repo', target.repository,
     '--json', 'url,state,headRefName,headRefOid,baseRefName,isDraft'], signal));
-  if (typeof verified.isDraft!=='boolean' || (requiresDraft && verified.isDraft!==true) || (project.reviewOnlyPrs && verified.isDraft) || verified.state !== 'OPEN' || verified.headRefName !== w.branch || verified.baseRefName !== target.baseBranch
+  if (typeof verified.isDraft!=='boolean' || (requiresDraft && verified.isDraft!==true) || (project.reviewOnlyPrs && verified.isDraft) || verified.state !== 'OPEN' || verified.headRefName !== branch || verified.baseRefName !== target.baseBranch
     || verified.headRefOid !== head || verified.url !== `https://github.com/${target.repository}/pull/${pr.number}`) throw new Error('PR 回读身份不一致，请在 GitHub 检查。');
   store.saveDelivery(task.id, { ...report, headSha: head, prUrl: verified.url, prIsDraft:verified.isDraft===true, remotePr:undefined, publishedSha: head, error: undefined });
   if(exception)store.event(task.id,'draft_exception_published',JSON.stringify({url:verified.url,head,base:w.baseSha}));
@@ -275,6 +308,7 @@ export class WorkspaceExecutor implements Executor {
     const initial = await inventory(workspace, signal);
     let report: DeliveryReport = { workspace, mode, ...initial, capturedAt: new Date().toISOString(), checks: [], ready: false, validationKey: validationKey(project),
       commitAuthors: mergeCommitAuthors(previous?.commitAuthors),
+      ...(previous?.prBranch ? {prBranch:previous.prBranch,prBranchHead:previous.prBranchHead} : {}),
       ...(previous?.prUrl ? { prUrl: previous.prUrl, prIsDraft:previous.prIsDraft, remotePr:previous.remotePr, publishedSha: previous.publishedSha } : {}) };
     this.store.saveDelivery(task.id, report);
     try {

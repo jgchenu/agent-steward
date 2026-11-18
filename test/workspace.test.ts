@@ -794,3 +794,46 @@ for (const scenario of ['ready','incomplete','advanced','existing-draft'] as con
     }
   });
 }
+
+
+test('first repair PR uses a descriptive remote branch, numbers collisions and reuses it after follow-up', async () => {
+  const f = fixture();
+  try {
+    f.project.reviewOnlyPrs=true;
+    await f.executor.run(f.task,f.project,hooks,signal());
+    const before=f.store.delivery(f.task.id)!;
+    const baseBranch='steward/fix-home-background-video';
+    const topicBranch=baseBranch+'-2';
+    f.g('push','origin',`HEAD:refs/heads/${baseBranch}`);
+    const summary={title:'修复首页背景视频',branchSlug:'fix-home-background-video',problem:'播放初始化失败。',change:'处理空返回值。',validation:'验证通过。',remaining:[]};
+    const authorize=(report:typeof before)=>f.store.saveDelivery(f.task.id,{...report,authorizedKey:publicationKey(f.task,f.project,report)});
+    authorize({...before,summary});
+    let created=false, edits=0;
+    const pr={number:1,url:'https://github.com/test/repo/pull/1',state:'OPEN',baseRefName:'main',headRefName:topicBranch,isDraft:false};
+    const gh=async(cwd:string,args:string[],sig:AbortSignal)=>{
+      if(args[1]==='list') return JSON.stringify(created&&args[args.indexOf('--head')+1]===topicBranch?[pr]:[]);
+      if(args[1]==='create') {
+        assert.equal(args[args.indexOf('--head')+1],topicBranch);
+        assert.ok(!args.includes('--draft'));
+        created=true;
+        return '';
+      }
+      if(args[1]==='edit'){edits++;return '';}
+      return JSON.stringify({...pr,headRefOid:await git(cwd,['rev-parse','HEAD'],sig)});
+    };
+    const transport:typeof git=async(cwd,args,sig)=>args[0]==='remote'?'https://github.com/test/repo.git':git(cwd,args,sig);
+    await publish(f.store,f.config,f.task,f.project,signal(),gh,transport);
+    const published=f.store.delivery(f.task.id)!;
+    assert.equal(published.prBranch,topicBranch);
+    assert.equal(published.prIsDraft,false);
+    assert.equal(await git(before.workspace.path,['symbolic-ref','--short','HEAD'],signal()),before.workspace.branch);
+    assert.equal(f.g('ls-remote','--heads','origin',baseBranch).split('\t')[0],before.workspace.baseSha);
+    await f.executor.run(f.task,f.project,hooks,signal());
+    const next=f.store.delivery(f.task.id)!;
+    assert.equal(next.prBranch,topicBranch);
+    authorize({...next,summary:{...summary,branchSlug:'fix-video-retry'}});
+    await publish(f.store,f.config,f.task,f.project,signal(),gh,transport);
+    assert.equal(f.store.delivery(f.task.id)?.prBranch,topicBranch);
+    assert.equal(edits,1);
+  } finally {f.close();}
+});

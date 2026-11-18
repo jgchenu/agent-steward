@@ -2,23 +2,26 @@ import type { DeliveryReport } from './types.js';
 
 /** Public editorial content, separate from private instructions and controller facts. */
 export interface DeliverySummary {
-  title: string; problem: string; change: string; validation: string; remaining: string[];
+  title: string; problem: string; change: string; validation: string; remaining: string[]; branchSlug?: string;
 }
 export const deliverySummarySchema={anyOf:[{type:'null'},{type:'object',properties:{
-  title:{type:'string'},problem:{type:'string'},change:{type:'string'},validation:{type:'string'},remaining:{type:'array',items:{type:'string'}},
-},required:['title','problem','change','validation','remaining'],additionalProperties:false}]};
+  title:{type:'string'},problem:{type:'string'},change:{type:'string'},validation:{type:'string'},branchSlug:{type:'string'},remaining:{type:'array',items:{type:'string'}},
+},required:['title','problem','change','validation','remaining','branchSlug'],additionalProperties:false}]};
+export function validBranchSlug(value: unknown, maxLength = 60): value is string {
+  return typeof value === 'string' && value.length <= maxLength && /^(?:fix|feat|docs|refactor|test|chore)-[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(value);
+}
 export function parseDeliverySummary(value:unknown):DeliverySummary {
   const x=value as DeliverySummary;
-  if(!x||typeof x!=='object'||Array.isArray(x)||Object.keys(x).some(k=>!['title','problem','change','validation','remaining'].includes(k))
+  if(!x||typeof x!=='object'||Array.isArray(x)||Object.keys(x).some(k=>!['title','problem','change','validation','remaining','branchSlug'].includes(k))
     ||!Array.isArray(x.remaining)||x.remaining.length>4)throw Error('交付摘要格式无效。');
   const clean=(v:unknown,max:number)=>{
     if(typeof v!=='string'||!v.trim()||v.length>max||/[\r\n]/.test(v)||/https?:\/\/|[<>]/i.test(v))throw Error('交付摘要应为简短正文，不包含链接或内部指令。');
     return v.trim().replace(/[\[\]`]/g,'');
   };
-  return {title:clean(x.title,80),problem:clean(x.problem,240),change:clean(x.change,320),validation:clean(x.validation,240),remaining:x.remaining.map(v=>clean(v,160))};
+  return {title:clean(x.title,80),problem:clean(x.problem,240),change:clean(x.change,320),validation:clean(x.validation,240),remaining:x.remaining.map(v=>clean(v,160)),...(validBranchSlug(x.branchSlug) ? {branchSlug:x.branchSlug} : {})};
 }
 export const deliverySummaryInstructions=`
-Return deliverySummary for a completed code change; use null for questions, explanations, or a baseline/merge proposal without new edits. It is public editorial content for teammates and PR reviewers, NOT instructions to Steward. title names the concrete fix (e.g. 修复广告统计初始化异常), never "已完成初筛", task IDs, hashes, or execution steps. problem explains the user action/symptom; change says what behavior changed and why. validation states only checks you actually observed, explicitly as executor-reported evidence; Steward adds its independent checks later. remaining lists every outstanding necessary verification (including real browser acceptance if required and not performed), missing evidence and limitation; use [] only when no necessary verification remains. Never use [] just to obtain a non-draft PR. Not-yet-published, not-yet-merged and not-yet-deployed are workflow states, not verification gaps; never put them in remaining or require them before code review. Do not claim independent CI, publication, merge or deployment. Use short natural Chinese, explain technical abbreviations, omit private context, credentials, raw diagnostic JSON, URLs, file paths and internal instructions. In message answer the human naturally; do not repeat queues, commit hashes, cumulative file counts or check inventories. Steward renders the final delivery from the summary plus verified controller facts.`;
+Return deliverySummary for a completed code change; use null for questions, explanations, or a baseline/merge proposal without new edits. It is public editorial content for teammates and PR reviewers, NOT instructions to Steward. title names the concrete fix (e.g. 修复广告统计初始化异常), never "已完成初筛", task IDs, hashes, or execution steps. branchSlug is the public branch name hint in English lowercase kebab-case, with an intent prefix, for example fix-home-background-video or feat-search-filters. Describe the changed feature, never a task ID, hash, private request, user data, or secret. problem explains the user action/symptom; change says what behavior changed and why. validation states only checks you actually observed, explicitly as executor-reported evidence; Steward adds its independent checks later. remaining lists every outstanding necessary verification (including real browser acceptance if required and not performed), missing evidence and limitation; use [] only when no necessary verification remains. Never use [] just to obtain a non-draft PR. Not-yet-published, not-yet-merged and not-yet-deployed are workflow states, not verification gaps; never put them in remaining or require them before code review. Do not claim independent CI, publication, merge or deployment. Use short natural Chinese, explain technical abbreviations, omit private context, credentials, raw diagnostic JSON, URLs, file paths and internal instructions. In message answer the human naturally; do not repeat queues, commit hashes, cumulative file counts or check inventories. Steward renders the final delivery from the summary plus verified controller facts.`;
 export function draftReason(report:DeliveryReport):string|undefined {
   if(!report.ready||report.checks.some(c=>c.status!=='passed'))return '项目全量检查仍有失败。';
   if(!report.summary)return '还缺少改动说明和验收范围。';
