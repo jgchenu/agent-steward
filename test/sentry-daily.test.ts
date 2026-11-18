@@ -80,3 +80,10 @@ test('window context rejects wrong dates and environments and strips private URL
   await assert.rejects(make({...event,dateCreated:'2026-11-17T00:00:00Z'}).dailyContext(source,'1','2026-11-16T00:00:00Z','2026-11-17T00:00:00Z',new AbortController().signal));
   await assert.rejects(make({...event,projectID:'456'}).dailyContext(source,'1','2026-11-16T00:00:00Z','2026-11-17T00:00:00Z',new AbortController().signal));
 });
+
+
+test('yesterday summary is plain language while technical origin stays in folded detail',()=>{
+ const f={id:'1',title:"TypeError: Cannot set properties of null (setting 'innerHTML')",count:65,users:38,previous:86,isNew:false,category:'investigate' as const,firstSeen:'2026-05-20T06:15:29Z',url:'https://example.sentry.io/issues/1/',description:'Unattributed',prs:[],context:{page:'home' as const,eventAt:'2026-11-16T06:00:00Z',release:'46304648c0'}};
+ const card=dailyCard({title:'Example',date:'2026-11-16',timezone:'Asia/Shanghai',environment:'production',checkedAt:'now',total:65,previousTotal:86,issueCount:1,newCount:0,unknownFirstSeen:0,allIssuesUrl:'https://example.sentry.io/issues/',findings:[f]});
+ const elements=(card.body as any).elements,summary=JSON.stringify(elements[2]);assert.match(summary,/5月就有记录/);assert.match(summary,/触发原因还在查/);assert.doesNotMatch(summary,/46304648c0|引入版本待确认|样本版本|因果关系/);assert.match(JSON.stringify(elements.at(-1)),/46304648c0/);
+});
