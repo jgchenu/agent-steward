@@ -69,7 +69,7 @@ export function alertProgressCard(store: Store, config: Config, topic: AlertTopi
   const subtitle = `${source.reportLabel ?? project?.label ?? task.project} · ${status}`;
   return {
     schema: '2.0',
-    config: { update_multi: true, enable_forward: true, width_mode: 'default', summary: plain(`${title} · ${status}`) },
+    config: { update_multi: true, enable_forward: true, width_mode: 'default', summary: { content: `${title} · ${status}` } },
     header: { title: plain(title), subtitle: plain(subtitle), template },
     body: { direction: 'vertical', padding: '12px', vertical_spacing: '8px', elements: [markdown(fields.join('\n')), { tag: 'hr' }, markdown(links.join('　·　'))] },
   };
