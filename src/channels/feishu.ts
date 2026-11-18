@@ -1,8 +1,9 @@
+import { alertProgressCard } from './alert-progress-card.js';
 import { dailyCard } from './daily-card.js';
 import { summaryCard } from './summary-card.js';
 import { ownerPrOverview } from '../pr-overview.js';
 import { publicationBlocker, canRequestDraftException } from '../workspace.js';
-import { alertTopic, alertUpdateCurrent, currentAlertTask, groupAlertSummary, recordTopicMessage } from '../alert-collaboration.js';
+import { alertTopic, alertUpdateCurrent, currentAlertTask, recordTopicMessage } from '../alert-collaboration.js';
 import { evidenceBytes } from '../evidence.js';
 import { createHash } from 'node:crypto';
 import * as lark from '@larksuiteoapi/node-sdk';
@@ -124,8 +125,7 @@ export class FeishuChannel implements Channel {
         if(this.store.cardMessage(chatId,recalled))return;
         const task=currentAlertTask(this.store,topic);if(!task)throw Error('话题任务已变化');
         // Retry the newest state, not an older queued snapshot of the same revision.
-        const latest=groupAlertSummary(this.store,this.config,topic,task);
-        const content=JSON.stringify(summaryCard(replyChunks(latest).join('\n'),'alert'));
+        const content=JSON.stringify(alertProgressCard(this.store,this.config,topic,task));
         const hash=createHash('sha256').update(content).digest('hex');
         if(this.store.cardMessage(chatId,`${key}:content`)===hash)return;
         const existing=this.store.cardMessage(chatId,key)??(this.store.cardMessage(chatId,`summary-card:${topic.rootId}`)?topic.rootId:undefined);
@@ -179,11 +179,13 @@ export class FeishuChannel implements Channel {
       const workspace = scopedTask && this.store.workspace(scopedTask.id);
       const roots = [workspace?.path, workspace?.source, scopedTask && this.config.projects[scopedTask.project]?.path]
         .filter((path): path is string => typeof path === 'string');
-      const chunks = replyChunks(readableFileReferences(text, roots));
+      const rootTask = topic && collaboration?.root ? currentAlertTask(this.store, topic) : undefined;
+      const rootCard = rootTask && rootTask.chatId === chatId && topic ? alertProgressCard(this.store, this.config, topic, rootTask) : undefined;
+      const chunks = rootCard ? [''] : replyChunks(readableFileReferences(text, roots));
       for (let i = 0; i < chunks.length; i++) {
         const key = `reply:${deliveryId}:${i}`;
         if (this.store.cardMessage(chatId, key)) continue;
-        const content = JSON.stringify(view?.kind==='scheduled-report'&&view.daily?dailyCard(view.daily):summaryCard(chunks[i],collaboration?'alert':view?.kind==='scheduled-report'?'report':'reply'));
+        const content = JSON.stringify(rootCard ?? (view?.kind==='scheduled-report'&&view.daily?dailyCard(view.daily):summaryCard(chunks[i],collaboration?'alert':view?.kind==='scheduled-report'?'report':'reply')));
         // Feishu accepts at most 50 characters, including for thread replies.
         const uuid = createHash('sha256').update(`${deliveryId}:${i}`).digest('hex').slice(0, 32);
         const result = view?.conversation

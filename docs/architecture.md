@@ -455,6 +455,8 @@ Feishu replies, daily/weekly reports, owner PR overviews and group progress use 
 
 Legacy post overviews receive one new card under a versioned receipt. Legacy group posts receive one card reply in their existing topic; subsequent changes patch that card. Native card roots are patched directly. Platform expiry/recall keeps the bounded replacement policy; unknown and permission errors never trigger replacement. Historical posts are not bulk rewritten or rebroadcast. Private report previews do not authorize group publication or a recurring schedule.
 
+Group repair topic roots use the issue title and an explicit status in the header. The body renders only shareable issue, repair and validation summaries with one row of links. Draft, review-ready, closed and merged labels follow the recorded PR state. The card uses the existing topic authorization, durable receipts and update deduplication.
+
 ### Calendar-day Sentry reports
 
 The native `sentry_daily` report provider is distinct from the handled-task `alert_activity` provider. Owner conversation proposals choose the provider explicitly; legacy proposals preserve the existing provider or default to activity. Daily reports use the previous local calendar day (DST-aware), not the task cursor or a rolling 24-hour window. A delayed first run reports yesterday at actual generation time; retries retain their original calendar window. Provider and destination survive pause/resume. No new Codex automation or independent scheduler is introduced.
