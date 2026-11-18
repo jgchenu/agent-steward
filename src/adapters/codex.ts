@@ -57,6 +57,16 @@ export interface RpcPort {
   write(message: unknown): void; close(): void | Promise<void>;
 }
 
+function isUnavailableModel(error: unknown): boolean {
+  if (!(error instanceof Error) || !error.message.trimStart().startsWith('{')) return false;
+  try {
+    const payload = JSON.parse(error.message);
+    return payload?.type === 'error' && payload?.error?.code === 'model_not_found';
+  } catch {
+    return false;
+  }
+}
+
 export class CodexExecutor implements Executor {
   readonly commitAuthors = [{ name: 'Codex', email: 'codex@openai.com' }] as const;
   constructor(private command = 'codex', private factory: (command: string, cwd: string, scope?: SentryMcp) => RpcPort
@@ -269,6 +279,11 @@ If migration is needed, propose it before doing more implementation on the obsol
         || (fields.projectId !== '' && !candidates.includes(fields.projectId))) throw new Error('项目路由响应无效，未分配工作区。');
       if (fields.projectId) hooks.proposeProject!(fields.projectId);
       return fields.message.trim() || '本任务需要使用代码资源。';
+    } catch (error) {
+      if (isUnavailableModel(error)) {
+        throw new Error('分身账号用不了当前模型，请在分身控制台换一个可用模型。');
+      }
+      throw error;
     } finally {
       finished = true;
       signal.removeEventListener('abort', abort);
