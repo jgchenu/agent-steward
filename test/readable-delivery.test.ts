@@ -4,6 +4,7 @@ import {Store} from '../src/store.js';
 import {parseDeliverySummary,draftReason,deliveryMessage} from '../src/delivery-summary.js';
 import {publicationText,publicationKey} from '../src/workspace.js';
 import {buildCard} from '../src/channels/cards.js';
+import {alertProgressCard} from '../src/channels/alert-progress-card.js';
 import {FeishuChannel} from '../src/channels/feishu.js';
 import {ownerPrOverview,syncOwnerPrOverviews} from '../src/pr-overview.js';
 import {PublishedPrMonitor,type RemotePr} from '../src/pr-monitor.js';
@@ -54,6 +55,10 @@ test('group root and owner overview update in place, deduplicate and recheck sou
   const row=f.store.db.prepare("SELECT * FROM outbox WHERE json_extract(view,'$.updateRoot')=1").get()!;
   await channel.send('oc_group',String(row.text),String(row.id),JSON.parse(String(row.view)) as View);
   assert.equal(updates[0].path.message_id,'root');assert.equal(JSON.parse(updates[0].data.content).schema,'2.0');assert.doesNotMatch(updates[0].data.content,/PRIVATE|代码来源/);
+  const card=JSON.parse(updates[0].data.content);
+  assert.equal(card.header.title.content,'广告统计初始化异常');
+  assert.match(card.header.subtitle.content,/待确认提交/);
+  assert.doesNotMatch(card.body.elements[0].content,/广告统计初始化异常/);
   await channel.send('oc_dm','','one',{kind:'pr-overview'});await channel.send('oc_dm','','retry',{kind:'pr-overview'});
   assert.equal(creates.length,1);assert.equal(creates[0].data.msg_type,'interactive');assert.equal(updates.at(-1).path.message_id,'overview');
   assert.match(ownerPrOverview(f.store,f.config,'oc_dm')!,/需要你处理/);assert.equal(ownerPrOverview(f.store,f.config,'oc_group'),undefined);
@@ -148,5 +153,29 @@ test('legacy group posts migrate to one card reply and then patch that reply',as
   assert.equal(replies.length,1);assert.equal(patches.length,0);assert.equal(replies[0].data.msg_type,'interactive');assert.equal(replies[0].path.message_id,'root');
   f.store.saveDelivery(f.task.id,{...f.report,prUrl:'https://github.com/example/web/pull/1'});
   await channel.send('oc_group','','new-state',view);assert.equal(replies.length,1);assert.equal(patches.length,1);
+ }finally{f.store.close();}
+});
+
+
+test('repair cards distinguish review, legacy drafts and verified merges', () => {
+ const f=fixture();
+ const prUrl='https://github.com/example/web/pull/2310';
+ const read=()=>alertProgressCard(f.store,f.config,f.topic,f.task);
+ try {
+  f.store.saveDelivery(f.task.id,{...f.report,prUrl,prIsDraft:true,ready:false,checks:[{name:'unit tests',status:'failed',log:'PRIVATE'}]});
+  const draft=read();
+  assert.match(draft.header.subtitle.content,/草稿 PR/);
+  assert.match(JSON.stringify(draft.body),/项目检查未通过/);
+  assert.doesNotMatch(JSON.stringify(draft),/PRIVATE|unit tests|待审查/);
+  assert.match(JSON.stringify(draft.body),/查看 PR #2310/);
+  f.store.saveDelivery(f.task.id,{...f.report,prUrl,prIsDraft:false});
+  assert.match(read().header.subtitle.content,/待审查/);
+  const remote={url:prUrl,state:'MERGED' as const,isDraft:false,headRefOid:f.report.headSha,baseRefName:'main',mergedAt:'2026-11-18T01:00:00Z',checkedAt:'2026-11-18T01:01:00Z'};
+  f.store.saveDelivery(f.task.id,{...f.report,prUrl,prIsDraft:false,remotePr:remote});
+  const merged=read();
+  assert.match(merged.header.subtitle.content,/已合并/);
+  assert.match(JSON.stringify(merged.body),/待核对生产发布和实际效果/);
+  f.store.saveDelivery(f.task.id,{...f.report,prUrl,prIsDraft:false,remotePr:{...remote,url:'https://github.com/example/web/pull/9999'}});
+  assert.match(read().header.subtitle.content,/待审查/);
  }finally{f.store.close();}
 });
