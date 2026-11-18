@@ -57,6 +57,8 @@ test('group root and owner overview update in place, deduplicate and recheck sou
   assert.equal(updates[0].path.message_id,'root');assert.equal(JSON.parse(updates[0].data.content).schema,'2.0');assert.doesNotMatch(updates[0].data.content,/PRIVATE|代码来源/);
   const card=JSON.parse(updates[0].data.content);
   assert.equal(card.header.title.content,'广告统计初始化异常');
+  // Feishu Card 2.0 rejects the text component tag in config.summary.
+  assert.deepEqual(card.config.summary,{content:'广告统计初始化异常 · 待确认提交'});
   assert.match(card.header.subtitle.content,/待确认提交/);
   assert.doesNotMatch(card.body.elements[0].content,/广告统计初始化异常/);
   await channel.send('oc_dm','','one',{kind:'pr-overview'});await channel.send('oc_dm','','retry',{kind:'pr-overview'});
