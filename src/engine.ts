@@ -34,7 +34,7 @@ const HELP = `Agent Steward · 个人 Agent 分身（预览版）
 /source <任务ID> — 查看实际代码来源
 /model [任务ID] — 查看本轮或最近一轮的模型与思考强度
 /baseline <任务ID> — 选择代码版本并从新副本继续
-/publish <任务ID> — 预览草稿 PR 交付
+/publish <任务ID> — 预览 PR 交付
 /merge <任务ID> <PR链接> — 检查 PR，确认后代为合并
 /list 或 /status <任务ID> — 查进度
 /cancel <任务ID> — 取消执行（不会回滚已有改动）
@@ -84,6 +84,9 @@ export class Engine {
     for (const run of this.active.values()) {
       const t = run.task, p = next.projects[t.project];
       try { assertAlertAuthorized(this.store,this.config,t); } catch {run.abort.abort(new Error('告警来源授权已变化，执行已停止。'));}
+      if (t.nextAction === 'publish' && p?.reviewOnlyPrs !== previous[t.project]?.reviewOnlyPrs) {
+        run.abort.abort(new Error('PR 发布方式已变化，请重新预览交付。'));
+      }
       if (t.project !== CONVERSATION && (!p || p.path !== previous[t.project]?.path || p.workspaceMode !== previous[t.project]?.workspaceMode || (t.mode === 'workspace-write' && p.sandbox !== 'workspace-write'))) run.abort.abort(new Error('项目授权或执行位置已变化，执行已停止；已有改动保留。'));
     }
   }
@@ -338,7 +341,7 @@ export class Engine {
         if(message.conversation)this.store.saveConversation(id,message.conversation);
         reply('我先核对 PR 的提交、目标分支和检查结果，确认后再代你合并。',{kind:'reply',taskId:id});return;
       }
-      if (command === '/publish') { reply('请先查看交付预览，再明确创建草稿 PR。', { kind: 'publication', taskId: id, fresh: true }); return; }
+      if (command === '/publish') { reply('请先查看改动和验证结果，再确认提交 PR。', { kind: 'publication', taskId: id, fresh: true }); return; }
       if (command === '/status') {
         const requests = this.store.requests(id).map(r => `待处理请求：${r.id} · ${r.kind}`).join('\n');
         reply(`${id} · ${task.project} · ${task.status}\n${task.result ?? this.store.latestProgress(id)}\n${requests}`, { kind: 'task', taskId: id, fresh: true }); return;
@@ -419,7 +422,7 @@ export class Engine {
         if (!this.store.consume('card:' + action.id) || !this.store.useAction(action.actionId)) return;
         this.store.saveDelivery(task.id, { ...report, authorizedKey: exception ? undefined : i.publicationKey, exceptionAuthorizedKey: exception ? i.publicationKey : undefined });
         this.store.queuePublication(task.id);
-        this.store.event(task.id, exception?'draft_exception_authorized':'publication_authorized', JSON.stringify({actorId:action.senderId,scope:draftReason(report)?'source-branch push and draft PR only':'source-branch push and PR for review; fallback to draft if target advances',key:i.publicationKey,baselineComparison:exception?report.baselineComparison:undefined}));
+        this.store.event(task.id, exception?'draft_exception_authorized':'publication_authorized', JSON.stringify({actorId:action.senderId,scope:project.reviewOnlyPrs?'source-branch push and PR for review':draftReason(report)?'source-branch push and draft PR only':'source-branch push and PR for review; fallback to draft if target advances',key:i.publicationKey,baselineComparison:exception?report.baselineComparison:undefined}));
         this.store.event(task.id,'publication_card',action.messageId);
         this.store.enqueue(task.chatId,'',{kind:'publication-receipt',taskId:task.id,targetMessageId:action.messageId});
       });
@@ -695,7 +698,7 @@ export class Engine {
         throw new Error('项目交付配置已变化，请按当前配置重新准备 PR。');
       }
       let publicResult=report && task.mode==='workspace-write' && (report.summary || task.nextAction==='publish' || isGroupAlertTask(this.store,task)) && !baseline && !merge
-        ? deliveryMessage(report) : result;
+        ? deliveryMessage(report,project.reviewOnlyPrs) : result;
       this.store.transaction(() => {
         if(schedule){if(scheduleRevision(this.store,this.config)!==recurringRevision)throw Error('定时配置或授权已变化，请按最新安排重试。');result=applySchedule(this.store,this.config,task,schedule);publicResult=result;}
         this.store.set(task.id, 'review', result);

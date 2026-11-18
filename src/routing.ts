@@ -8,7 +8,9 @@ export function projectAnswer(text: string): 'yes' | 'no' | undefined {
   if (/^(不|不是|不对|不要|取消|算了|no|nope)$/.test(answer)) return 'no';
 }
 export function projectGrantKey(project: Project): string {
-  return createHash('sha256').update(JSON.stringify(project)).digest('hex');
+  // Publication policy is bound by publicationKey. It does not change project access.
+  const {reviewOnlyPrs: _reviewOnlyPrs, ...grant} = project;
+  return createHash('sha256').update(JSON.stringify(grant)).digest('hex');
 }
 // Explicit project names only; other people's context never chooses a working directory.
 export function namedProjects(config: Config, text: string): string[] {

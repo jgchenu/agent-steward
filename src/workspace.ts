@@ -91,8 +91,8 @@ export function publicationText(task: Task, report: DeliveryReport): { title: st
       'The owner must explicitly approve this exact draft exception. Failed checks remain failed. This does not authorize merge or deployment.', ''] : []),
     `Base: ${report.workspace.baseSha}`, `Task branch: ${report.workspace.branch}`,
     `Last observed target: ${report.targetBefore ?? report.workspace.baseSha}`,
-    '验证仅覆盖任务源分支，不代表与最新目标分支合并后的结果。发布前会重新读取目标；若目标已前进，仅当仍包含此基准且 PR 为草稿时继续，否则停止并准备迁移。合并和部署仍需另行批准。',
-    'The owner requested this draft PR from Agent Steward. Code checks are recorded separately from human acceptance. No merge or deployment was performed.',
+    '验证仅覆盖任务源分支，不代表与最新目标分支合并后的结果。合并和部署需另行批准。',
+    'Code checks and human acceptance are recorded separately. Agent Steward prepared this PR.',
   ].join('\n') };
 }
 export const validationKey = (project: Project) => createHash('sha256').update(JSON.stringify(project.worktree?.checks ?? [])).digest('hex');
@@ -110,17 +110,18 @@ export function publicationBlocker(task: Task, project: Project | undefined, rep
     return `请求交付到 ${requested.repository} → ${requested.baseBranch}，但项目当前配置为 ${target.repository} → ${target.baseBranch}。未替换目标或发起发布，请先在本机配置正确的交付目标，并按对应基准准备和验证改动。`;
   }
   if (!report) return '尚无代码改动与验证记录，请先完成执行。';
-  if (report.targetBlocked) return 'PR 发布暂缓：目标历史或现有 PR 状态不允许沿用当前基准发布草稿。已有代码和检查记录保留，需迁移并重新验证。';
+  if (report.targetBlocked) return 'PR 发布暂缓。请将改动迁移到最新目标分支，并重新验证。';
   if (report.workspace.baseRef !== `origin/${project.worktree.github.baseBranch}`) return '任务基准与 PR 目标不同，需先在正确基准的新副本准备改动；原副本保留。';
   if (!report.files.length) return '没有文件改动，无需创建 PR。';
   if (!project.worktree.checks.length) return '项目未配置 Steward 独立检查，需要先配置并运行项目验证；模型自报通过不能替代检查记录。';
   if (report.validationKey !== validationKey(project)) return '检查配置已变化，需要按当前配置重新验证。';
   if (report.error) return `检查未完成：${report.error}`;
   if (!report.ready || !report.checks.length || !report.checks.every(c => c.status === 'passed')) {
-    if (allowBaselineException && baselineExceptionEligible(task,project,report)) return;
+    if (allowBaselineException && !project.reviewOnlyPrs && baselineExceptionEligible(task,project,report)) return;
     const failed=report.checks.filter(c=>c.status==='failed').map(c=>c.name).join('、');
-    return `Steward 独立检查尚未全部通过：${failed || '检查未完成'}。${report.baselineComparison?.reason ?? '尚无独立基线对照，不能确定是否为本次新增失败。请补齐对照后再申请仅本次草稿发布；不会自动合并或上线。'}`;
+    return `Steward 独立检查尚未全部通过：${failed || '检查未完成'}。${report.baselineComparison?.reason ?? '尚无独立基线对照，不能确定是否为本次新增失败。'}${project.reviewOnlyPrs?' 补齐检查后才能提交审查。':' 请补齐对照后再申请仅本次草稿发布。'}`;
   }
+  if (project.reviewOnlyPrs) return draftReason(report);
 }
 export function baselineExceptionEligible(task: Task, project: Project, report: DeliveryReport): boolean {
   const c=report.baselineComparison, checks=project.worktree?.checks ?? [];
@@ -141,7 +142,7 @@ export function canPublish(task: Task, project: Project | undefined, report: Del
 }
 
 export function publicationKey(task: Task, project: Project, report: DeliveryReport): string {
-  return createHash('sha256').update(JSON.stringify(['readable-publication-v3',task.id, project.path, project.worktree?.github,
+  return createHash('sha256').update(JSON.stringify(['readable-publication-v3',task.id, project.path, project.worktree?.github, project.reviewOnlyPrs === true,
     report.workspace, report.fingerprint, report.validationKey, report.checks, report.baselineComparison, report.commitAuthors, report.summary, publicationText(task, report)])).digest('hex');
 }
 
@@ -155,7 +156,9 @@ export async function publish(store: Store, config: Config, task: Task, project:
   gh: Gh = ghCommand, repoGit: typeof git = git): Promise<string> {
   const report = store.delivery(task.id), target = project.worktree?.github;
   const exception=!!report && canRequestDraftException(task,project,report) && report.exceptionAuthorizedKey===publicationKey(task,project,report);
-  if (!report || !target || (!canPublish(task, project, report) && !exception)) throw new Error('只有存在文件改动且配置验证全部通过的修改任务可以交付 PR。');
+  if (!report || !target || (!canPublish(task, project, report) && !exception)) {
+    throw new Error(project.reviewOnlyPrs ? publicationBlocker(task,project,report) : '只有存在文件改动且配置验证全部通过的修改任务可以交付 PR。');
+  }
   if (!exception && report.authorizedKey !== publicationKey(task, project, report)) throw new Error('交付内容或目标已变化，请重新预览并确认。');
   if(exception){
     report.exceptionAuthorizedKey=undefined;store.saveDelivery(task.id,report);
@@ -177,6 +180,16 @@ export async function publish(store: Store, config: Config, task: Task, project:
   let prs = await list();
   if (prs.some(p => p.state !== 'OPEN' || p.baseRefName !== target.baseBranch) || prs.length > 1) throw new Error('任务分支已有关闭、合并或目标不同的 PR，请创建新任务。');
   const advanced=report.targetBefore!==w.baseSha;
+  if (project.reviewOnlyPrs && advanced) {
+    report.targetBlocked = true;
+    report.authorizedKey = undefined;
+    store.saveDelivery(task.id,report);
+    throw new TargetBranchMoved(`origin/${target.baseBranch}`,w.baseSha,report.targetBefore);
+  }
+  if (project.reviewOnlyPrs && prs.length) {
+    const existing = JSON.parse(await gh(w.path, ['pr','view',String(prs[0].number),'--repo',target.repository,'--json','isDraft'],signal));
+    if (existing.isDraft !== false) throw new Error('任务分支已有 Draft PR。确认该 PR 适合审查后，请在 GitHub 转为 Ready for review，再发布更新。');
+  }
   let draftOnly=!prs.length;
   const requiresDraft=!!draftReason(report);
   if((requiresDraft || advanced) && prs.length){
@@ -231,11 +244,11 @@ export async function publish(store: Store, config: Config, task: Task, project:
   const pr = prs[0]; if (!pr) throw new Error('未能回读 PR。');
   const verified = JSON.parse(await gh(w.path, ['pr', 'view', String(pr.number), '--repo', target.repository,
     '--json', 'url,state,headRefName,headRefOid,baseRefName,isDraft'], signal));
-  if (typeof verified.isDraft!=='boolean' || (requiresDraft && verified.isDraft!==true) || verified.state !== 'OPEN' || verified.headRefName !== w.branch || verified.baseRefName !== target.baseBranch
+  if (typeof verified.isDraft!=='boolean' || (requiresDraft && verified.isDraft!==true) || (project.reviewOnlyPrs && verified.isDraft) || verified.state !== 'OPEN' || verified.headRefName !== w.branch || verified.baseRefName !== target.baseBranch
     || verified.headRefOid !== head || verified.url !== `https://github.com/${target.repository}/pull/${pr.number}`) throw new Error('PR 回读身份不一致，请在 GitHub 检查。');
   store.saveDelivery(task.id, { ...report, headSha: head, prUrl: verified.url, prIsDraft:verified.isDraft===true, remotePr:undefined, publishedSha: head, error: undefined });
   if(exception)store.event(task.id,'draft_exception_published',JSON.stringify({url:verified.url,head,base:w.baseSha}));
-  return deliveryMessage(store.delivery(task.id)!);
+  return deliveryMessage(store.delivery(task.id)!,project.reviewOnlyPrs);
 }
 
 export class WorkspaceExecutor implements Executor {

@@ -589,6 +589,7 @@ test('independent stable baseline failures enable only a scoped draft exception;
     const card=JSON.stringify(buildCard(f.store,f.config,'dm',{kind:'publication',taskId:f.task.id}));
     assert.match(card,/仅本次发布草稿/);assert.match(card,/全仓检查仍未通过/);
     assert.equal(canRequestDraftException({...f.task,requesterId:'delegate'},f.project,report),false);
+    assert.equal(canRequestDraftException(f.task,{...f.project,reviewOnlyPrs:true},report),false);
     assert.equal(canRequestDraftException(f.task,f.project,{...report,fingerprint:'changed'}),false);
     assert.equal(canRequestDraftException(f.task,f.project,{...report,targetBefore:'new-target',targetBlocked:true}),false);
     const changedProject=structuredClone(f.project);changedProject.worktree!.checks[0].args.push('changed');
@@ -744,3 +745,52 @@ for(const kind of ['ready','browser','advanced'] as const)test(`publisher create
   if(kind==='advanced')assert.match(result,/目标分支/);
  }finally{f.close();}
 });
+
+
+for (const scenario of ['ready','incomplete','advanced','existing-draft'] as const) {
+  test(`review-only publication handles ${scenario} without falling back to Draft`, async () => {
+    const f = fixture();
+    try {
+      await f.executor.run(f.task,f.project,hooks,signal());
+      const report = {...f.store.delivery(f.task.id)!,summary:{title:'修复文档内容',problem:'内容有误。',change:'更正内容。',validation:'内容检查通过。',remaining:scenario==='incomplete'?['还需浏览器验证']:[]}};
+      const oldKey = publicationKey(f.task,f.project,report);
+      f.project.reviewOnlyPrs = true;
+      const key = publicationKey(f.task,f.project,report);
+      assert.notEqual(key,oldKey);
+      f.store.saveDelivery(f.task.id,{...report,authorizedKey:key});
+      if (scenario==='advanced') {
+        f.g('commit','--allow-empty','-m','upstream');
+        f.g('push','origin','main');
+      }
+      let pushes = 0, creates = 0;
+      const transport:typeof git = async (cwd,args,sig) => {
+        if (args[0]==='remote') return 'https://github.com/test/repo.git';
+        if (args[0]==='push') pushes++;
+        return git(cwd,args,sig);
+      };
+      const gh = async (cwd:string,args:string[],sig:AbortSignal) => {
+        const pr = {number:1,url:'https://github.com/test/repo/pull/1',state:'OPEN',baseRefName:'main',headRefName:report.workspace.branch,isDraft:scenario==='existing-draft'};
+        if (args[1]==='list') return JSON.stringify(creates||pr.isDraft?[pr]:[]);
+        if (args[1]==='view') return JSON.stringify({...pr,headRefOid:await git(cwd,['rev-parse','HEAD'],sig)});
+        assert.equal(args[1],'create');
+        assert.ok(!args.includes('--draft'));
+        creates++;
+        return '';
+      };
+      const operation = publish(f.store,f.config,f.task,f.project,signal(),gh,transport);
+      if (scenario==='ready') {
+        assert.match(await operation,/可以开始代码审查/);
+        assert.equal(f.store.delivery(f.task.id)?.prIsDraft,false);
+        assert.equal(pushes,1);
+        assert.equal(creates,1);
+      } else {
+        const reason = {incomplete:/浏览器验证/,advanced:/目标分支已更新/,'existing-draft':/已有 Draft PR/}[scenario];
+        await assert.rejects(operation,reason);
+        assert.equal(pushes,0);
+        assert.equal(creates,0);
+      }
+    } finally {
+      f.close();
+    }
+  });
+}

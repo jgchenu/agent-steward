@@ -125,7 +125,7 @@ export function groupAlertSummary(store:Store,config:Config,topic:AlertTopic,tas
   const body=merged && publicPr(config,task,merged.url)
     ? `${report?.summary?.title ?? description?.summary ?? '修复进展'}\n\n[查看已合并 PR](${merged.url})。上线和效果验证尚未确认。`
     : report?.remotePr?.state==='CLOSED' && pr ? `${report.summary?.title ?? description?.summary ?? '修复进展'}\n\n[查看已关闭 PR](${pr})。该 PR 未合并，后续处理需重新确认。`
-    : report?.summary && task.status==='review' ? deliveryMessage({...report,prUrl:pr})
+    : report?.summary && task.status==='review' ? deliveryMessage({...report,prUrl:pr},config.projects[task.project]?.reviewOnlyPrs)
     : `${description?.summary ?? '问题跟进'}\n\n${description?.impact ?? ''}\n${task.status==='waiting_approval'?'有一项操作需要你在本话题确认。':task.status==='waiting_input'?'还需要补充信息，具体问题见本话题。':['failed','interrupted','cancelled'].includes(task.status)?'当前处理已暂停，改动和证据已保留。':pr?`[查看修复 PR](${pr})。下一步是审查和验收。`:'改动已准备，正在确认验证结果和交付范围。'}`;
   return `${body}\n\n[查看 Sentry 问题](${sentryIssueUrl(config.alertSources![topic.sourceId],topic.issueId)})`;
 }

@@ -20,12 +20,12 @@ export function parseDeliverySummary(value:unknown):DeliverySummary {
 export const deliverySummaryInstructions=`
 Return deliverySummary for a completed code change; use null for questions, explanations, or a baseline/merge proposal without new edits. It is public editorial content for teammates and PR reviewers, NOT instructions to Steward. title names the concrete fix (e.g. 修复广告统计初始化异常), never "已完成初筛", task IDs, hashes, or execution steps. problem explains the user action/symptom; change says what behavior changed and why. validation states only checks you actually observed, explicitly as executor-reported evidence; Steward adds its independent checks later. remaining lists every outstanding necessary verification (including real browser acceptance if required and not performed), missing evidence and limitation; use [] only when no necessary verification remains. Never use [] just to obtain a non-draft PR. Not-yet-published, not-yet-merged and not-yet-deployed are workflow states, not verification gaps; never put them in remaining or require them before code review. Do not claim independent CI, publication, merge or deployment. Use short natural Chinese, explain technical abbreviations, omit private context, credentials, raw diagnostic JSON, URLs, file paths and internal instructions. In message answer the human naturally; do not repeat queues, commit hashes, cumulative file counts or check inventories. Steward renders the final delivery from the summary plus verified controller facts.`;
 export function draftReason(report:DeliveryReport):string|undefined {
-  if(!report.ready||report.checks.some(c=>c.status!=='passed'))return '项目全量检查仍有失败，只适合先以草稿交付审查。';
-  if(!report.summary)return '还缺少改动说明和验收范围，暂留草稿。';
+  if(!report.ready||report.checks.some(c=>c.status!=='passed'))return '项目全量检查仍有失败。';
+  if(!report.summary)return '还缺少改动说明和验收范围。';
   if(report.summary.remaining.length)return `还需确认：${report.summary.remaining.join('；')}`;
   if(report.targetBefore && report.targetBefore!==report.workspace.baseSha)return '目标分支已有更新，尚未验证与最新代码合并后的结果。';
 }
-export function deliveryMessage(report:DeliveryReport):string {
+export function deliveryMessage(report:DeliveryReport,reviewOnly=false):string {
   const s=report.summary,reason=draftReason(report),draft=report.prIsDraft!==false;
   const link=report.prUrl ? `[查看${draft?'草稿 ':''}PR #${report.prUrl.split('/').pop()}](${report.prUrl})` : '';
   const verification=report.ready?'配置检查已通过。':report.baselineComparison?.eligible
@@ -33,5 +33,5 @@ export function deliveryMessage(report:DeliveryReport):string {
     : '验证尚未完成，暂不能发布。';
   return [s?.title ?? '代码修改进展',s?`${s.problem}\n${s.change}`:'改动已保留，详细说明待补齐。',
     verification,report.prUrl ? `${link}。${draft?`暂留草稿：${reason ?? '等待审查准备完成。'}`:'可以开始代码审查。'}尚未合并或上线。`
-      : reason?`暂按草稿准备。${reason}`:'已准备好，发布前需要你确认。'].join('\n\n');
+      : reason?`${reviewOnly?'审查准备尚未完成。':'暂按草稿准备。'}${reason}`:'已准备好，发布前需要你确认。'].join('\n\n');
 }

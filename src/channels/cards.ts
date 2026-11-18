@@ -125,7 +125,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
       ...(exception ? [box(`${report.baselineComparison!.equivalent?'对照检查未发现新增失败，但全量检查仍未通过。':'这次的失败已在原代码中复现，但测试有波动，仍需审查。'}\n只确认本次草稿发布。检查失败会保留在 PR 中；改动或验证范围变化后需要重新确认。`)] : []),
       box('这一步会提交改动、推送任务分支并创建或更新 GitHub PR。不会合并代码或部署。'),
       ...(reason?[box(`为什么保留草稿：${reason}`)]:[box('配置检查和已声明的必要验证完成，可以提交普通 PR 供审查；不代表获准合并。')]),
-      box('如果目标代码在确认后更新，将保留草稿，等待集成验证。'),
+      box(project.reviewOnlyPrs?'如果确认后目标分支有更新，需要重新验证。':'如果目标代码在确认后更新，将保留草稿，等待集成验证。'),
       ...(report.summary?[text(report.summary.change)]:[]),
       { tag: 'collapsible_panel', expanded: false, header: { title: plain(preview.title+' · 展开查看文件与验证') }, elements: [
         text(fits ? preview.body : '交付说明过长，无法完整预览。请缩小任务范围后再发布。')] },
