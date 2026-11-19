@@ -1,7 +1,7 @@
 import { sentryDailyReport } from './sentry-daily.js';
 import { alertBindingForTask } from './alert-provenance.js';
 import { activityReport } from './activity-report.js';
-import { applySchedule, parseSchedule, schedules, scheduleAuthorized, scheduleCatalog, scheduleRevision, runDueSchedule, scheduledDeliveryAllowed, retireScheduledReport, reportDelivered, type ScheduleProposal } from './schedules.js';
+import { applySchedule, parseSchedule, schedules, scheduleAuthorized, scheduleCatalog, scheduleRevision, runDueSchedule, scheduledDeliveryDestination, retireScheduledReport, reportDelivered, type ScheduleProposal } from './schedules.js';
 import { deliveryMessage, draftReason } from './delivery-summary.js';
 import { syncOwnerPrOverviews } from './pr-overview.js';
 import { alertGroupContext, alertUpdateCurrent, awaitingAlertRoot, isAlertRootTurn, isGroupAlertTask, receiveAlertEvidence, syncAlertTopics } from './alert-collaboration.js';
@@ -783,7 +783,11 @@ export class Engine {
       while ((item = this.store.outgoing())) {
         try {
           const view = item.view ? JSON.parse(item.view) as View : undefined;
-          if(view?.kind==='scheduled-report'&&!scheduledDeliveryAllowed(this.store,this.config,view.runId,item.chatId)){this.store.transaction(()=>{this.store.retireOutgoing(item!.id);retireScheduledReport(this.store,view.runId);});continue;}
+          if(view?.kind==='scheduled-report'){
+            const destination=scheduledDeliveryDestination(this.store,this.config,view.runId,item.chatId);
+            if(!destination){this.store.transaction(()=>{this.store.retireOutgoing(item!.id);retireScheduledReport(this.store,view.runId);});continue;}
+            view.destination=destination;
+          }
           if (view?.kind==='alert-collaboration' && !alertUpdateCurrent(this.store,this.config,item.chatId,view)) { this.store.retireOutgoing(item.id);continue; }
           if (view && 'taskId' in view) {
             const task=this.store.get(view.taskId);

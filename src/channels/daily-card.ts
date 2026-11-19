@@ -40,7 +40,43 @@ const summarySentence=(f:DailyFinding,zone:string)=>{
   if(f.title.includes("(setting 'innerHTML')"))return `${contextFeature(f)}内容更新时报错，${since}，触发原因还在查。`;
   return `${compact(title,28)}，${since}，具体原因还在查。`;
 };
-export function dailyCard(d:DailyReport):Record<string,unknown>{
+const privateIssueNames:Record<string,string>={
+  'Project event replay requested':'项目事件请求回放',
+  'Chat stream completed':'聊天流结束时报错',
+  'Project event stream awaiting retry':'项目事件流等待重试',
+  'Event stream idle':'事件流空闲'
+};
+function privateIssueLink(f:DailyFinding):string {
+  const title=f.title.replace(/^UnhandledRejection: Non-Error promise rejection captured with value: /,'');
+  const label=Object.hasOwn(privateIssueNames,title)?privateIssueNames[title]:title.split(/[，。；]/,1)[0]||title;
+  return `[${compact(label,36)}](${f.url})`;
+}
+
+function privateDailyCard(d:DailyReport,primary:DailyFinding[],progress:DailyFinding[],
+  prCounts:{pending:number;merged:number;closed:number;unknown:number},trend:string):Record<string,unknown>{
+  const errors=d.total.toLocaleString('en-US');
+  const counts=`待合并 ${prCounts.pending} · 已合并 ${prCounts.merged} · 已关闭 ${prCounts.closed}${prCounts.unknown?` · 待核实 ${prCounts.unknown}`:''}`;
+  const change=d.previousTotal?(d.total===d.previousTotal?'与前日持平':`较前日 ${trend}`):'前日无报错';
+  const elements:unknown[]=[md(`**${errors} 次报错**（${change}） · **${d.issueCount} 个问题**（新增 ${d.newCount}）\n**关联 PR**　${counts}`)];
+  if(primary.length)elements.push(md('**重点关注**\n'+primary.map(f=>
+    `• ${privateIssueLink(f)} · ${f.count} 次 / ${f.users} 人${f.isNew?' · 新增':''}`).join('\n')));
+  if(progress.length)elements.push(md('**修复进展**\n'+progress.map(f=>
+    `• ${privateIssueLink(f)}\n  ${prLinks(f)}`).join('\n')));
+  const featured=[...primary,...progress],shown=new Set(featured);
+  const other=d.findings.filter(f=>!shown.has(f));
+  const prDetails=other.filter(f=>f.prs.length);
+  if(featured.length)elements.push({tag:'collapsible_panel',expanded:false,header:{title:plain('展开原因、版本与关联修复')},padding:'0px',
+    elements:[...featured.map(f=>md(`**${compact(f.title)}**\n${originLine(f,d.timezone)}\n${safe(f.description)}`)),
+      ...prDetails.map(f=>md(`${privateIssueLink(f)} · ${prLinks(f)}`)),
+      md('报错次数与业务失败需分别核实。PR 已合并，仍需核对部署版本和线上报错。',{text_size:'notation'})]});
+  elements.push(md(`[查看 Sentry 全部问题${other.length?`（含其他 ${other.length} 项）`:''}](${d.allIssuesUrl})`,{text_size:'notation'}));
+  const zone=d.timezone==='Asia/Shanghai'?'北京时间':d.timezone;
+  return {schema:'2.0',config:{update_multi:true,enable_forward:true,width_mode:'default',summary:{content:`${d.title} Sentry 日报 · ${errors} 次报错`}},
+    header:{title:plain(`${d.title} Sentry 日报`),subtitle:plain(`${d.date} · ${zone} · ${d.environment==='production'?'生产环境':d.environment}`),template:'blue'},
+    body:{direction:'vertical',padding:'10px 12px',vertical_spacing:'8px',elements}};
+}
+
+export function dailyCard(d:DailyReport,destination:'group'|'private'='group'):Record<string,unknown>{
   // Count repair PRs, not issue-to-PR associations. Conflicting snapshots remain unknown.
   const uniquePrs=new Map<string,string>();
   for(const f of d.findings)for(const p of f.prs){
@@ -58,13 +94,14 @@ export function dailyCard(d:DailyReport):Record<string,unknown>{
   const prioritized=prioritizeDailyFindings(d.findings);
   const progress=d.findings.filter(f=>f.prs.length).sort(rank).slice(0,3);
   const primary=[...prioritized.primary,...prioritized.secondary,...prioritized.other].filter(f=>!f.prs.length&&(f.category==='repair'||f.category==='investigate')).slice(0,3);
+  const trend=d.previousTotal?d.total===d.previousTotal?'与前日持平':`${d.total>d.previousTotal?'↑':'↓'}${(Math.abs(d.total-d.previousTotal)/d.previousTotal*100).toFixed(1)}%`:'前日无报错';
+  if(destination==='private')return privateDailyCard(d,primary,progress,prCounts,trend);
   const selected=new Set([...primary,...progress]);
   const secondary=d.findings.filter(f=>!selected.has(f)&&f.isNew&&f.category!=='noise'&&f.category!=='expected').slice(0,6);
   const visible=new Set([...primary,...progress,...secondary]);
   const rest=d.findings.filter(f=>!visible.has(f));
   const detail=rest.slice(0,30);
   for(const f of rest.slice(30))if(f.prs.length)detail.push(f);
-  const trend=d.previousTotal?d.total===d.previousTotal?'与前日持平':`${d.total>d.previousTotal?'↑':'↓'}${(Math.abs(d.total-d.previousTotal)/d.previousTotal*100).toFixed(1)}%`:'前日无报错';
   const category=(c:DailyFinding['category'])=>{const a=d.findings.filter(f=>f.category===c);return `${a.length} 个 / ${a.reduce((n,f)=>n+f.count,0)} 次`;};
   const elements:unknown[]=[row([
     metric('📊 报错概况',d.total.toLocaleString('en-US')+' 次','较前日 '+trend),

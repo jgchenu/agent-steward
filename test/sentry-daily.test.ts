@@ -63,6 +63,30 @@ test('priority is an evidence-aware agenda: no title-based severity or volume-ba
   assert.deepEqual(classified.primary.map(x=>x.id),['1','2']);assert.deepEqual(classified.secondary.map(x=>x.id),['5']);assert.deepEqual(classified.other.map(x=>x.id),['3','4']);
 });
 
+test('private daily card shows one overview and keeps technical details folded',()=>{
+  const issue={id:'1',title:'UnhandledRejection: Non-Error promise rejection captured with value: Project event replay requested',
+    count:200,users:28,previous:0,isNew:true,firstSeen:'2026-11-18T02:00:00Z',category:'investigate' as const,
+    description:'尚未完成归因',context:{page:'project' as const,eventAt:'2026-11-18T02:00:00Z',release:'7a17cd7f11'},
+    url:'https://example.sentry.io/issues/1/',prs:[]};
+  const repair={...issue,id:'2',title:'文档恢复异常',category:'repair' as const,url:'https://example.sentry.io/issues/2/',
+    prs:[{url:'https://github.com/example/app/pull/2268',label:'已合并'}]};
+  const noise={...issue,id:'3',category:'noise' as const,users:1000,url:'https://example.sentry.io/issues/3/'};
+  const card=dailyCard({title:'Example 前端',date:'2026-11-18',timezone:'Asia/Shanghai',environment:'production',
+    checkedAt:'2026-11-19T02:00:00Z',total:600,previousTotal:300,issueCount:3,newCount:3,unknownFirstSeen:0,
+    findings:[issue,repair,noise],allIssuesUrl:'https://example.sentry.io/issues/'},'private');
+  const elements=(card.body as any).elements;
+  const summary=JSON.stringify(elements.filter((e:any)=>e.tag!=='collapsible_panel'));
+  assert.match(summary,/600 次报错.*↑100.0%.*3 个问题/);
+  assert.match(summary,/已合并 1/);
+  assert.match(summary,/项目事件请求回放.*200 次 \/ 28 人/);
+  assert.match(summary,/PR #2268 已合并/);
+  assert.match(summary,/含其他 1 项/);
+  assert.doesNotMatch(summary,/UnhandledRejection|昨日总结|7a17cd7f11|issues\/3\//);
+  const details=elements.find((e:any)=>e.tag==='collapsible_panel');
+  assert.equal(details.expanded,false);
+  assert.match(JSON.stringify(details),/7a17cd7f11/);
+});
+
 test('daily summary changes with counts and PR states without claiming deployment or resolution',()=>{
   const f={id:'1',title:'Editor error',count:50,users:40,previous:100,isNew:false,category:'repair' as const,firstSeen:'2025-01-01',url:'https://example.sentry.io/issues/1/',description:'Recorded repair',prs:[{url:'https://github.com/example/app/pull/1',label:'待合并 · 草稿'}]};
   const d={title:'Example',date:'2026-11-15',timezone:'Asia/Shanghai',environment:'production',checkedAt:'now',total:50,previousTotal:100,issueCount:1,newCount:0,unknownFirstSeen:0,allIssuesUrl:'https://example.sentry.io/issues/',findings:[f]};
