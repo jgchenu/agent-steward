@@ -181,11 +181,12 @@ export class FeishuChannel implements Channel {
         .filter((path): path is string => typeof path === 'string');
       const rootTask = topic && collaboration?.root ? currentAlertTask(this.store, topic) : undefined;
       const rootCard = rootTask && rootTask.chatId === chatId && topic ? alertProgressCard(this.store, this.config, topic, rootTask) : undefined;
-      const chunks = rootCard ? [''] : replyChunks(readableFileReferences(text, roots));
+      const reportCard = view?.kind==='scheduled-report'&&view.daily ? dailyCard(view.daily,view.destination) : undefined;
+      const chunks = rootCard||reportCard ? [''] : replyChunks(readableFileReferences(text, roots));
       for (let i = 0; i < chunks.length; i++) {
         const key = `reply:${deliveryId}:${i}`;
         if (this.store.cardMessage(chatId, key)) continue;
-        const content = JSON.stringify(rootCard ?? (view?.kind==='scheduled-report'&&view.daily?dailyCard(view.daily):summaryCard(chunks[i],collaboration?'alert':view?.kind==='scheduled-report'?'report':'reply')));
+        const content = JSON.stringify(rootCard ?? reportCard ?? summaryCard(chunks[i],collaboration?'alert':view?.kind==='scheduled-report'?'report':'reply'));
         // Feishu accepts at most 50 characters, including for thread replies.
         const uuid = createHash('sha256').update(`${deliveryId}:${i}`).digest('hex').slice(0, 32);
         const result = view?.conversation

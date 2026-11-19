@@ -92,7 +92,12 @@ export async function runDueSchedule(store:Store,config:Config,providers:Record<
     return; // one due report per Engine slot; no concurrent provider calls
   }
 }
-export function scheduledDeliveryAllowed(store:Store,config:Config,runId:string,chatId:string):boolean {const run=store.db.prepare('SELECT * FROM schedule_runs WHERE id=? AND delivered=0').get(runId) as unknown as ScheduleRun|undefined;const s=run&&schedules(store).find(s=>s.id===run.scheduleId);return !!s&&s.revision===run!.revision&&s.chatId===chatId&&scheduleAuthorized(config,s);}
+export function scheduledDeliveryDestination(store:Store,config:Config,runId:string,chatId:string):Schedule['destination']|undefined {
+  const run=store.db.prepare('SELECT * FROM schedule_runs WHERE id=? AND delivered=0').get(runId) as unknown as ScheduleRun|undefined;
+  if(!run)return;
+  const schedule=schedules(store).find(s=>s.id===run.scheduleId);
+  if(schedule&&schedule.revision===run.revision&&schedule.chatId===chatId&&scheduleAuthorized(config,schedule))return schedule.destination;
+}
 export function reportDelivered(store:Store,runId:string,now=Date.now()):void {const run=store.db.prepare('SELECT * FROM schedule_runs WHERE id=? AND delivered=0').get(runId) as unknown as ScheduleRun|undefined;if(!run)return;const s=schedules(store).find(s=>s.id===run.scheduleId);store.db.prepare('UPDATE schedule_runs SET delivered=1 WHERE id=?').run(runId);if(s&&s.revision===run.revision){s.cursor=run.end;s.nextDue=nextOccurrence(now,s,local(run.end,s.timezone).date);save(store,s);}}
 
 export function retireScheduledReport(store:Store,runId:string):void {const run=store.db.prepare('SELECT scheduleId FROM schedule_runs WHERE id=? AND delivered=0').get(runId);if(!run)return;const s=schedules(store).find(s=>s.id===run.scheduleId);if(s){s.state='paused';s.revision++;save(store,s);}store.db.prepare('DELETE FROM schedule_runs WHERE id=? AND delivered=0').run(runId);}

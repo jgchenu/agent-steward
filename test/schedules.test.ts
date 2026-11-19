@@ -7,7 +7,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { CONVERSATION } from '../src/conversation.js';
 import { alertSourceKey } from '../src/alert-config.js';
-import { applySchedule, schedules, nextOccurrence, parseSchedule, runDueSchedule, scheduledDeliveryAllowed, reportDelivered, type ScheduleProposal } from '../src/schedules.js';
+import { applySchedule, schedules, nextOccurrence, parseSchedule, runDueSchedule, scheduledDeliveryDestination, reportDelivered, type ScheduleProposal } from '../src/schedules.js';
 import { sentryDailyReport } from '../src/sentry-daily.js';
 import { activityReport } from '../src/activity-report.js';
 import type { Config } from '../src/types.js';
@@ -40,7 +40,7 @@ test('one durable outbox across restarts; cutoff advances only after delivery',a
     let calls=0;const providers={alert_activity:async()=>{calls++;return '本周修复 1 个问题';}};
     await runDueSchedule(store,config,providers,new AbortController().signal,due);const first=store.outgoing()!;assert.equal(first.chatId,'oc_team');assert.equal(schedules(store)[0].cursor,Date.parse('2026-11-15T16:00:00Z'));store.close();
     reopened=new Store(join(dir,'state.sqlite'));await runDueSchedule(reopened,config,providers,new AbortController().signal,due+60000);assert.equal(calls,1);assert.equal(reopened.outgoing()!.id,first.id);
-    const runId=JSON.parse(first.view!).runId;assert.ok(scheduledDeliveryAllowed(reopened,config,runId,'oc_team'));assert.equal(scheduledDeliveryAllowed(reopened,config,runId,'oc_other'),false);
+    const runId=JSON.parse(first.view!).runId;assert.ok(scheduledDeliveryDestination(reopened,config,runId,'oc_team'));assert.equal(scheduledDeliveryDestination(reopened,config,runId,'oc_other'),undefined);
     reopened.transaction(()=>{reopened!.delivered(first.id);reportDelivered(reopened!,runId,due);});assert.equal(schedules(reopened)[0].cursor,due);assert.equal(schedules(reopened)[0].nextDue,due+7*86400000);
     await runDueSchedule(reopened,config,providers,new AbortController().signal,due+60000);assert.equal(calls,1);
   }finally{reopened?.close();rmSync(dir,{recursive:true,force:true});}
@@ -48,7 +48,7 @@ test('one durable outbox across restarts; cutoff advances only after delivery',a
 test('pause retires pending sends; revocation and changed destination prevent publication',async()=>{
   const {store,config,task}=fixture();try{
     applySchedule(store,config,task,proposal,now);const s=schedules(store)[0];await runDueSchedule(store,config,{alert_activity:async()=> 'report'},new AbortController().signal,s.nextDue);
-    const out=store.outgoing()!,runId=JSON.parse(out.view!).runId;config.alertSources!.example.collaborationChatId='oc_else';assert.equal(scheduledDeliveryAllowed(store,config,runId,'oc_team'),false);config.alertSources!.example.collaborationChatId='oc_team';
+    const out=store.outgoing()!,runId=JSON.parse(out.view!).runId;config.alertSources!.example.collaborationChatId='oc_else';assert.equal(scheduledDeliveryDestination(store,config,runId,'oc_team'),undefined);config.alertSources!.example.collaborationChatId='oc_team';
     applySchedule(store,config,{...task,id:'pause'},{...proposal,action:'pause',id:s.id},now);assert.equal(store.outgoing(),undefined);assert.equal(schedules(store)[0].state,'paused');
     applySchedule(store,config,{...task,id:'resume'},{...proposal,action:'resume',id:s.id},now);assert.equal(schedules(store)[0].state,'active');
     config.alertSources!.example.enabled=false;let calls=0;await runDueSchedule(store,config,{alert_activity:async()=>{calls++;return ''; }},new AbortController().signal,s.nextDue);assert.equal(calls,0);
@@ -116,7 +116,7 @@ test('late startup combines missed periods; a revoked pending delivery is retire
   const {store,config,task}=fixture();try{
     applySchedule(store,config,task,proposal,now);const s=schedules(store)[0],late=s.nextDue+14*86400000;let window:number[]=[];
     await runDueSchedule(store,config,{alert_activity:async(_s,start,end)=>{window=[start,end];return 'catchup';}},new AbortController().signal,late);assert.deepEqual(window,[s.cursor,late]);
-    const out=store.outgoing()!,runId=JSON.parse(out.view!).runId;config.groupChats=false;assert.equal(scheduledDeliveryAllowed(store,config,runId,'oc_team'),false);
+    const out=store.outgoing()!,runId=JSON.parse(out.view!).runId;config.groupChats=false;assert.equal(scheduledDeliveryDestination(store,config,runId,'oc_team'),undefined);
     store.transaction(()=>{store.retireOutgoing(out.id);retireScheduledReport(store,runId);});assert.equal(schedules(store)[0].state,'paused');assert.equal(schedules(store)[0].cursor,s.cursor);assert.equal(store.outgoing(),undefined);
   }finally{store.close();}
 });
@@ -158,7 +158,15 @@ test('Sentry daily includes unhandled errors and refreshes PR status without cla
 test('report display labels do not revoke source grants',()=>{const {store,config}=fixture();try{const key=alertSourceKey(config,'example');config.alertSources!.example.reportLabel='Example 前端';assert.equal(alertSourceKey(config,'example'),key);}finally{store.close();}});
 
 test('daily report group is independent from repair collaboration and paused weekly report',async()=>{
-  const {store,config,task}=fixture();try{
+  const {FeishuChannel}=await import('../src/channels/feishu.js');
+  const {store,config,task}=fixture();
+  const channel=new FeishuChannel('fake','fake',store,config);
+  const sent:Array<{receive_id:string;content:string}>= [];
+  (channel as any).client={im:{message:{create:async({data}:any)=>{
+    sent.push(data);return {code:0,data:{message_id:`om_daily_${sent.length}`}};
+  }}}};
+  const engine=new Engine(store,config,{run:async()=>{throw Error('report should not use the executor');}},channel);
+  try{
     const grant=alertSourceKey(config,'example');config.alertSources!.example.reportChatId='oc_data';assert.equal(alertSourceKey(config,'example'),grant);
     applySchedule(store,config,task,proposal,now);const weekly=schedules(store)[0];
     applySchedule(store,config,{...task,id:'pause-weekly'},{...proposal,action:'pause',id:weekly.id},now);
@@ -168,10 +176,24 @@ test('daily report group is independent from repair collaboration and paused wee
     const group=schedules(store).find(s=>s.provider==='sentry_daily'&&s.destination==='group')!;
     assert.equal(group.chatId,'oc_data');assert.ok(scheduledGroup());
     function scheduledGroup(){return schedules(store).find(s=>s.id===weekly.id)!.state==='paused'&&config.alertSources!.example.collaborationChatId==='oc_team';}
-    await runDueSchedule(store,config,{sentry_daily:async()=> '日报'},new AbortController().signal,group.nextDue);
-    assert.equal(store.outgoing()!.chatId,'oc_private');const out=store.outgoing()!;const run=JSON.parse(out.view!).runId;store.transaction(()=>{store.delivered(out.id);reportDelivered(store,run,group.nextDue);});
-    await runDueSchedule(store,config,{sentry_daily:async()=> '日报'},new AbortController().signal,group.nextDue);
-    const groupOut=store.outgoing()!;assert.equal(groupOut.chatId,'oc_data');const groupRun=JSON.parse(groupOut.view!).runId;assert.ok(scheduledDeliveryAllowed(store,config,groupRun,'oc_data'));
-    config.alertSources!.example.reportChatId='oc_changed';assert.equal(scheduledDeliveryAllowed(store,config,groupRun,'oc_data'),false);assert.equal(scheduledDeliveryAllowed(store,config,groupRun,'oc_team'),false);
+    const report={text:'日报',daily:{title:'Example',date:'2026-11-16',timezone:'Asia/Shanghai',environment:'production',
+      checkedAt:'2026-11-17T02:00:00Z',total:0,previousTotal:0,issueCount:0,newCount:0,unknownFirstSeen:0,
+      findings:[],allIssuesUrl:'https://example.sentry.io/issues/'}};
+    const providers={sentry_daily:async()=>report};
+    await runDueSchedule(store,config,providers,new AbortController().signal,group.nextDue);
+    const out=store.outgoing()!;
+    assert.equal(out.chatId,'oc_private');
+    assert.equal(JSON.parse(out.view!).destination,undefined);
+    await engine.flush();
+    assert.equal(sent[0].receive_id,'oc_private');
+    assert.equal(JSON.parse(sent[0].content).header.title.content,'Example Sentry 日报');
+    await runDueSchedule(store,config,providers,new AbortController().signal,group.nextDue);
+    const groupOut=store.outgoing()!;assert.equal(groupOut.chatId,'oc_data');const groupRun=JSON.parse(groupOut.view!).runId;assert.equal(scheduledDeliveryDestination(store,config,groupRun,'oc_data'),'group');
+    config.alertSources!.example.reportChatId='oc_changed';assert.equal(scheduledDeliveryDestination(store,config,groupRun,'oc_data'),undefined);assert.equal(scheduledDeliveryDestination(store,config,groupRun,'oc_team'),undefined);
+    config.alertSources!.example.reportChatId='oc_data';
+    await engine.flush();
+    assert.equal(sent.length,2);
+    assert.equal(sent[1].receive_id,'oc_data');
+    assert.equal(JSON.parse(sent[1].content).header.title.content,'Example｜Sentry 报错与修复进展');
   }finally{store.close();}
 });
