@@ -3,7 +3,7 @@ import { CONVERSATION } from '../conversation.js';
 import { codeSourceSummary, codeSourceDetails, configuredCheckSummary } from '../code-source.js';
 import type { Config, Intent, Status, View } from '../types.js';
 import { Store } from '../store.js';
-import { canPublish, canRequestDraftException, publicationKey, publicationText, publicationBlocker } from '../workspace.js';
+import { canPublish, canRequestDraftException, publicationKey, publicationText, publicationBlocker, reviewBaselineEligible } from '../workspace.js';
 
 type Element = Record<string, unknown>;
 const plain = (content: string) => ({ tag: 'plain_text', content });
@@ -119,12 +119,15 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     const blocker = publicationBlocker(task, project, report, view.publicationTarget, exception);
     if (!report || blocker) return card('暂不能交付 PR', projectLabel(task.project), 'orange', [
       box(blocker ?? '请先完成代码验证。'), button('返回任务', intent('status'), true)]);
-    const target = project.worktree!.github!, preview = publicationText(task, report),reason=draftReason(report);
+    const baselineReviewed = reviewBaselineEligible(task, project, report);
+    const target = project.worktree!.github!, preview = publicationText(task, report, project),reason=draftReason(report,baselineReviewed);
     const fits = Buffer.byteLength(preview.body) < 20_000;
     return card(exception ? '确认提交修复草稿' : report.prUrl ? '更新现有 PR' : reason?'创建草稿 PR':'提交 PR 供审查', `${target.repository} → ${target.baseBranch}`, 'blue', [
       ...(exception ? [box(`${report.baselineComparison!.equivalent?'对照检查未发现新增失败，但全量检查仍未通过。':'这次的失败已在原代码中复现，但测试有波动，仍需审查。'}\n只确认本次草稿发布。检查失败会保留在 PR 中；改动或验证范围变化后需要重新确认。`)] : []),
       box('这一步会提交改动、推送任务分支并创建或更新 GitHub PR。不会合并代码或部署。'),
-      ...(reason?[box(`为什么保留草稿：${reason}`)]:[box('配置检查和已声明的必要验证完成，可以提交普通 PR 供审查；不代表获准合并。')]),
+      ...(reason?[box(`为什么保留草稿：${reason}`)]:[box(baselineReviewed
+        ? '全量检查仍有失败，每条都能在未修改的主干上匹配。可以提交普通 PR，检查结果和审查要求照常保留。'
+        : '配置检查和已声明的必要验证完成，可以提交普通 PR 供审查；不代表获准合并。')]),
       box(project.reviewOnlyPrs?'如果确认后目标分支有更新，需要重新验证。':'如果目标代码在确认后更新，将保留草稿，等待集成验证。'),
       ...(report.summary?[text(report.summary.change)]:[]),
       { tag: 'collapsible_panel', expanded: false, header: { title: plain(preview.title+' · 展开查看文件与验证') }, elements: [
@@ -144,7 +147,7 @@ export function buildCard(store: Store, config: Config, chatId: string, view?: V
     if ((canPublish(task, project, report) || canRequestDraftException(task,project,report)) && ['review', 'completed', 'failed'].includes(task.status)) actions.push(button('预览 PR 交付', intent('publication'), true));
     const link = prButton(); if (link) actions.push(link);
     return card('项目交付', `${projectLabel(task.project)} · ${modeLabel}`, color, [
-      box(`${report.files.length} 个改动文件 · ${report.ready ? '配置验证全部通过' : '尚未满足发布条件'}\n${report.workspace.branch}`),
+      box(`${report.files.length} 个改动文件 · ${report.ready ? '配置验证全部通过' : canPublish(task,project,report) ? '已完成基线对照，可提交审查' : '尚未满足发布条件'}\n${report.workspace.branch}`),
       caption(codeSourceSummary(report)),
       button('查看代码来源', intent('source')),
       text(`Steward 独立检查：${checks || configuredCheckSummary(report, project)}`),

@@ -2,6 +2,11 @@ import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 
 export interface CommandResult { code: number; stdout: string; truncated: boolean; terminated?: boolean }
+export class CommandTimeoutError extends Error {
+  constructor(command: string) {
+    super(`命令超时：${command}`);
+  }
+}
 export function commandEnv(check = false): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -42,7 +47,7 @@ export function runCommand(command: string, args: string[], cwd: string, signal:
       const finish = () => {
         if (signal.aborted) reject(signal.reason ?? new Error('已取消'));
         else if (spawnError) reject(new Error(`无法启动命令或保存验证日志：${command}`));
-        else if (stopped) reject(new Error(`命令超时：${command}`));
+        else if (stopped) reject(new CommandTimeoutError(command));
         else resolve({ code: code ?? 1, stdout: output, truncated, ...(terminationSignal ? {terminated:true} : {}) });
       };
       if (log && !log.destroyed) log.end(finish); else finish();

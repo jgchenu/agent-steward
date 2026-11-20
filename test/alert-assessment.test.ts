@@ -10,6 +10,7 @@ import {alertSourceKey} from '../src/alert-config.js';
 import {alertBindingForTask,pendingAlertTasks,alertRepairTask} from '../src/alert-provenance.js';
 import {completeAlertAssessment,parseAlertAssessment,type AlertAssessment} from '../src/alert-assessment.js';
 import {alertTopic,recordTopicMessage,syncAlertTopics} from '../src/alert-collaboration.js';
+import {validationKey} from '../src/workspace.js';
 import type {Config,Task} from '../src/types.js';
 const decision:AlertAssessment={verdict:'needs_fix',summary:'断线重连后会重复提交生成请求',explanation:'已在调用方确认重试未使用同一个请求标识。',impact:'已确认一条生产样本，实际影响范围待核查。',evidence:['生产事件与 src/retry.ts:42 的调用链一致']};
 function fixture(path=':memory:') {
@@ -21,7 +22,7 @@ function fixture(path=':memory:') {
   const key=alertSourceKey(config,'web')!;
   const diagnosis=()=>{const t=store.create('oc_dm','web','PRIVATE diagnostic transcript','read-only');
     store.event(t.id,'alert_assessment_required','read-only');store.thread(t.id,'private-session');
-    store.db.prepare('INSERT INTO alert_runs VALUES (?,?,?,?,?,?)').run(t.id,'web',key,'1','signature',t.createdAt);return store.get(t.id)!;};
+    store.db.prepare('INSERT INTO alert_runs VALUES (?,?,?,?,?,?)').run(t.id,'web',alertSourceKey(config,'web')!,'1','signature',t.createdAt);return store.get(t.id)!;};
   return {store,config,key,diagnosis};
 }
 const groups=(s:Store)=>s.db.prepare("SELECT * FROM outbox WHERE chatId='oc_group'").all();
@@ -87,4 +88,48 @@ test('engine privately assesses then delivers the group root before repair and a
     engine.receive({...message,id:'wrong-person',senderId:'stranger'});engine.receive({...message,id:'wrong-chat',chatId:'oc_dm'});
     assert.equal(accepted,false);engine.receive(message);await until(()=>f.store.get(repair!.id)?.status==='review');assert.equal(accepted,true);
   }finally{await engine.stop();f.store.close();}
+});
+
+test('an eligible alert repair opens one group PR confirmation without a model proposal or a publication grant',async()=>{
+  const f=fixture(), project=f.config.projects.web;
+  project.reviewOnlyPrs=true;
+  project.reviewWithBaselineFailures=true;
+  project.worktree!.github={repository:'example/web',baseBranch:'main'};
+  project.worktree!.checks=[{name:'Tests',command:'pnpm',args:['test'],failureFormat:'vitest'}];
+  const diagnosis=f.diagnosis();
+  const previews: string[]=[];
+  let repairId='', publishes=0;
+  const engine=new Engine(f.store,f.config,{run:async(t,_p,h)=>{
+    if (h.reportAlertAssessment) {
+      h.reportAlertAssessment(decision);
+      return '已确认需要修复。';
+    }
+    if (t.nextAction==='publish') { publishes++; return ''; }
+    repairId=t.id;
+    const key=validationKey(project), baseSha='a'.repeat(40);
+    f.store.saveDelivery(t.id,{
+      workspace:{taskId:t.id,source:'.',path:'repair',branch:'repair',baseSha,baseRef:'origin/main'},
+      mode:'workspace-write',capturedAt:t.createdAt,files:['src/retry.ts'],diffStat:'1 file changed',
+      fingerprint:'patch',headSha:baseSha,checks:[{name:'Tests',status:'failed',log:'tests.log'}],ready:false,validationKey:key,
+      baselineComparison:{baseSha,fingerprint:'patch',validationKey:key,capturedAt:t.createdAt,eligible:true,equivalent:true,
+        reason:'未修改的基线有相同失败。',probes:[],checks:[{name:'Tests',status:'failed',failureCount:1,digest:'tests',roundFailureCounts:[1,1,1,1],variable:false}]},
+      summary:{title:'修复重新连接重复请求',problem:'重新连接会重复请求。',change:'重用请求标识。',validation:'定向测试通过。',remaining:[]},
+    });
+    return '修复完成';
+  }},{send:async(chat,_text,_id,view)=>{
+    if (view?.kind==='alert-collaboration' && view.root) recordTopicMessage(f.store,alertTopic(f.store,view.topicId)!,'root','thread',true);
+    if (view?.kind==='publication') previews.push(chat);
+  }});
+  try {
+    engine.start();
+    await until(()=>previews.length>0).catch(e=>{
+      throw Error(JSON.stringify(f.store.list().map(t=>({id:t.id,status:t.status,result:t.result}))), {cause:e});
+    });
+    assert.equal(f.store.get(diagnosis.id)?.status,'review');
+    assert.equal(f.store.get(repairId)?.status,'review');
+    assert.deepEqual(previews,['oc_group']);
+    assert.equal(f.store.delivery(repairId)?.authorizedKey,undefined);
+    assert.equal(f.store.delivery(repairId)?.exceptionAuthorizedKey,undefined);
+    assert.equal(publishes,0);
+  } finally { await engine.stop(); f.store.close(); }
 });
