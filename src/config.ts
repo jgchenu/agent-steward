@@ -79,8 +79,12 @@ export function loadConfig(file = process.env.STEWARD_CONFIG ?? 'steward.config.
       worktree = { baseRef: w.baseRef, checks: w.checks, ...(w.github ? { github: w.github } : {}) };
     }
     if (sandbox === 'workspace-write' && !worktree && p.workspaceMode !== 'direct') throw new Error(`workspace-write requires an isolated worktree: ${name}`);
+    if (p.followPrReviews !== undefined && (typeof p.followPrReviews !== 'boolean'
+      || (p.followPrReviews && (sandbox!=='workspace-write'||p.workspaceMode==='direct'||!worktree?.github||!worktree.checks.length)))) {
+      throw Error(`Invalid followPrReviews: ${name}`);
+    }
     if (p.codexProjectId !== undefined && typeof p.codexProjectId !== 'string') throw Error('Invalid Codex project identity');
-    projects[name] = { path, sandbox, ...(p.codexProjectId ? { codexProjectId: p.codexProjectId } : {}), ...(aliases ? { aliases } : {}), ...(p.naturalMode ? { naturalMode: p.naturalMode } : {}), ...(p.label ? { label: p.label.trim() } : {}), ...(p.description ? { description: p.description.trim() } : {}), ...(p.workspaceMode ? { workspaceMode:p.workspaceMode } : {}), ...(p.reviewOnlyPrs ? { reviewOnlyPrs:true } : {}), ...(p.reviewWithBaselineFailures ? { reviewWithBaselineFailures:true } : {}), ...(worktree ? { worktree } : {}) };
+    projects[name] = { path, sandbox, ...(p.codexProjectId ? { codexProjectId: p.codexProjectId } : {}), ...(aliases ? { aliases } : {}), ...(p.naturalMode ? { naturalMode: p.naturalMode } : {}), ...(p.label ? { label: p.label.trim() } : {}), ...(p.description ? { description: p.description.trim() } : {}), ...(p.workspaceMode ? { workspaceMode:p.workspaceMode } : {}), ...(p.reviewOnlyPrs ? { reviewOnlyPrs:true } : {}), ...(p.reviewWithBaselineFailures ? { reviewWithBaselineFailures:true } : {}), ...(p.followPrReviews ? {followPrReviews:true} : {}), ...(worktree ? { worktree } : {}) };
   }
   if (raw.defaultProject !== undefined && (typeof raw.defaultProject !== 'string' || !Object.hasOwn(projects, raw.defaultProject))) throw new Error('defaultProject must name a configured project.');
   if (raw.groupChats !== undefined && typeof raw.groupChats !== 'boolean') throw new Error('groupChats must be boolean.');

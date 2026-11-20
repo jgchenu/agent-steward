@@ -3,6 +3,7 @@ import { runCommand } from './process.js';
 import { publicPr } from './alert-collaboration.js';
 import { alertBindingForTask } from './alert-provenance.js';
 import { alertSourceKey } from './alert-config.js';
+import {queuePrReview,readPrReviews,type ReadPrReviews} from './pr-review.js';
 import type { Store } from './store.js';
 import type { Config } from './types.js';
 
@@ -12,13 +13,14 @@ const inspect:InspectPr=async(repository,url,signal)=>{
   const r=await runCommand('gh',['pr','view',url,'--repo',repository,'--json','url,state,isDraft,headRefOid,baseRefName,mergedAt'],process.cwd(),signal,{timeoutSeconds:10});
   if(r.code||r.truncated)throw Error('PR 状态读取失败');return JSON.parse(r.stdout);
 };
-/** Read-only reconciliation; never converts drafts, changes task state or grants approval. */
+/** Reads GitHub state and schedules eligible reviews through the normal task queue. */
 export class PublishedPrMonitor {
   private timer?:ReturnType<typeof setInterval>;
   private active?:Promise<void>;
   private abort=new AbortController();
   private attempted=new Map<string,number>();
-  constructor(private store:Store,private config:Config,private read:InspectPr=inspect,private now=Date.now){}
+  constructor(private store:Store,private config:Config,private read:InspectPr=inspect,private now=Date.now,
+    private readReviews:ReadPrReviews=readPrReviews){}
   start(){this.timer=setInterval(()=>{void this.tick();},60_000);void this.tick();}
   tick():Promise<void>{if(this.active)return this.active;this.active=this.scan().finally(()=>{this.active=undefined;});return this.active;}
   private async scan(){
@@ -43,6 +45,15 @@ export class PublishedPrMonitor {
           ||typeof remote.headRefOid!=='string'||!/^[a-f0-9]{40}$/.test(remote.headRefOid)||remote.baseRefName!==project.worktree.github.baseBranch
           ||(remote.state==='MERGED'&&(typeof remote.mergedAt!=='string'||!Number.isFinite(Date.parse(remote.mergedAt)))))throw Error('PR 回读身份无效');
         this.store.saveDelivery(task.id,{...current,prIsDraft:remote.isDraft,remotePr:{...remote,checkedAt:new Date(this.now()).toISOString()}});
+        if (!binding||!this.config.projects[task.project]?.followPrReviews||remote.state!=='OPEN'
+          ||(project.reviewOnlyPrs&&remote.isDraft)||remote.headRefOid!==current.publishedSha
+          ||!['review','completed'].includes(task.status)) continue;
+        const notes=await this.readReviews(project.worktree.github.repository,url,remote.headRefOid,this.abort.signal);
+        if (this.abort.signal.aborted) return;
+        const after=this.store.get(task.id),delivery=this.store.delivery(task.id),configured=this.config.projects[task.project];
+        if (after?.updatedAt!==task.updatedAt||!delivery||delivery.prUrl!==url||delivery.publishedSha!==remote.headRefOid
+          ||!configured?.followPrReviews||projectGrantKey(configured)!==grant||alertSourceKey(this.config,binding.sourceId)!==binding.sourceKey) continue;
+        queuePrReview(this.store,after,delivery,notes);
       }catch{if(!this.abort.signal.aborted)this.store.event(task.id,'pr_status_unavailable','远端状态暂未刷新，保留上次记录。');}
     }
   }

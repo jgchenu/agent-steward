@@ -21,6 +21,7 @@ import { parseBaselineProposal } from './delivery-preparation.js';
 import { namedProjects, projectAnswer, projectGrantKey } from './routing.js';
 import { Store } from './store.js';
 import { canPublish, canRequestDraftException, publicationBlocker, publicationKey, reviewBaselineEligible, TargetBranchMoved } from './workspace.js';
+import {hasPreparedPrReviewUpdate,queuedPrReview} from './pr-review.js';
 import { mergeIntent, mergePullRequest } from './merge.js';
 import { parseMergeProposal, type MergeProposal } from './operation-intent.js';
 import { TaskOrchestrator } from './orchestration.js';
@@ -88,6 +89,7 @@ export class Engine {
         || p?.reviewWithBaselineFailures !== previous[t.project]?.reviewWithBaselineFailures)) {
         run.abort.abort(new Error('PR 发布方式已变化，请重新预览交付。'));
       }
+      if (!p?.followPrReviews && queuedPrReview(this.store,t)) run.abort.abort(new Error('PR 审查跟进已停用。'));
       if (t.project !== CONVERSATION && (!p || p.path !== previous[t.project]?.path || p.workspaceMode !== previous[t.project]?.workspaceMode || (t.mode === 'workspace-write' && p.sandbox !== 'workspace-write'))) run.abort.abort(new Error('项目授权或执行位置已变化，执行已停止；已有改动保留。'));
     }
   }
@@ -531,6 +533,7 @@ export class Engine {
   private async run(task: Task, abort: AbortController): Promise<void> {
     const timeout = setTimeout(() => abort.abort(new Error('执行超过配置时限')), this.config.maxRunMinutes * 60_000);
     let snapshot: ContextSnapshot | undefined;
+    const prReview=queuedPrReview(this.store,task);
     try {
       abort.signal.throwIfAborted();
       assertAlertAuthorized(this.store,this.config,task);
@@ -541,6 +544,7 @@ export class Engine {
       if (!task.nextAction || task.nextAction === 'execute') this.store.event(task.id,'runtime_model',JSON.stringify({model:null,effort:null}));
       const project = task.project === CONVERSATION ? conversationProject(this.config,task.requesterId ? task.id : undefined) : this.config.projects[task.project];
       if (!project) throw new Error('项目配置已移除。');
+      if (prReview&&!project.followPrReviews) throw Error('PR 审查跟进已停用。');
       const directDirectory = this.store.db.prepare("SELECT body FROM events WHERE taskId=? AND kind='direct_directory' ORDER BY seq LIMIT 1").get(task.id) as {body:string}|undefined;
       if ((project.workspaceMode === 'direct' && this.store.workspace(task.id)) || (directDirectory && (project.workspaceMode !== 'direct' || project.path !== directDirectory.body))) throw Error('任务执行位置已变化，请新建任务；原任务改动保留。');
       if (project.workspaceMode === 'direct' && task.nextAction && task.nextAction !== 'execute') throw Error('直接编辑项目不支持独立副本的交付或版本操作。');
@@ -648,7 +652,7 @@ export class Engine {
       }
       abort.signal.throwIfAborted();
       let executionTask = task;
-      if (task.conversation && !task.requesterId && task.nextAction !== 'publish' && !isAlertRootTurn(this.store,task)) {
+      if (task.conversation && !task.requesterId && task.nextAction !== 'publish' && !prReview && !isAlertRootTurn(this.store,task)) {
         if (!this.config.groupChats || !this.channel.context) throw new Error('群上下文读取未启用，任务未执行。');
         this.store.event(task.id, 'progress', '正在读取当前会话上下文。');
         snapshot = await this.channel.context(task, abort.signal);
@@ -700,14 +704,20 @@ export class Engine {
       }
       const groupAlert = isGroupAlertTask(this.store,task);
       const currentProject = this.config.projects[task.project];
+      const reviewChanges = !!prReview && report?.prUrl===prReview.url && report.fingerprint!==previousReport?.fingerprint;
       const alertReview = !publication && !baseline && !merge && !proposed && !schedule && task.nextAction !== 'publish'
-        && !task.requesterId && currentProject?.reviewWithBaselineFailures && projectGrantKey(currentProject) === grantKey
-        && report?.summary && !report.prUrl && alertBindingForTask(this.store,task.id) && canPublish(task,currentProject,report);
-      let publicResult=report && task.mode==='workspace-write' && (report.summary || task.nextAction==='publish' || groupAlert) && !baseline && !merge
+        && !task.requesterId && currentProject && projectGrantKey(currentProject) === grantKey
+        && report?.summary && (prReview ? currentProject.followPrReviews && reviewChanges : currentProject.reviewWithBaselineFailures && !report.prUrl)
+        && alertBindingForTask(this.store,task.id) && canPublish(task,currentProject,report);
+      let publicResult=prReview ? reviewChanges && !alertReview
+        ? `原 PR 的审查修复已保留。${publicationBlocker(task,currentProject,report) ?? '需要补齐修复说明后再确认更新。'}`
+        : result
+        : report && task.mode==='workspace-write' && (report.summary || task.nextAction==='publish' || groupAlert) && !baseline && !merge
         ? deliveryMessage(report,project.reviewOnlyPrs,reviewBaselineEligible(task,project,report)) : result;
       this.store.transaction(() => {
         if(schedule){if(scheduleRevision(this.store,this.config)!==recurringRevision)throw Error('定时配置或授权已变化，请按最新安排重试。');result=applySchedule(this.store,this.config,task,schedule);publicResult=result;}
         this.store.set(task.id, 'review', result);
+        if (prReview) this.store.event(task.id,'pr_review_finished',reviewChanges?'changes_prepared':'no_update');
         if (assessment) completeAlertAssessment(this.store,this.config,task,assessment);
         if (automaticallySelected) {
           const selected = this.config.projects[automaticallySelected], mode = selected.naturalMode ?? 'read-only';
@@ -740,6 +750,7 @@ export class Engine {
       if (report?.evidenceWarning) this.store.enqueue(task.chatId, report.evidenceWarning, {kind:'reply', taskId:task.id});
     } catch (error) {
       if(error instanceof OperationWaiting)return;
+      if(prReview) this.store.event(task.id,'pr_review_finished','not_completed');
       if(task.nextAction==='merge')operationFailure(this.store,task.id,error instanceof Error?error.message:'操作失败');
       const state = this.store.get(task.id)?.status;
       if (state !== 'cancelled' && !abort.signal.aborted && task.nextAction === 'publish' && error instanceof TargetBranchMoved) {
@@ -748,6 +759,10 @@ export class Engine {
         this.store.transaction(() => {
           this.store.event(task.id,'publication_blocked',error.message);
           this.store.set(task.id,'review');
+          if (this.store.delivery(task.id)?.prUrl&&hasPreparedPrReviewUpdate(this.store,task)) {
+            this.store.enqueue(task.chatId,`${error.message}\n原 PR 和本次改动都已保留。更新前需要在原话题重新验证当前主干。`,{kind:'reply',taskId:task.id});
+            return;
+          }
           this.store.enqueue(task.chatId, `${error.message}\n代码改动、检查记录和截图保留；本次尚未提交或推送。接下来会展示迁移现有改动到最新基准的确认预览，确认后才建立新副本并重新验证。`, {kind:'reply',taskId:task.id});
           this.store.queueBaseline(task.id,error.ref,{migrateChanges:true,delivery:null});
         });
