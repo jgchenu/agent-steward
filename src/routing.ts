@@ -9,7 +9,7 @@ export function projectAnswer(text: string): 'yes' | 'no' | undefined {
 }
 export function projectGrantKey(project: Project): string {
   // Publication policy is bound by publicationKey. It does not change project access.
-  const {reviewOnlyPrs: _reviewOnlyPrs, reviewWithBaselineFailures: _reviewWithBaselineFailures, ...grant} = project;
+  const {reviewOnlyPrs: _reviewOnlyPrs, reviewWithBaselineFailures: _reviewWithBaselineFailures, followPrReviews: _followPrReviews, ...grant} = project;
   return createHash('sha256').update(JSON.stringify(grant)).digest('hex');
 }
 // Explicit project names only; other people's context never chooses a working directory.

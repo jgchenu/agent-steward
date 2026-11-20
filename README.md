@@ -127,6 +127,8 @@ Git project tasks retain their own worktree and continuation session. Modificati
 Set `projects.<id>.reviewOnlyPrs` to `true` to publish only PRs ready for review. Tasks with incomplete validation stay in their local worktree until they meet the review requirements.
 For a repository with existing check failures, also set `projects.<id>.reviewWithBaselineFailures` to `true` and configure supported failure reports. Steward can offer a regular PR when it matches every observed failure against the unchanged baseline. Checks still show their actual results. Eligible automatic Sentry repairs open the PR confirmation in their original conversation.
 
+Set `projects.<id>.followPrReviews` to `true` to follow review feedback on recorded Sentry repair PRs. Steward checks the comment against the current PR in a read-only pass, prepares a patch only for verified issues, and reuses the original conversation and PR confirmation.
+
 Natural merge requests (including context-dependent follow-ups such as “把刚才那份收尾吧”) use a structured proposal and the current task’s PR/result context. Steward inspects the remote PR and asks for a concrete confirmation from the task initiator; the model does not merge. Ambiguous targets require clarification. Unsubmitted workspace changes must be delivered first. Commands remain available as shortcuts.
 
 In an existing modification topic, natural requests such as “可以的，提交代码创建 PR 到 main” or “修好后提 PR” also hand off to Steward's PR preview after configured checks. The executor returns a structured proposal; it does not publish by itself. Requested repository/base mismatches produce a specific blocker, and the preview still requires the owner's confirmation.

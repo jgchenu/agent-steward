@@ -3,6 +3,7 @@ import { sentryIssueUrl } from '../sentry.js';
 import type { Store } from '../store.js';
 import type { Config, DeliveryReport, Task } from '../types.js';
 import { canPublish } from '../workspace.js';
+import {hasPreparedPrReviewUpdate} from '../pr-review.js';
 
 const plain = (content: string) => ({ tag: 'plain_text', content });
 const markdown = (content: string) => ({ tag: 'markdown', content });
@@ -47,6 +48,11 @@ export function alertProgressCard(store: Store, config: Config, topic: AlertTopi
   else if (task.status === 'waiting_approval') { status = '待确认'; template = 'orange'; }
   else if (task.status === 'waiting_input') { status = '待补充信息'; template = 'orange'; }
   else if (['failed','interrupted','cancelled'].includes(task.status)) { status = '处理暂停'; template = 'grey'; }
+  else if (pr && task.nextAction==='execute' && hasPreparedPrReviewUpdate(store,task)) {
+    const ready=canPublish(task,project,report);
+    status=ready?'待确认更新 PR':'审查修复待验证';
+    template=ready?'blue':'orange';
+  }
   else if (pr && draft === false) status = '待审查';
   else if (pr && draft === true) { status = '草稿 PR'; template = 'orange'; }
   else if (pr) status = 'PR 已提交';

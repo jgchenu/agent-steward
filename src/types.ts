@@ -48,6 +48,7 @@ export interface Project {
   workspaceMode?: 'direct' | 'isolated';
   reviewOnlyPrs?: boolean;
   reviewWithBaselineFailures?: boolean;
+  followPrReviews?: boolean;
   worktree?: { baseRef: string; checks: Check[]; github?: { repository: string; baseBranch: string } };
 }
 export interface Workspace {
@@ -103,6 +104,7 @@ export interface RunHooks {
   proposeSchedule?: (proposal: import('./schedules.js').ScheduleProposal) => void;
   reportDeliverySummary?: (summary: import('./delivery-summary.js').DeliverySummary) => void;
   reportAlertAssessment?: (assessment: import('./alert-assessment.js').AlertAssessment) => void;
+  reportPrReviewAssessment?: (assessment: import('./alert-assessment.js').AlertAssessment) => void;
   approveOperation?: (proposal: import('./operations.js').OperationProposal) => void;
   askClarification?: (question: string) => void;
   proposeMerge?: (request: import('./operation-intent.js').MergeProposal) => void;
