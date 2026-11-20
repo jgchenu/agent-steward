@@ -47,6 +47,7 @@ export interface Project {
   path: string; sandbox: 'read-only' | 'workspace-write'; label?: string; aliases?: string[]; description?: string; naturalMode?: 'read-only' | 'workspace-write';
   workspaceMode?: 'direct' | 'isolated';
   reviewOnlyPrs?: boolean;
+  reviewWithBaselineFailures?: boolean;
   worktree?: { baseRef: string; checks: Check[]; github?: { repository: string; baseBranch: string } };
 }
 export interface Workspace {

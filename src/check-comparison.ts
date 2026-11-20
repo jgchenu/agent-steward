@@ -226,7 +226,7 @@ export async function compareBaseline(report: DeliveryReport, checks: Check[], f
     }
     result.eligible=true;result.equivalent=!variable;
     result.reason=variable
-      ? '补丁侧失败均在未修改基线中实测匹配到，但各轮存在差异或波动，不能证明失败频率未增加。全仓检查仍未通过；仅可申请本次草稿发布。'
+      ? '补丁侧失败均在未修改基线中实测匹配到，但各轮存在差异或波动，不能证明失败频率未增加。全仓检查仍未通过。'
       : '两轮基线与补丁检查的失败内容一致，未发现新增失败；全仓检查仍未通过。';
   } catch(e) {signal.throwIfAborted();result.reason=e instanceof Error?e.message:'基线对照失败';}
   finally {

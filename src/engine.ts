@@ -20,7 +20,7 @@ import { baselinePreview, restartAtBaseline, validBaseRef } from './baseline.js'
 import { parseBaselineProposal } from './delivery-preparation.js';
 import { namedProjects, projectAnswer, projectGrantKey } from './routing.js';
 import { Store } from './store.js';
-import { canPublish, canRequestDraftException, publicationBlocker, publicationKey, TargetBranchMoved } from './workspace.js';
+import { canPublish, canRequestDraftException, publicationBlocker, publicationKey, reviewBaselineEligible, TargetBranchMoved } from './workspace.js';
 import { mergeIntent, mergePullRequest } from './merge.js';
 import { parseMergeProposal, type MergeProposal } from './operation-intent.js';
 import { TaskOrchestrator } from './orchestration.js';
@@ -84,7 +84,8 @@ export class Engine {
     for (const run of this.active.values()) {
       const t = run.task, p = next.projects[t.project];
       try { assertAlertAuthorized(this.store,this.config,t); } catch {run.abort.abort(new Error('告警来源授权已变化，执行已停止。'));}
-      if (t.nextAction === 'publish' && p?.reviewOnlyPrs !== previous[t.project]?.reviewOnlyPrs) {
+      if (t.nextAction === 'publish' && (p?.reviewOnlyPrs !== previous[t.project]?.reviewOnlyPrs
+        || p?.reviewWithBaselineFailures !== previous[t.project]?.reviewWithBaselineFailures)) {
         run.abort.abort(new Error('PR 发布方式已变化，请重新预览交付。'));
       }
       if (t.project !== CONVERSATION && (!p || p.path !== previous[t.project]?.path || p.workspaceMode !== previous[t.project]?.workspaceMode || (t.mode === 'workspace-write' && p.sandbox !== 'workspace-write'))) run.abort.abort(new Error('项目授权或执行位置已变化，执行已停止；已有改动保留。'));
@@ -422,7 +423,7 @@ export class Engine {
         if (!this.store.consume('card:' + action.id) || !this.store.useAction(action.actionId)) return;
         this.store.saveDelivery(task.id, { ...report, authorizedKey: exception ? undefined : i.publicationKey, exceptionAuthorizedKey: exception ? i.publicationKey : undefined });
         this.store.queuePublication(task.id);
-        this.store.event(task.id, exception?'draft_exception_authorized':'publication_authorized', JSON.stringify({actorId:action.senderId,scope:project.reviewOnlyPrs?'source-branch push and PR for review':draftReason(report)?'source-branch push and draft PR only':'source-branch push and PR for review; fallback to draft if target advances',key:i.publicationKey,baselineComparison:exception?report.baselineComparison:undefined}));
+        this.store.event(task.id, exception?'draft_exception_authorized':'publication_authorized', JSON.stringify({actorId:action.senderId,scope:project.reviewOnlyPrs?'source-branch push and PR for review':draftReason(report)?'source-branch push and draft PR only':'source-branch push and PR for review; fallback to draft if target advances',key:i.publicationKey,baselineComparison:exception||reviewBaselineEligible(task,project,report)?report.baselineComparison:undefined}));
         this.store.event(task.id,'publication_card',action.messageId);
         this.store.enqueue(task.chatId,'',{kind:'publication-receipt',taskId:task.id,targetMessageId:action.messageId});
       });
@@ -697,8 +698,13 @@ export class Engine {
       if ((publication || baseline || merge) && (!this.config.projects[task.project] || projectGrantKey(this.config.projects[task.project]) !== grantKey)) {
         throw new Error('项目交付配置已变化，请按当前配置重新准备 PR。');
       }
-      let publicResult=report && task.mode==='workspace-write' && (report.summary || task.nextAction==='publish' || isGroupAlertTask(this.store,task)) && !baseline && !merge
-        ? deliveryMessage(report,project.reviewOnlyPrs) : result;
+      const groupAlert = isGroupAlertTask(this.store,task);
+      const currentProject = this.config.projects[task.project];
+      const alertReview = !publication && !baseline && !merge && !proposed && !schedule && task.nextAction !== 'publish'
+        && !task.requesterId && currentProject?.reviewWithBaselineFailures && projectGrantKey(currentProject) === grantKey
+        && report?.summary && !report.prUrl && alertBindingForTask(this.store,task.id) && canPublish(task,currentProject,report);
+      let publicResult=report && task.mode==='workspace-write' && (report.summary || task.nextAction==='publish' || groupAlert) && !baseline && !merge
+        ? deliveryMessage(report,project.reviewOnlyPrs,reviewBaselineEligible(task,project,report)) : result;
       this.store.transaction(() => {
         if(schedule){if(scheduleRevision(this.store,this.config)!==recurringRevision)throw Error('定时配置或授权已变化，请按最新安排重试。');result=applySchedule(this.store,this.config,task,schedule);publicResult=result;}
         this.store.set(task.id, 'review', result);
@@ -711,7 +717,7 @@ export class Engine {
           this.store.event(next.id,'resource_bound',JSON.stringify({fromTaskId:task.id,resource:{kind:'code-project',id:automaticallySelected},source:'owner-named-model-proposal'}));
           this.store.enqueue(task.chatId,`本任务需要使用你指定的 ${selected.label ?? automaticallySelected} 代码资源，正在准备执行目录并继续。`,{kind:'reply',taskId:next.id});
         } else if (proposed) this.store.saveProjectSelection(task.id, proposed.project, proposed.grantKey);
-        if(!(publication && isGroupAlertTask(this.store,task)))this.store.enqueue(task.chatId,publicResult,{kind:'reply',taskId:task.id});
+        if(!((publication || alertReview) && groupAlert))this.store.enqueue(task.chatId,publicResult,{kind:'reply',taskId:task.id});
         if (baseline) {
           this.store.event(task.id,'baseline_proposed',JSON.stringify(baseline));
           this.store.queueBaseline(task.id,baseline.ref,{migrateChanges:baseline.migrateChanges,delivery:baseline.delivery});
@@ -720,11 +726,11 @@ export class Engine {
           this.store.event(task.id,'merge_proposed',JSON.stringify({url:url ?? null}));
           if (!url) this.store.enqueue(task.chatId,'当前任务还没有已记录的 PR。请指出要处理的 PR，或先交付当前改动。',{kind:'reply',taskId:task.id});
           else this.store.queueMerge(task.id,url);
-        } else if (publication) {
-          // A semantic proposal opens a preview only; it never writes an authorization key.
+        } else if (publication || alertReview) {
+          // A proposal or validated alert repair opens a preview, with a separate authorization.
           const target = project.worktree?.github;
-          const publicationTarget = { repository: publication.repository || target?.repository || '',
-            baseBranch: publication.baseBranch || target?.baseBranch || '' };
+          const publicationTarget = { repository: publication?.repository || target?.repository || '',
+            baseBranch: publication?.baseBranch || target?.baseBranch || '' };
           this.store.event(task.id, 'publication_proposed', JSON.stringify(publicationTarget));
           this.store.enqueue(task.chatId, publicationBlocker(task, project, report, publicationTarget, canRequestDraftException(task,project,report)) ?? '已接到 PR 交付请求，请核对交付预览。',
             {kind:'publication',taskId:task.id,fresh:true,publicationTarget});

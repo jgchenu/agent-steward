@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Store } from '../src/store.js';
-import { WorkspaceExecutor, canPublish, canRequestDraftException, git, inventory, prepareWorkspace, publish, publicationKey } from '../src/workspace.js';
+import { WorkspaceExecutor, canPublish, canRequestDraftException, git, inventory, prepareWorkspace, publish, publicationKey, publicationText } from '../src/workspace.js';
 import { commandEnv, runCommand } from '../src/process.js';
 import { loadConfig } from '../src/config.js';
 import { Engine } from '../src/engine.js';
@@ -291,6 +291,10 @@ test('write configuration requires worktree and a consistent GitHub base', () =>
     const path = join(f.root, 'config.json');
     const save = () => writeFileSync(path, JSON.stringify(f.config));
     save(); assert.equal(loadConfig(path).projects.test.worktree!.baseRef, 'origin/main');
+    f.project.reviewWithBaselineFailures = true; save();
+    assert.throws(() => loadConfig(path), /Invalid reviewWithBaselineFailures/);
+    f.project.reviewOnlyPrs = true; save();
+    assert.equal(loadConfig(path).projects.test.reviewWithBaselineFailures, true);
     f.project.worktree!.github!.baseBranch = 'staging'; save();
     assert.throws(() => loadConfig(path), /GitHub target/);
     delete f.project.worktree; save(); assert.throws(() => loadConfig(path), /requires an isolated worktree/);
@@ -724,6 +728,74 @@ test('draft exception publisher consumes approval, verifies draft state and does
    await assert.rejects(publish(f.store,f.config,f.task,f.project,signal(),gh,repoGit),/配置验证全部通过/);
   }finally{f.close();}
  }
+});
+
+test('review baseline policy keeps failed checks visible and requires a fresh owner-approved non-draft PR', async () => {
+  const f = fixture();
+  try {
+    f.project.reviewOnlyPrs = true;
+    f.project.worktree!.checks = [{name:'baseline failure',command:process.execPath,
+      args:['-e',"console.error('old');process.exit(1)"],failureFormat:'exact'}];
+    await f.executor.run(f.task,f.project,hooks,signal());
+    const report = {...f.store.delivery(f.task.id)!,
+      summary:{title:'修复文档内容',problem:'内容有误。',change:'更正内容。',validation:'已核对改动。',remaining:[]}};
+    assert.equal(report.baselineComparison?.eligible,true);
+    assert.equal(canPublish(f.task,f.project,report),false);
+    const oldKey=publicationKey(f.task,f.project,report);
+    f.project.reviewWithBaselineFailures=true;
+    assert.notEqual(publicationKey(f.task,f.project,report),oldKey);
+    assert.equal(canPublish(f.task,f.project,report),true);
+    assert.equal(canRequestDraftException(f.task,f.project,report),false);
+    assert.equal(canPublish({...f.task,requesterId:'delegate'},f.project,report),false);
+    assert.equal(canPublish(f.task,f.project,{...report,fingerprint:'changed'}),false);
+    assert.equal(canPublish(f.task,f.project,{...report,baselineComparison:{...report.baselineComparison!,eligible:false}}),false);
+    assert.equal(canPublish(f.task,f.project,{...report,summary:{...report.summary,remaining:['还需验收']}}),false);
+    assert.match(publicationText(f.task,report,f.project).body,/已对照的主干失败/);
+    f.store.saveDelivery(f.task.id,report);
+    const card=JSON.stringify(buildCard(f.store,f.config,'dm',{kind:'publication',taskId:f.task.id}));
+    assert.match(card,/提交 PR 供审查/);
+    assert.doesNotMatch(card,/仅本次发布草稿/);
+    let created=false;
+    const transport:typeof git=async(cwd,args,sig)=>args[0]==='remote'?'https://github.com/test/repo.git':git(cwd,args,sig);
+    const gh=async(cwd:string,args:string[],sig:AbortSignal)=>{
+      const pr={number:1,url:'https://github.com/test/repo/pull/1',state:'OPEN',headRefName:report.workspace.branch,baseRefName:'main',isDraft:false};
+      if(args[1]==='list')return JSON.stringify(created?[pr]:[]);
+      if(args[1]==='view')return JSON.stringify({...pr,headRefOid:await git(cwd,['rev-parse','HEAD'],sig)});
+      assert.equal(args[1],'create');
+      assert.ok(!args.includes('--draft'));
+      assert.match(readFileSync(args[args.indexOf('--body-file')+1],'utf8'),/baseline failure: failed/);
+      created=true;
+      return '';
+    };
+    f.store.saveDelivery(f.task.id,{...report,authorizedKey:oldKey});
+    await assert.rejects(publish(f.store,f.config,f.task,f.project,signal(),gh,transport),/重新预览并确认/);
+    f.store.saveDelivery(f.task.id,{...report,authorizedKey:publicationKey(f.task,f.project,report)});
+    assert.match(await publish(f.store,f.config,f.task,f.project,signal(),gh,transport),/未发现新增失败/);
+    assert.equal(f.store.delivery(f.task.id)?.ready,false);
+    assert.equal(f.store.delivery(f.task.id)?.prIsDraft,false);
+  } finally {f.close();}
+});
+
+test('review baseline policy retries a timed-out Vitest check once with a fresh report path', async () => {
+  const f=fixture();
+  const messages:string[]=[];
+  try {
+    f.project.reviewOnlyPrs=true;
+    f.project.reviewWithBaselineFailures=true;
+    const command=`
+      const fs=require('node:fs');
+      const out=process.argv[1];
+      if(!out.includes('patched-1-retry')) setTimeout(()=>{},10000);
+      else fs.writeFileSync(out,JSON.stringify({numTotalTests:0,numFailedTests:0,numFailedTestSuites:0,unhandledErrors:[],testResults:[]}));
+    `;
+    f.project.worktree!.checks=[{name:'unit tests',command:process.execPath,args:['-e',command,'{report}'],failureFormat:'vitest',timeoutSeconds:1}];
+    await f.executor.run(f.task,f.project,{...hooks,progress:text=>messages.push(text)},signal());
+    const report=f.store.delivery(f.task.id)!;
+    assert.equal(report.ready,true);
+    assert.equal(report.checks.length,1);
+    assert.match(report.checks[0].log,/patched-1-retry/);
+    assert.equal(messages.filter(text=>text.includes('重试一次')).length,1);
+  } finally {f.close();}
 });
 
 for(const kind of ['ready','browser','advanced'] as const)test(`publisher creates ${kind==='ready'?'ordinary':'draft'} PR for ${kind} verification`,async()=>{

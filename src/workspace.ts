@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { Store } from './store.js';
-import { runCommand } from './process.js';
+import { CommandTimeoutError, runCommand } from './process.js';
 import type { Config, DeliveryReport, Executor, Project, PublicationTarget, RunHooks, Task, Workspace } from './types.js';
 
 export async function git(cwd: string, args: string[], signal: AbortSignal): Promise<string> {
@@ -79,16 +79,19 @@ export async function inventory(w: Workspace, signal: AbortSignal): Promise<Pick
   return { files, diffStat: [diffStat, ...untracked.filter(f => !isEvidencePath(f)).map(f => `新增文件：${f}`)].filter(Boolean).join('\n'),
     fingerprint: hash.digest('hex'), headSha: await git(w.path, ['rev-parse', 'HEAD'], signal) };
 }
-export function publicationText(task: Task, report: DeliveryReport): { title: string; body: string } {
+export function publicationText(task: Task, report: DeliveryReport, project?: Project): { title: string; body: string } {
+  const baselineReviewed = reviewBaselineEligible(task, project, report);
+  const draft = draftReason(report, baselineReviewed);
   return { title: report.summary?.title ?? `${task.project} 代码修改`, body: [
     '## 问题与修改', report.summary ? `${report.summary.problem}\n\n${report.summary.change}` : '改动说明待补充；请审查下方文件范围。', '',
     ...(report.summary ? ['## 验证说明', `执行器记录：${report.summary.validation}`, ...report.summary.remaining.map(x=>`- 待确认：${x}`), ''] : []),
-    ...(draftReason(report) ? ['## 为什么保留草稿',draftReason(report)!, ''] : []), '## Changes', report.diffStat || 'No diff summary.', '',
+    ...(draft ? ['## 为什么保留草稿',draft, ''] : []), '## Changes', report.diffStat || 'No diff summary.', '',
     '## Validation', ...report.checks.map(c => `- ${c.name}: ${c.status}`), '',
-    ...(report.baselineComparison?.eligible ? ['## Draft-only baseline exception',report.baselineComparison.reason,
+    ...(report.baselineComparison?.eligible ? [baselineReviewed ? '## 已对照的主干失败' : '## Draft-only baseline exception',
+      report.baselineComparison.reason,
       ...report.baselineComparison.checks.map(c=>`- ${c.name}: ${c.status}; diagnostic entries: ${c.failureCount}; rounds [patch 1, base 1, patch 2, base 2]: ${c.roundFailureCounts.join(" / ")}; digest: ${c.digest}`),
       ...report.baselineComparison.probes.map(p=>`- Baseline probe: ${p.check}; ${p.file}; attempt ${p.attempt}; exit ${p.exitCode}; diagnostic entries ${p.failureCount}; digest ${p.digest}`),
-      'The owner must explicitly approve this exact draft exception. Failed checks remain failed. This does not authorize merge or deployment.', ''] : []),
+      baselineReviewed ? '交付范围为代码审查，合并与部署使用各自的授权和检查。' : 'The owner must explicitly approve this exact draft exception. Failed checks remain failed. This does not authorize merge or deployment.', ''] : []),
     `Base: ${report.workspace.baseSha}`, report.prBranch
       ? `PR branch: ${report.prBranch}`
       : !report.prUrl && validBranchSlug(report.summary?.branchSlug) ? `Proposed PR branch: steward/${report.summary.branchSlug} (numbered if occupied)`
@@ -120,6 +123,7 @@ export function publicationBlocker(task: Task, project: Project | undefined, rep
   if (report.validationKey !== validationKey(project)) return '检查配置已变化，需要按当前配置重新验证。';
   if (report.error) return `检查未完成：${report.error}`;
   if (!report.ready || !report.checks.length || !report.checks.every(c => c.status === 'passed')) {
+    if (reviewBaselineEligible(task, project, report)) return draftReason(report, true);
     if (allowBaselineException && !project.reviewOnlyPrs && baselineExceptionEligible(task,project,report)) return;
     const failed=report.checks.filter(c=>c.status==='failed').map(c=>c.name).join('、');
     return `Steward 独立检查尚未全部通过：${failed || '检查未完成'}。${report.baselineComparison?.reason ?? '尚无独立基线对照，不能确定是否为本次新增失败。'}${project.reviewOnlyPrs?' 补齐检查后才能提交审查。':' 请补齐对照后再申请仅本次草稿发布。'}`;
@@ -136,8 +140,13 @@ export function baselineExceptionEligible(task: Task, project: Project, report: 
       && (r.status==='passed'||(r.status==='failed'&&!!checks[i].failureFormat)));
 }
 export function canRequestDraftException(task: Task, project: Project | undefined, report: DeliveryReport | undefined): boolean {
-  return !!project && !!report && baselineExceptionEligible(task,project,report)
+  return !!project && !project.reviewOnlyPrs && !!report && baselineExceptionEligible(task,project,report)
     && publicationBlocker(task,project,report,undefined,true)===undefined;
+}
+
+export function reviewBaselineEligible(task: Task, project: Project | undefined, report: DeliveryReport): boolean {
+  return !!project?.reviewOnlyPrs && project.reviewWithBaselineFailures === true
+    && baselineExceptionEligible(task, project, report);
 }
 
 export function canPublish(task: Task, project: Project | undefined, report: DeliveryReport | undefined): boolean {
@@ -146,7 +155,8 @@ export function canPublish(task: Task, project: Project | undefined, report: Del
 
 export function publicationKey(task: Task, project: Project, report: DeliveryReport): string {
   return createHash('sha256').update(JSON.stringify(['readable-publication-v3',task.id, project.path, project.worktree?.github, project.reviewOnlyPrs === true,
-    report.workspace, report.fingerprint, report.validationKey, report.checks, report.baselineComparison, report.commitAuthors, report.summary, publicationText(task, report)])).digest('hex');
+    report.workspace, report.fingerprint, report.validationKey, report.checks, report.baselineComparison, report.commitAuthors, report.summary, publicationText(task, report, project),
+    ...(project.reviewWithBaselineFailures ? [true] : [])])).digest('hex');
 }
 
 export type Gh = (cwd: string, args: string[], signal: AbortSignal) => Promise<string>;
@@ -214,7 +224,8 @@ export async function publish(store: Store, config: Config, task: Task, project:
     if (existing.isDraft !== false) throw new Error('任务分支已有 Draft PR。确认该 PR 适合审查后，请在 GitHub 转为 Ready for review，再发布更新。');
   }
   let draftOnly=!prs.length;
-  const requiresDraft=!!draftReason(report);
+  const baselineReviewed=reviewBaselineEligible(task, project, report);
+  const requiresDraft=!!draftReason(report, baselineReviewed);
   if((requiresDraft || advanced) && prs.length){
     const existing=JSON.parse(await gh(w.path,['pr','view',String(prs[0].number),'--repo',target.repository,'--json','isDraft'],signal));
     draftOnly=existing.isDraft===true;
@@ -266,7 +277,7 @@ export async function publish(store: Store, config: Config, task: Task, project:
   await repoGit(w.path, ['push', ...createOnly, 'origin', `HEAD:refs/heads/${branch}`], signal);
   if (!(await remoteHead(branch)).startsWith(head + '\t')) throw new Error('远端提交与本地不一致。');
   const dir = join(config.stateDir, 'artifacts', task.id); mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const bodyFile = join(dir, 'pr-body.md'), text = publicationText(task, report);
+  const bodyFile = join(dir, 'pr-body.md'), text = publicationText(task, report, project);
   writeFileSync(bodyFile, text.body, { mode: 0o600 });
   if (!prs.length) {
     try { await gh(w.path, ['pr', 'create', '--repo', target.repository, '--head', branch, '--base', target.baseBranch,
@@ -281,7 +292,7 @@ export async function publish(store: Store, config: Config, task: Task, project:
     || verified.headRefOid !== head || verified.url !== `https://github.com/${target.repository}/pull/${pr.number}`) throw new Error('PR 回读身份不一致，请在 GitHub 检查。');
   store.saveDelivery(task.id, { ...report, headSha: head, prUrl: verified.url, prIsDraft:verified.isDraft===true, remotePr:undefined, publishedSha: head, error: undefined });
   if(exception)store.event(task.id,'draft_exception_published',JSON.stringify({url:verified.url,head,base:w.baseSha}));
-  return deliveryMessage(store.delivery(task.id)!,project.reviewOnlyPrs);
+  return deliveryMessage(store.delivery(task.id)!,project.reviewOnlyPrs,baselineReviewed);
 }
 
 export class WorkspaceExecutor implements Executor {
@@ -351,7 +362,21 @@ export class WorkspaceExecutor implements Executor {
         const comparisonEnabled=project.worktree.checks.some(c=>c.failureFormat);
         for (const [i,check] of project.worktree.checks.entries()) {
           signal.throwIfAborted(); hooks.progress(`正在验证：${check.name}`);
-          const run=await runCheck(check,workspace.path,join(dir,'patched-1',String(i)),signal);
+          let run: (typeof runs)[number];
+          try {
+            run = await runCheck(check,workspace.path,join(dir,'patched-1',String(i)),signal);
+          } catch (error) {
+            if (!(error instanceof CommandTimeoutError)) throw error;
+            const message = `「${check.name}」超过 ${check.timeoutSeconds ?? 300} 秒`;
+            if (!project.reviewWithBaselineFailures || check.failureFormat !== 'vitest') throw Error(message);
+            hooks.progress(`${message}，正在重试一次。`);
+            try {
+              run = await runCheck(check,workspace.path,join(dir,'patched-1-retry',String(i)),signal);
+            } catch (retryError) {
+              if (!(retryError instanceof CommandTimeoutError)) throw retryError;
+              throw Error(`${message}，重试后仍未获得结果。原补丁已保留。`);
+            }
+          }
           runs.push(run);report.checks.push(run.record);this.store.saveDelivery(task.id,report);
           if(run.record.status==='failed' && !comparisonEnabled)break;
         }
