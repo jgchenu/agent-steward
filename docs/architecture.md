@@ -90,6 +90,8 @@ When several requests are pending, approvals take display precedence over questi
 5. Bind runtime permission/input requests to the active runtime, task and original conversation. LangGraph business questions bind to a persisted graph step instead. Only accept a pending request once. Runtime approvals expire on restart. Steward merge decisions persist within their exact scope and expiry; they never authorize another operation.
 6. Send one-shot approval decisions only; do not accept session-wide or policy-amendment grants. If a file approval's changes are unavailable or the description cannot be fully displayed within the configured limit, decline it.
 7. Unknown server requests return a protocol error rather than granting permission.
+
+Each writable Sentry source can opt into sandboxed automatic validation from the console. Dispatch selects the effective mode only after matching the task's durable source grant. Read-only assessments and unrelated tasks keep their normal permissions. The setting leaves source identity and deduplication intact. An active turn never gains privileges from a configuration reload. Tightening the effective mode cancels the affected turn and invalidates its live approvals.
 8. On startup, legacy in-flight work becomes interrupted and runtime requests expire. LangGraph recovery reconciles checkpoints against operation receipts and stops if an executor outcome is unknown. Retry outbound messages, not potentially completed external effects.
 9. A successful turn transitions to `review`; only the owner transitions it to `completed`.
 10. Keep the authentication and billing distinction explicit. Check ChatGPT authentication before inference; no fallback provider path exists.

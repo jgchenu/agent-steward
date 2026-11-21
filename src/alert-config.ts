@@ -6,6 +6,7 @@ export interface AlertSource {
   kind: 'sentry'; enabled: boolean; project: string; chatId: string;
   collaborationChatId?: string; reportChatId?: string; reportLabel?: string;
   mode: 'read-only' | 'workspace-write'; pollSeconds: number; maxTasksPerDay: number;
+  automaticValidation?: boolean;
   sentry: { region: 'us' | 'eu' | 'global'; organization: string; projectId: string;
     environment: string; tokenEnv: string; mcpProject?: string };
   webhook?: { secretEnv: string; installationId: string };
@@ -26,6 +27,7 @@ export function alertSources(raw: unknown): Record<string, AlertSource> {
       || !/^STEWARD_SENTRY_[A-Z0-9_]+_TOKEN$/.test(p.tokenEnv)) throw Error(`Invalid alert source: ${id}`);
     if(s.reportChatId!==undefined&&(typeof s.reportChatId!=='string'||!/^oc_[a-zA-Z0-9_-]{1,128}$/.test(s.reportChatId)||s.reportChatId===s.chatId))throw Error(`Invalid report chat: ${id}`);
     if(s.reportLabel!==undefined&&(typeof s.reportLabel!=='string'||!s.reportLabel.trim()||s.reportLabel.length>80||/[\r\n\0]/.test(s.reportLabel)))throw Error(`Invalid report label: ${id}`);
+    if(s.automaticValidation!==undefined&&(typeof s.automaticValidation!=='boolean'||(s.automaticValidation&&s.mode!=='workspace-write')))throw Error(`Invalid automatic validation: ${id}`);
     if (s.collaborationChatId !== undefined && (typeof s.collaborationChatId !== 'string'
       || !/^oc_[a-zA-Z0-9_-]{1,128}$/.test(s.collaborationChatId) || s.collaborationChatId === s.chatId)) throw Error(`Invalid alert collaboration chat: ${id}`);
     const pollSeconds = s.pollSeconds ?? 300, maxTasksPerDay = s.maxTasksPerDay ?? 5;
@@ -35,6 +37,7 @@ export function alertSources(raw: unknown): Record<string, AlertSource> {
     if (s.webhook !== undefined && (!s.webhook || !/^STEWARD_SENTRY_[A-Z0-9_]+_WEBHOOK_SECRET$/.test(s.webhook.secretEnv)
       || typeof s.webhook.installationId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(s.webhook.installationId))) throw Error(`Invalid Sentry webhook: ${id}`);
     result[id] = {kind:'sentry',enabled:s.enabled,project:s.project,chatId:s.chatId,mode:s.mode,pollSeconds,maxTasksPerDay,
+      ...(s.automaticValidation ? {automaticValidation:true} : {}),
       ...(s.reportChatId ? {reportChatId:s.reportChatId} : {}),
       ...(s.reportLabel ? {reportLabel:s.reportLabel.trim()} : {}),
       ...(s.collaborationChatId ? {collaborationChatId:s.collaborationChatId} : {}),
@@ -51,7 +54,7 @@ export function alertSourceKey(config: Config, id: string): string | undefined {
     && (project.sandbox !== 'workspace-write' || !project.worktree || project.workspaceMode === 'direct'))) return;
   // Transport and read-tool setup do not revoke existing work or replay old issues.
   // Keep the original property order for persisted v12 authorization keys.
-  const {webhook: _webhook, collaborationChatId: _collaboration, reportLabel: _label, reportChatId: _reportChat, sentry, ...base} = source;
+  const {webhook: _webhook, collaborationChatId: _collaboration, reportLabel: _label, reportChatId: _reportChat, automaticValidation: _validation, sentry, ...base} = source;
   const {mcpProject: _mcp, ...api} = sentry;
   return createHash('sha256').update(JSON.stringify({id,owner:config.ownerId,source:{...base,sentry:api},grant:projectGrantKey(project)})).digest('hex');
 }

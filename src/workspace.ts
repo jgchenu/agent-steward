@@ -390,7 +390,7 @@ export class WorkspaceExecutor implements Executor {
     if (review) {
       const followup=await this.reviewFeedback(task,project,workspace,review,hooks,signal);
       if (!followup.prompt) return followup.message!;
-      task={...task,prompt:followup.prompt,threadId:null,permissionMode:'ask',contextSnapshot:undefined,sentryMcp:undefined};
+      task={...task,prompt:followup.prompt,threadId:null,permissionMode:task.permissionMode==='sandbox-auto'?'sandbox-auto':'ask',contextSnapshot:undefined,sentryMcp:undefined};
       hooks={...hooks,proposePublication:undefined,proposeBaseline:undefined,proposeMerge:undefined,askClarification:undefined,proposeSchedule:undefined};
     }
     const evidenceDirectory = mode === 'workspace-write' ? prepareEvidenceDirectory(workspace.path) : undefined;
