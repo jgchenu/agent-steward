@@ -90,9 +90,9 @@ test('private daily card shows one overview and keeps technical details folded',
 test('daily summary changes with counts and PR states without claiming deployment or resolution',()=>{
   const f={id:'1',title:'Editor error',count:50,users:40,previous:100,isNew:false,category:'repair' as const,firstSeen:'2025-01-01',url:'https://example.sentry.io/issues/1/',description:'Recorded repair',prs:[{url:'https://github.com/example/app/pull/1',label:'待合并 · 草稿'}]};
   const d={title:'Example',date:'2026-11-15',timezone:'Asia/Shanghai',environment:'production',checkedAt:'now',total:50,previousTotal:100,issueCount:1,newCount:0,unknownFirstSeen:0,allIssuesUrl:'https://example.sentry.io/issues/',findings:[f]};
-  const before=JSON.stringify(dailyCard(d));assert.match(before,/减少 50.0%/);assert.match(before,/待合并 1/);
+  const before=JSON.stringify(dailyCard(d));assert.match(before,/↓50.0%/);assert.match(before,/待合并 1/);
   const after=JSON.stringify(dailyCard({...d,date:'2026-11-16',total:60,previousTotal:50,findings:[{...f,count:60,previous:50,prs:[{...f.prs[0],label:'已合并'}]}]}));
-  assert.match(after,/增加 20.0%/);assert.match(after,/1 已合并/);assert.match(after,/缺少部署版本与事件 release 对照/);assert.doesNotMatch(after,/线上效果待验证|修复已生效|问题已解决/);
+  assert.match(after,/↑20.0%/);assert.match(after,/1 已合并/);assert.match(after,/缺少部署版本与事件 release 对照/);assert.doesNotMatch(after,/线上效果待验证|修复已生效|问题已解决/);
 });
 
 test('window context rejects wrong dates and environments and strips private URL details',async()=>{
@@ -106,8 +106,25 @@ test('window context rejects wrong dates and environments and strips private URL
 });
 
 
-test('yesterday summary is plain language while technical origin stays in folded detail',()=>{
- const f={id:'1',title:"TypeError: Cannot set properties of null (setting 'innerHTML')",count:65,users:38,previous:86,isNew:false,category:'investigate' as const,firstSeen:'2026-05-20T06:15:29Z',url:'https://example.sentry.io/issues/1/',description:'Unattributed',prs:[],context:{page:'home' as const,eventAt:'2026-11-16T06:00:00Z',release:'46304648c0'}};
- const card=dailyCard({title:'Example',date:'2026-11-16',timezone:'Asia/Shanghai',environment:'production',checkedAt:'now',total:65,previousTotal:86,issueCount:1,newCount:0,unknownFirstSeen:0,allIssuesUrl:'https://example.sentry.io/issues/',findings:[f]});
- const elements=(card.body as any).elements,summary=JSON.stringify(elements[2]);assert.match(summary,/5月就有记录/);assert.match(summary,/触发原因还在查/);assert.doesNotMatch(summary,/46304648c0|引入版本待确认|样本版本|因果关系/);assert.match(JSON.stringify(elements.at(-1)),/46304648c0/);
+test('group summary shows recorded work and concrete checks without inferring a repair',()=>{
+  const base={count:65,users:38,previous:86,isNew:false,firstSeen:'2026-05-20T06:15:29Z'};
+  const findings=[
+    {...base,id:'1',title:'登录弹窗重复回调',category:'repair' as const,
+      description:'已有修复：登录弹窗只处理首次回调；昨日报错是否来自同一原因仍需核实。',
+      url:'https://example.sentry.io/issues/1/',prs:[{url:'https://github.com/example/app/pull/3',label:'已合并'}]},
+    {...base,id:'2',title:'项目页初始化异常',category:'repair' as const,
+      description:'已有分析：调用栈指向项目页初始化时的样式读取（昨日事件是否同源仍需核实）',
+      url:'https://example.sentry.io/issues/2/',prs:[],context:{page:'project' as const,eventAt:'2026-11-16T06:00:00Z',release:'46304648c0'}},
+    {...base,id:'3',title:'预览页报错',category:'investigate' as const,description:'尚未完成归因',
+      url:'https://example.sentry.io/issues/3/',prs:[]},
+  ];
+  const card=dailyCard({title:'Example',date:'2026-11-16',timezone:'Asia/Shanghai',environment:'production',checkedAt:'now',total:195,previousTotal:258,issueCount:3,newCount:0,unknownFirstSeen:0,allIssuesUrl:'https://example.sentry.io/issues/',findings});
+  const elements=(card.body as any).elements;
+  const summary=JSON.stringify(elements[2]);
+  assert.match(summary,/已改.*登录弹窗只处理首次回调.*PR #3 已合并.*核对生产版本/);
+  assert.match(summary,/已查.*调用栈指向项目页初始化.*按已确认的触发条件复测/);
+  assert.match(summary,/预览页报错.*从当天取一条完整事件/);
+  assert.equal((summary.match(/已查/g)||[]).length,1);
+  assert.doesNotMatch(summary,/还在查|仍需核实|就有记录|昨日报错|46304648c0|修复已生效/);
+  assert.match(JSON.stringify(elements.at(-1)),/46304648c0/);
 });

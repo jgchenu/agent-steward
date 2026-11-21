@@ -23,23 +23,49 @@ const contextFeature=(f:DailyFinding)=>({home:'首页',project:'项目页',prici
 const summaryTitle=(f:DailyFinding)=>{
   // Translate known error wording only; never infer an affected business operation.
   const wording=f.title.includes('Event stream idle')?'事件流空闲':f.title.includes('Chat stream completed')?'聊天流结束':f.title.includes("(setting 'innerHTML')")?'页面内容写入异常':'';
-  return wording?`${contextFeature(f)}：${wording}`:/^(?:TypeError|ReferenceError|Error|UnhandledRejection|AbortError|InternalError|NotFoundError):/.test(f.title)?`${contextFeature(f)}异常，调用来源待确认`:compact(f.title,56);
+  return wording?`${contextFeature(f)}：${wording}`:/^(?:TypeError|ReferenceError|Error|UnhandledRejection|AbortError|InternalError|NotFoundError):/.test(f.title)?`${contextFeature(f)}报错`:compact(f.title,56);
 };
 const originLine=(f:DailyFinding,zone:string)=>{
   const first=f.firstSeen&&Number.isFinite(Date.parse(f.firstSeen))?new Intl.DateTimeFormat('zh-CN',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(f.firstSeen)):'未知';
   const release=f.context?.release;return `${contextFeature(f)} · 首次记录 ${first} · 样本版本 ${release?( /^[a-f0-9]{40}$/.test(release)?release.slice(0,10):safe(release)):'未取得'} · 引入版本待确认`;
 };
-const summarySentence=(f:DailyFinding,zone:string)=>{
-  const title=summaryTitle(f);
-  const when=f.firstSeen&&Number.isFinite(Date.parse(f.firstSeen))?new Intl.DateTimeFormat('zh-CN',{timeZone:zone,month:'numeric'}).format(new Date(f.firstSeen)):'';
-  const since=when?`从${when}就有记录`:'此前已有记录';
-  if(f.prs.some(p=>p.label==='已合并'))return `${title.includes('文档')?'文档恢复时报错':compact(title,28)}已有合并的 PR，接下来核对上线后的表现。`;
-  if(f.prs.length)return `${compact(title,28)}正在跟进修复，进度见下方 PR。`;
-  if(f.title.includes('Event stream idle'))return `项目页连接空闲报错${since}，是否影响正常使用还在查。`;
-  if(f.title.includes('Chat stream completed'))return `聊天流结束报错${since}，是否属于正常结束还在查。`;
-  if(f.title.includes("(setting 'innerHTML')"))return `${contextFeature(f)}内容更新时报错，${since}，触发原因还在查。`;
-  return `${compact(title,28)}，${since}，具体原因还在查。`;
-};
+function summaryItem(f:DailyFinding):string {
+  // The stored findings carry only sanitized, shareable analysis and delivery copy.
+  const change=f.description.startsWith('已有修复：');
+  const prefix=change?'已有修复：':'已有分析：';
+  const recordedWork=f.description.startsWith(prefix)
+    ? safe(f.description.slice(prefix.length))
+      .split(/（昨日事件是否同源仍需核实）|；昨日报错是否来自同一原因仍需核实。/,1)[0].trim()
+      .replace(/[。；]+$/,'')
+    : '';
+  const lastSentence=recordedWork.slice(0,140).lastIndexOf('。');
+  const shortWork=recordedWork.length>140&&lastSentence>=0
+    ? recordedWork.slice(0,lastSentence+1)
+    : compact(recordedWork,140);
+  const work=shortWork
+    ? `  **${change?'已改':'已查'}** ${shortWork}`
+    : f.context
+      ? `  **已查** 取到当天的${f.context.page==='unknown'||f.context.page==='other'?'':contextFeature(f)}报错样本`
+      : '';
+  const labels=new Set(f.prs.map(p=>p.label));
+  let next:string;
+  if(labels.has('已合并')) {
+    next='核对生产版本是否包含已合并的提交，再查这个报错在该版本是否还有新事件。';
+  } else if(labels.has('待合并 · 待审查')||labels.has('待合并 · 草稿')) {
+    next='对照 PR 的复现步骤跑一次回归，确认原触发操作能完成。';
+  } else if(labels.has('状态暂未核实')) {
+    next='先回读关联 PR 的状态，确认改动是否已合并。';
+  } else if(change) {
+    next='找到包含这次改动的版本，用原触发操作核对是否仍报错。';
+  } else if(recordedWork&&f.category==='repair') {
+    next='按已确认的触发条件复测，检查报错时页面还能否完成后续操作。';
+  } else if(f.context) {
+    next='按样本的浏览器、页面和触发操作复现，对照调用栈确认异常发生在哪一步。';
+  } else {
+    next='从当天取一条完整事件，核对页面、浏览器和首个业务栈帧。';
+  }
+  return [`• **[${summaryTitle(f)}](${f.url})**`,work,f.prs.length?`  ${prLinks(f)}`:'',`  **接下来** ${next}`].filter(Boolean).join('\n');
+}
 const privateIssueNames:Record<string,string>={
   'Project event replay requested':'项目事件请求回放',
   'Chat stream completed':'聊天流结束时报错',
@@ -108,10 +134,9 @@ export function dailyCard(d:DailyReport,destination:'group'|'private'='group'):R
     metric('🔎 问题分布',d.issueCount+' 个','新增 '+d.newCount+' 个'),
     metric('🛠️ PR 进度',prCounts.merged+' 已合并',`待合并 ${prCounts.pending} · 已关闭 ${prCounts.closed}${prCounts.unknown?' · 待核实 '+prCounts.unknown:''}`)
   ]),md('昨日完整自然日 · 报错不等于业务失败 · PR 按链接去重',{text_size:'notation'})];
-  const comparison=d.previousTotal?(d.total===d.previousTotal?'与前日持平':`较前日${d.total>d.previousTotal?'增加':'减少'} ${(Math.abs(d.total-d.previousTotal)/d.previousTotal*100).toFixed(1)}%`):'前日无报错记录';
-  const major=[...primary.slice(0,2),...progress.slice(0,1)];
-  const overview=!d.findings.length?'昨天没有记录到错误问题。':`昨日报错${comparison}。`;
-  elements.push(section('昨日总结',[md(overview),md(major.map(f=>'• '+summarySentence(f,d.timezone)).join('\n'))]));
+  const major=[...progress.slice(0,1),...primary.slice(0,2)];
+  if(major.length) elements.push(section('昨日总结',major.map(f=>md(summaryItem(f)))));
+  else if(!d.findings.length) elements.push(section('昨日总结',[md('昨天没有记录到错误问题。')]));
   if(primary.length)elements.push(emphasized('🔶 重点关注','按排查优先级排列；业务影响尚未核实。','orange-50',primary.map(f=>item(f))));
   if(progress.length)elements.push(emphasized('🛠️ 修复进展','关联 PR 最新状态；已合并不代表已上线。','blue-50',progress.map(f=>item(f,true))));
   if(secondary.length)elements.push(section('持续观察与其他新增',secondary.map(f=>item(f))));
