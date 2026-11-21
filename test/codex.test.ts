@@ -271,6 +271,24 @@ test('sandbox automation preserves MCP confirmation on new and resumed turns wit
 });
 
 
+test('Sentry automatic verification skips Computer Use prompts without approving any tool request', async () => {
+  const rpc = new FakeRpc(), requests: HumanRequest[] = [];
+  const {executor, hooks} = setup(rpc, requests);
+  const form = {mode: 'form', message: 'Confirm tool use', requestedSchema: {type: 'object', properties: {}}};
+  rpc.onTurn = () => {
+    rpc.emit('mcpServer/elicitation/request', {...form, serverName: 'cua_repl'}, 31);
+    assert.equal(requests.length, 0);
+    assert.deepEqual(rpc.writes[0], {id: 31, result: {action: 'cancel', content: null, _meta: null}});
+    rpc.emit('mcpServer/elicitation/request', {...form, serverName: 'other'}, 32);
+    assert.equal(requests.length, 1);
+    requests[0].resolve('decline');
+    rpc.finish();
+  };
+  await executor.run({...task, automaticValidation: true, permissionMode: 'sandbox-auto'},
+    {path: '.', sandbox: 'workspace-write'}, hooks, AbortSignal.timeout(5000));
+  assert.match(rpc.params['thread/start'].developerInstructions, /Record any outstanding browser acceptance/);
+});
+
 test('projectless final schema produces a proposal separately from user-facing prose on start and resume', async () => {
  for(const threadId of [null,'thread']){
   const rpc=new FakeRpc(),s=setup(rpc),proposals:string[]=[];s.hooks.proposeProject=id=>proposals.push(id);

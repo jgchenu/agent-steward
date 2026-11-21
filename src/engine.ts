@@ -82,7 +82,8 @@ export class Engine {
     this.config.codexProjects = next.codexProjects; this.config.projects = next.projects; this.config.defaultProject = next.defaultProject;
     for (const run of this.active.values()) {
       const t = run.task, p = next.projects[t.project];
-      if (permissionRank(this.executionPermission(t)) < permissionRank(t.permissionMode ?? 'ask')) {
+      const mode = this.automaticValidation(t) ? 'sandbox-auto' : permissionMode(this.config);
+      if (permissionRank(mode) < permissionRank(t.permissionMode ?? 'ask')) {
         run.abort.abort(new Error('审批模式已收紧，本轮执行已停止；已有改动保留，请继续任务以应用新设置。'));
       }
       try { assertAlertAuthorized(this.store,this.config,t); } catch {run.abort.abort(new Error('告警来源授权已变化，执行已停止。'));}
@@ -94,15 +95,13 @@ export class Engine {
       if (t.project !== CONVERSATION && (!p || p.path !== previous[t.project]?.path || p.workspaceMode !== previous[t.project]?.workspaceMode || (t.mode === 'workspace-write' && p.sandbox !== 'workspace-write'))) run.abort.abort(new Error('项目授权或执行位置已变化，执行已停止；已有改动保留。'));
     }
   }
-  private executionPermission(task:Task) {
-    const global=permissionMode(this.config);
-    if (task.mode!=='workspace-write'||task.requesterId) return global;
+  private automaticValidation(task: Task): boolean {
+    if (task.mode !== 'workspace-write' || task.requesterId) return false;
     try {
-      const binding=alertBindingForTask(this.store,task.id);
-      if (binding&&this.config.alertSources?.[binding.sourceId]?.automaticValidation
-        &&alertSourceKey(this.config,binding.sourceId)===binding.sourceKey) return 'sandbox-auto' as const;
-    } catch { /* The normal dispatch grant check rejects invalid provenance. */ }
-    return global;
+      const binding = alertBindingForTask(this.store, task.id);
+      return !!binding && this.config.alertSources?.[binding.sourceId]?.automaticValidation === true
+        && alertSourceKey(this.config, binding.sourceId) === binding.sourceKey;
+    } catch { return false; /* The dispatch grant check rejects invalid provenance. */ }
   }
   permissionState() {
     const runs = [...this.active.values()];
@@ -532,7 +531,9 @@ export class Engine {
         }
         continue;
       }
-      const task = { ...candidate, permissionMode: this.executionPermission(candidate), modelSelection: this.config.modelSelection ? {...this.config.modelSelection} : undefined };
+      const automaticValidation = this.automaticValidation(candidate);
+      const task: Task = { ...candidate, automaticValidation, permissionMode: automaticValidation ? 'sandbox-auto' : permissionMode(this.config),
+        modelSelection: this.config.modelSelection ? {...this.config.modelSelection} : undefined };
       const abort = new AbortController();
       this.store.set(task.id, 'running');
       if (task.conversation && !this.channel.acknowledge && task.nextAction!=='publish' && !isGroupAlertTask(this.store,task)) this.store.enqueue(task.chatId, '正在处理。', { kind: 'reply', taskId: task.id });

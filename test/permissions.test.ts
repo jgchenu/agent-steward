@@ -73,6 +73,7 @@ test('only authorized Sentry repair turns use sandbox validation, and disabling 
  const seen:Record<string,PermissionMode|undefined>={};
  const engine=new Engine(store,config,{run:async(task,_p,_h,signal)=>{
   seen[task.id]=task.permissionMode;
+  assert.equal(task.automaticValidation, task.id === repair.id);
   if (task.id!==repair.id) return 'done';
   return new Promise<string>((_,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));
  }},{send:async()=>{}});
