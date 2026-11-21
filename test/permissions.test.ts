@@ -44,7 +44,7 @@ test('console can enable Sentry validation without changing the source grant or 
  try{
   const source={kind:'sentry',enabled:true,project:'code',chatId:'oc_owner',mode:'workspace-write',
    sentry:{region:'us',organization:'example',projectId:'123',environment:'production',tokenEnv:'STEWARD_SENTRY_TEST_TOKEN'}};
-  writeFileSync(file,JSON.stringify({projects:{code:{codexProjectId:'c',label:'Code',path:dir,aliases:[],sandbox:'workspace-write',naturalMode:'workspace-write',worktree:{baseRef:'main',checks:[]}}},alertSources:{web:source}}));
+  writeFileSync(file,JSON.stringify({projects:{code:{codexProjectId:'c',label:'Code',path:dir,aliases:[],sandbox:'workspace-write',naturalMode:'workspace-write',workspaceMode:'isolated',worktree:{baseRef:'main',checks:[]}}},alertSources:{web:source}}));
   const registry=new WorkspaceRegistry(file,()=>[{id:'c',roots:[dir],name:'Code'}]),state=registry.state();
   const oldKey=alertSourceKey(loadConfig(file),'web');
   const payload={revision:state.revision,grants:state.projects.map(p=>({id:p.id,mode:p.mode}))};

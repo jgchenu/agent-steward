@@ -65,7 +65,7 @@ export class WorkspaceRegistry {
       const previous = raw.projects?.[grant.id];
       const p: any = { ...previous, codexProjectId: item.codexProjectId, path:item.path, label:item.label, aliases, sandbox:grant.mode === 'direct-write' ? 'workspace-write' : grant.mode, naturalMode:grant.mode === 'direct-write' ? 'workspace-write' : grant.mode };
       if (grant.mode === 'direct-write') p.workspaceMode = 'direct';
-      else if (grant.mode === 'workspace-write') delete p.workspaceMode;
+      else if (grant.mode === 'workspace-write' && p.workspaceMode === 'direct') delete p.workspaceMode;
       if (grant.mode === 'workspace-write' && !p.worktree) {
         if (!item.gitRepository) throw Error(`${item.label} 不是 Git 仓库根目录，无法创建独立副本；请选择“直接编辑项目”或“仅查看”。`);
         p.worktree = {baseRef:workspaceBase(item.path,item.label),checks:[]};
