@@ -23,7 +23,7 @@ export function workspacePage(nonce: string): string { return `<!doctype html>
 <p id="runtime-status" class="runtime-status" role="status" aria-live="polite"></p>
 <details class="permission-details"><summary>生效范围</summary><p>“需要额外权限时询问”在触及沙箱边界时询问，已允许的操作不会逐条弹窗。“自动审查权限请求”由 Codex 评估请求，也可能拒绝操作；需要人工决定时再找你。“限定目录内执行”对修改任务保留执行目录的写入限制并允许联网，越界写入直接拒绝。“不限制写入目录”取消修改任务的目录写入限制；只读任务仍只读且不自动获得联网权限。</p><p>目录写入限制不是虚拟机隔离。本机读取、浏览器和 MCP 等工具有各自的权限边界。放宽权限从下一轮生效，当前任务不会自动提权；收紧权限会停止受影响的执行，已有改动保留。浏览器或工具自身的确认、草稿 PR 发布及更换代码版本仍按各自流程处理。所选模式不授权自动合并或部署，Codex 账号与组织策略也可能限制它。</p></details>
 <p class="fine">项目访问方式决定在哪里工作；执行权限决定是否保留该目录的写入限制。仅查看的任务始终不允许修改文件。</p>
-<div id="sentry-validation" hidden><h3>Sentry 自动验证</h3><p>开启后，分身在隔离副本中直接执行测试和本地预览，可联网，目录外写入仍受限。保存后从下一轮执行生效。</p><div id="sentry-validation-options" class="permission-modes"></div></div>
+<div id="sentry-validation" hidden><h3>Sentry 自动验证</h3><p>开启后，分身在隔离副本中直接执行测试和本地预览，可联网。需要额外确认的浏览器操作会跳过，待验收事项写在结果里。保存后从下一轮执行生效。</p><div id="sentry-validation-options" class="permission-modes"></div></div>
 </section><div class="intro"><div><strong>和你的 Codex 使用同一份项目列表</strong><p>聊天、群消息和附件分析无需选择项目。读取或修改代码时，分身只使用你已授权的 Codex 项目。<br>新增项目请在 Codex 中管理；出现在列表中不会自动授权。直接编辑会修改当前项目文件；独立副本从已提交版本创建，不包含原目录未提交的改动。</p></div></div>
 <div class="toolbar"><h2>Codex 项目<span id="count" class="muted"></span></h2><input id="search" type="search" placeholder="搜索项目名称或路径" aria-label="搜索项目"></div><div id="projects"></div>
 <p class="fine">项目来源：本机 Codex。列表定期同步；设置需要保存后生效。多目录项目当前只授权显示的主目录，关联目录不自动授权。撤销权限会停止不再被允许的执行，已有文件保留。</p><div id="status" role="status" aria-live="polite"></div></main>

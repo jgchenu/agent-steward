@@ -29,6 +29,7 @@ export interface Task {
   projectCandidateGrants?: Record<string,string>;
   modelSelection?: import('./models.js').ModelSelection;
   permissionMode?: PermissionMode;
+  automaticValidation?: boolean;
   id: string; chatId: string; project: string; prompt: string; status: Status;
   threadId: string | null; result: string | null; createdAt: string; updatedAt: string;
   evidenceDirectory?: string;
