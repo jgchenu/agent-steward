@@ -70,6 +70,18 @@ test('failed turns are not successful deliverables even if they contain prose', 
   await assert.rejects(setup(rpc).run(), /failed/);
 });
 
+test('explains provider model rejection without exposing raw JSON or repeating the turn', async () => {
+  const rpc = new FakeRpc();
+  const message = JSON.stringify({type:'error', status:400,
+    error:{type:'invalid_request_error', code:'model_not_found', message:'Private provider diagnostic'}});
+  rpc.onTurn = () => rpc.emit('turn/completed', { turn: { status: 'failed', error: { message } } });
+  await assert.rejects(setup(rpc).run({...task,threadId:'thread'}), {
+    message:'分身账号用不了当前模型，请在分身控制台换一个可用模型。'
+  });
+  assert.deepEqual(rpc.calls, ['initialize', 'subscription', 'thread/resume', 'turn/start']);
+  assert.equal(rpc.closed, true);
+});
+
 test('command approvals are explicit and accept only the individual request', async () => {
   const rpc = new FakeRpc(), requests: HumanRequest[] = [];
   const s = setup(rpc, requests);
